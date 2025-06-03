@@ -21,6 +21,10 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Configure Git for private repos
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       # Cache bin folder (Go tools and built binaries)
       - name: Cache bin folder
         uses: actions/cache@v4
@@ -29,6 +33,13 @@ jobs:
           key: ${{ runner.os }}-bin-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
           restore-keys: |
             ${{ runner.os }}-bin-
+
+      - name: Install dependencies
+        run: |
+          go mod download
+        env:
+          GOPRIVATE: github.com/vitistack/*
+          GOPROXY: direct
 
       - name: Build
         run: |
@@ -50,6 +61,10 @@ jobs:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
+
+      - name: Configure Git for private repos
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
       # Cache bin folder (Go tools and built binaries)
       - name: Cache bin folder
@@ -96,6 +111,10 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Configure Git for private repos
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       - name: Run security scan
         run: |
           if [ ! -f ~/go/bin/govulncheck ]; then
@@ -105,3 +124,6 @@ jobs:
             echo "Using cached govulncheck"
           fi
           govulncheck ./...
+        env:
+          GOPRIVATE: github.com/vitistack/*
+          GOPROXY: direct

@@ -23,11 +23,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Configure Git for private repos
+        run: |
+          git config --global url."https://${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       - name: Install dependencies
         run: |
-          go get ./...
-          go get -t ./...
-          go vet ./...
+          go mod download
+        env:
+          GOPRIVATE: github.com/vitistack/*
+          GOPROXY: direct
 
       - name: Build
         run: |
@@ -36,6 +41,9 @@ jobs:
           echo "Version $VERSION"
           touch cmd/isbuilt
           echo "VERSION=$VERSION" >> $GITHUB_ENV
+        env:
+          GOPRIVATE: github.com/vitistack/*
+          GOPROXY: direct
 
   create-oci-image:
     name: Create OCI Image
