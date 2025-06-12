@@ -26,6 +26,7 @@ rules:
   - vitistack.io
   resources:
   - kubernetesclusters
+  - machines
   verbs:
   - create
   - delete
@@ -44,6 +45,7 @@ rules:
   - vitistack.io
   resources:
   - kubernetesclusters/status
+  - machines/status
   verbs:
   - get
   - patch

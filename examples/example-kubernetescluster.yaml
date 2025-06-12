@@ -1,0 +1,16 @@
+apiVersion: vitistack.io/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: example-cluster
+spec:
+  topology:
+    controlplane:
+      replicas: 3
+    workers:
+      nodePools:
+        - name: worker-pool-1
+          replicas: 2
+          machineClass: standard
+        - name: worker-pool-2
+          replicas: 1
+          machineClass: large

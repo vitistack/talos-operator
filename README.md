@@ -2,6 +2,45 @@
 
 Talos operator for maintaining talos os
 
+## Features
+
+### KubernetesCluster Reconciler
+
+The operator includes a comprehensive reconciler for KubernetesCluster CRDs that:
+
+- **Watches KubernetesCluster resources** and generates Machine manifests based on cluster topology
+- **Saves machine manifests** as YAML files in `hack/results/{cluster-name}/` for debugging and manual inspection
+- **Applies Machine resources** to Kubernetes with proper owner references for automatic cleanup
+- **Handles deletion** by cleaning up associated machines and generated files
+- **Uses finalizers** to ensure graceful resource cleanup
+
+#### Quick Start
+
+1. Deploy the operator:
+
+   ```bash
+   make deploy IMG=ghcr.io/vitistack/talos-operator:latest
+   ```
+
+2. Create a KubernetesCluster:
+
+   ```bash
+   kubectl apply -f examples/simple-kubernetescluster.yaml
+   ```
+
+3. Verify machines are created:
+
+   ```bash
+   kubectl get machines -l cluster.vitistack.io/cluster-name=simple-cluster
+   ```
+
+4. Check generated files:
+   ```bash
+   ls hack/results/simple-cluster/
+   ```
+
+See [`docs/kubernetescluster-reconciler.md`](docs/kubernetescluster-reconciler.md) for detailed documentation.
+
 # Documentation
 
 Using https://kubebuilder.io and https://kubevirt.io/user-guide/

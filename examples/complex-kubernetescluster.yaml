@@ -1,0 +1,20 @@
+apiVersion: vitistack.io/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: complex-cluster
+  labels:
+    environment: production
+    region: us-west-2
+spec:
+  topology:
+    controlplane:
+      replicas: 3
+      machineClass: "large"
+    workers:
+      nodePools:
+        - name: "workers"
+          replicas: 5
+          machineClass: "medium"
+        - name: "gpu-workers"
+          replicas: 2
+          machineClass: "gpu-large"

@@ -1,0 +1,47 @@
+apiVersion: vitistack.io/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: simple-cluster
+spec:
+  # Empty spec will use defaults:
+  # - 1 control plane node
+  # - 1 worker nodes
+  topology:
+    version: "1.33" # Defaults to the latest supported version
+    controlplane:
+      # Defaults to 1 replica
+      replicas: 1
+      machineClass: standard
+      provider: kubevirt
+      storage:
+        - class: "standard"
+          path: "/var/lib/vitistack/kubevirt"
+          size: "10Gi"
+      metadata:
+        annotations:
+          environment: development
+          region: west-trondelag
+        labels:
+          environment: development
+          region: west-trondelag
+    workers:
+      nodePools:
+        - name: default-worker-pool
+          # Defaults to 1 replica
+          replicas: 1
+          # Defaults to "standard" machine class
+          machineClass: standard
+          autoscaling:
+            enabled: true
+            minReplicas: 1
+            maxReplicas: 5
+            scalingRules:
+              - "cpu"
+          metadata:
+            annotations:
+              environment: development
+              region: west-trondelag
+            labels:
+              environment: development
+              region: west-trondelag
+          provider: kubevirt

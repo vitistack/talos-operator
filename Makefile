@@ -92,6 +92,21 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
+##@ Dependencies
+
+deps: ## Download and verify dependencies
+	@echo "Downloading dependencies..."
+	@go mod download
+	@go mod verify
+	@go mod tidy
+	@echo "Dependencies updated!"
+
+update-deps: ## Update dependencies
+	@echo "Updating dependencies..."
+	@go get -u ./...
+	@go mod tidy
+	@echo "Dependencies updated!"
+
 ##@ Build
 
 .PHONY: build
@@ -136,6 +151,7 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
 
+
 ##@ Deployment
 
 ifndef ignore-not-found
@@ -159,20 +175,45 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
-##@ Dependencies
+##@ CRDs & Resources
+.PHONY: install-crds download-crds uninstall
 
-deps: ## Download and verify dependencies
-	@echo "Downloading dependencies..."
-	@go mod download
-	@go mod verify
-	@go mod tidy
-	@echo "Dependencies updated!"
+install-viti-crds: ## Install CRDs into a cluster
+	@echo "${GREEN}Installing CRDs...${RESET}"
+	${KUBECTL} apply -f hack/crds/
 
-update-deps: ## Update dependencies
-	@echo "Updating dependencies..."
-	@go get -u ./...
-	@go mod tidy
-	@echo "Dependencies updated!"
+download-viti-crds: ## Download CRDs from private repository (requires GITHUB_TOKEN)
+	@echo "${GREEN}Downloading CRDs from private repository...${RESET}"
+	@if [ -z "$$GITHUB_TOKEN" ]; then \
+		echo "${RED}Error: GITHUB_TOKEN environment variable is required for private repository access${RESET}"; \
+		exit 1; \
+	fi
+	@mkdir -p hack/crds
+	@curl -H "Authorization: token $$GITHUB_TOKEN" \
+		-H "Accept: application/vnd.github.v3.raw" \
+		-o hack/crds/vitistack.io_datacenters.yaml \
+		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_datacenters.yaml
+	@curl -H "Authorization: token $$GITHUB_TOKEN" \
+		-H "Accept: application/vnd.github.v3.raw" \
+		-o hack/crds/vitistack.io_kubernetesproviders.yaml \
+		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_kubernetesproviders.yaml
+	@curl -H "Authorization: token $$GITHUB_TOKEN" \
+		-H "Accept: application/vnd.github.v3.raw" \
+		-o hack/crds/vitistack.io_machineproviders.yaml \
+		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_machineproviders.yaml
+	@curl -H "Authorization: token $$GITHUB_TOKEN" \
+		-H "Accept: application/vnd.github.v3.raw" \
+		-o hack/crds/vitistack.io_machines.yaml \
+		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_machines.yaml
+	@curl -H "Authorization: token $$GITHUB_TOKEN" \
+		-H "Accept: application/vnd.github.v3.raw" \
+		-o hack/crds/vitistack.io_kubernetesclusters.yaml \
+		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_kubernetesclusters.yaml
+	@echo "${GREEN}CRDs downloaded successfully${RESET}"
+
+uninstall-viti-crds: check-kubectl ## Uninstall CRDs into a cluster
+	@echo "${RED}Uninstalling CRDs...${RESET}"
+	${KUBECTL} delete -f hack/crds/
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin
@@ -195,6 +236,8 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.1.6
+
+##@ Tools
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.

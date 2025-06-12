@@ -21,6 +21,8 @@
 go.work
 go.work.sum
 
+__debug_bin*
+
 # env file
 .env
 
@@ -30,3 +32,6 @@ cover.out
 coverage.out
 coverage.html
 cover.html
+
+hack/crds/
+hack/results
