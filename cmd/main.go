@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	// +kubebuilder:scaffold:imports
 	"crypto/tls"
 	"flag"
 	"os"
@@ -24,12 +25,14 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/api/controllers"
+	"github.com/vitistack/talos-operator/internal/k8sclient"
 	"github.com/vitistack/talos-operator/internal/services/initializationservice"
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
-
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -37,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
-	// +kubebuilder:scaffold:imports
 )
 
 var (
@@ -48,6 +50,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
+	utilruntime.Must(vitistackcrdsv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -70,6 +73,7 @@ func main() {
 	// Parse command-line flags
 	flags := parseFlags()
 
+	k8sclient.Init()
 	// Initialization checks
 	initializationservice.CheckPrerequisites()
 
@@ -103,6 +107,8 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	setupReconcilers(mgr, metricsCertWatcher, webhookCertWatcher)
 
 	// Add health and readiness checks
 	setupHealthChecks(mgr)
@@ -271,6 +277,29 @@ func setupHealthChecks(mgr ctrl.Manager) {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+}
+
+func setupReconcilers(mgr ctrl.Manager, metricsCertWatcher *certwatcher.CertWatcher, webhookCertWatcher *certwatcher.CertWatcher) {
+	// Add reconcilers here
+	// Example:
+	// if err := (&controllers.MyReconciler{
+	// 	Client: mgr.GetClient(),
+	// 	Scheme: mgr.GetScheme(),
+	// }).SetupWithManager(mgr); err != nil {
+	// 	setupLog.Error(err, "unable to create controller", "controller", "MyReconciler")
+	// 	os.Exit(1)
+	// }
+
+	// +kubebuilder:scaffold:builder
+
+	setupLog.Info("All controllers and webhooks are set up")
+	if err := (&controllers.KubernetesClusterReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "KubernetesClusterReconciler")
 		os.Exit(1)
 	}
 }
