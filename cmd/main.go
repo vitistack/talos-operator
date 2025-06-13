@@ -29,6 +29,7 @@ import (
 	"github.com/vitistack/talos-operator/api/controllers"
 	"github.com/vitistack/talos-operator/internal/k8sclient"
 	"github.com/vitistack/talos-operator/internal/services/initializationservice"
+	"github.com/vitistack/talos-operator/internal/settings"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -72,6 +73,8 @@ type Flags struct {
 func main() {
 	// Parse command-line flags
 	flags := parseFlags()
+
+	settings.Init()
 
 	k8sclient.Init()
 	// Initialization checks

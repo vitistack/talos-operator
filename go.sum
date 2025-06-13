@@ -1,7 +1,7 @@
 cel.dev/expr v0.24.0 h1:56OvJKSH3hDGL0ml5uSxZmz3/3Pq4tJ+fb1unVLAFcY=
 cel.dev/expr v0.24.0/go.mod h1:hLPLo1W4QUmuYdA72RBX06QTs6MXw941piREPl3Yfiw=
-github.com/NorskHelsenett/ror v1.2.0-rc11 h1:k/5wWG6SvcbymUOTkGHdcPbNyOeF4/9+abkXdJ4jD2U=
-github.com/NorskHelsenett/ror v1.2.0-rc11/go.mod h1:T0jklZJ9s77MgBG21rqJ0c5tFNRDxqKWCPCyTHFl3ow=
+github.com/NorskHelsenett/ror v1.2.0-rc13 h1:xoif5vgGX3HXn5CzUUt7TuO6GLUflkP4PkcftZ20iso=
+github.com/NorskHelsenett/ror v1.2.0-rc13/go.mod h1:4HEqRPT6540dTRblAI92I9MzOL7kEPemXrp1UpZBPC8=
 github.com/antlr4-go/antlr/v4 v4.13.1 h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=
 github.com/antlr4-go/antlr/v4 v4.13.1/go.mod h1:GKmUxMtwp6ZgGwZSva4eWPC5mS6vUAmOABFgjdkM7Nw=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
@@ -187,8 +187,8 @@ github.com/twitchyliquid64/golang-asm v0.15.1 h1:SU5vSMR7hnwNxj24w34ZyCi/FmDZTkS
 github.com/twitchyliquid64/golang-asm v0.15.1/go.mod h1:a1lVb/DtPvCB8fslRZhAngC2+aY1QWCk3Cedj/Gdt08=
 github.com/ugorji/go/codec v1.2.14 h1:yOQvXCBc3Ij46LRkRoh4Yd5qK6LVOgi0bYOXfb7ifjw=
 github.com/ugorji/go/codec v1.2.14/go.mod h1:UNopzCgEMSXjBc6AOMqYvWC1ktqTAfzJZUZgYf6w6lg=
-github.com/vitistack/crds v0.0.1-alpha10 h1:rtRkxrugLigPw9b+qp2xmm+70Tfn2hMx6fg2lI6HJ6U=
-github.com/vitistack/crds v0.0.1-alpha10/go.mod h1:nxBjATITgnbP2iE8N/bVFXUGCeKG+GheV2UeoZdymiM=
+github.com/vitistack/crds v0.0.1-alpha12 h1:4COnjXd5vbo7LLB5r8tTreMwTzNfkmgTM6Gq8X+T9hk=
+github.com/vitistack/crds v0.0.1-alpha12/go.mod h1:ScniT0/dWZlfL53jS3PyaBYdpIeb4hMlw22OURS8deM=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
