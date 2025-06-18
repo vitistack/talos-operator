@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/spf13/viper"
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/pkg/consts"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -87,10 +89,13 @@ func (r *KubernetesClusterReconciler) reconcileMachines(ctx context.Context, clu
 		return fmt.Errorf("failed to generate machines from cluster spec: %w", err)
 	}
 
+	persistMachineManifests := viper.GetBool(consts.PERSIST_MACHINE_MANIFESTS)
 	// Save machines to files
-	if err := r.SaveMachinesToFiles(machines, cluster.Name); err != nil {
-		log.Error(err, "Failed to save machines to files")
-		// Don't fail reconciliation if file save fails, but log the error
+	if persistMachineManifests {
+		if err := r.SaveMachinesToFiles(machines, cluster.Name); err != nil {
+			log.Error(err, "Failed to save machines to files")
+			// Don't fail reconciliation if file save fails, but log the error
+		}
 	}
 
 	// Apply machines to Kubernetes
@@ -201,7 +206,7 @@ func (r *KubernetesClusterReconciler) GenerateMachinesFromCluster(cluster *vitis
 
 // SaveMachinesToFiles saves machine manifests as YAML files in hack/results/
 func (r *KubernetesClusterReconciler) SaveMachinesToFiles(machines []*vitistackcrdsv1alpha1.Machine, clusterName string) error {
-	baseDir := "hack/results"
+	baseDir := viper.GetString(consts.MACHINE_MANIFESTS_PATH)
 	clusterDir := filepath.Join(baseDir, clusterName)
 
 	// Create cluster-specific directory
