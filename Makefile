@@ -19,6 +19,21 @@ CONTAINER_TOOL ?= docker
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
+# Basic colors
+BLACK=\033[0;30m
+RED=\033[0;31m
+GREEN=\033[0;32m
+YELLOW=\033[0;33m
+BLUE=\033[0;34m
+PURPLE=\033[0;35m
+CYAN=\033[0;36m
+WHITE=\033[0;37m
+
+# Text formatting
+BOLD=\033[1m
+UNDERLINE=\033[4m
+RESET=\033[0m
+
 .PHONY: all
 all: build
 
@@ -71,11 +86,11 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 .PHONY: test-e2e
 test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
+		echo -e "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
 	@$(KIND) get clusters | grep -q 'kind' || { \
-		echo "No Kind cluster is running. Please start a Kind cluster before running the e2e tests."; \
+		echo -e "No Kind cluster is running. Please start a Kind cluster before running the e2e tests."; \
 		exit 1; \
 	}
 	go test ./test/e2e/ -v -ginkgo.v
@@ -95,17 +110,17 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Dependencies
 
 deps: ## Download and verify dependencies
-	@echo "Downloading dependencies..."
+	@echo -e "Downloading dependencies..."
 	@go mod download
 	@go mod verify
 	@go mod tidy
-	@echo "Dependencies updated!"
+	@echo -e "Dependencies updated!"
 
 update-deps: ## Update dependencies
-	@echo "Updating dependencies..."
+	@echo -e "Updating dependencies..."
 	@go get -u ./...
 	@go mod tidy
-	@echo "Dependencies updated!"
+	@echo -e "Dependencies updated!"
 
 ##@ Build
 
@@ -212,9 +227,9 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 
 .PHONY: setup-envtest
 setup-envtest: envtest ## Download the binaries required for ENVTEST in the local bin directory.
-	@echo "Setting up envtest binaries for Kubernetes version $(ENVTEST_K8S_VERSION)..."
+	@echo -e "Setting up envtest binaries for Kubernetes version $(ENVTEST_K8S_VERSION)..."
 	@$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path || { \
-		echo "Error: Failed to set up envtest binaries for version $(ENVTEST_K8S_VERSION)."; \
+		echo -e "Error: Failed to set up envtest binaries for version $(ENVTEST_K8S_VERSION)."; \
 		exit 1; \
 	}
 
@@ -236,7 +251,7 @@ define go-install-tool
 @[ -f "$(1)-$(3)" ] || { \
 set -e; \
 package=$(2)@$(3) ;\
-echo "Downloading $${package}" ;\
+echo -e "Downloading $${package}" ;\
 rm -f $(1) || true ;\
 GOBIN=$(LOCALBIN) go install $${package} ;\
 mv $(1) $(1)-$(3) ;\
@@ -248,71 +263,72 @@ endef
 .PHONY: k8s-install-viti-crds k8s-download-viti-crds k8s-uninstall-viti-crds
 
 k8s-install-viti-crds: ## Install CRDs into a cluster
-	@echo "${GREEN}Installing CRDs...${RESET}"
+	@echo -e "${GREEN}Installing CRDs...${RESET}"
 	@if [ ! -d "hack/crds" ]; then \
-		echo "${RED}Error: hack/crds directory does not exist${RESET}"; \
-		echo "${YELLOW}Run 'make download-viti-crds' first to download the CRDs (requires GITHUB_TOKEN)${RESET}"; \
+		echo -e "${RED}Error: hack/crds directory does not exist${RESET}"; \
+		echo -e "${YELLOW}Run 'make download-viti-crds' first to download the CRDs (requires GITHUB_TOKEN)${RESET}"; \
 		exit 1; \
 	fi
 	@if [ -z "$$(find hack/crds -name '*.yaml' -type f 2>/dev/null)" ]; then \
-		echo "${RED}Error: No YAML files found in hack/crds directory${RESET}"; \
-		echo "${YELLOW}Run 'make download-viti-crds' first to download the CRDs (requires GITHUB_TOKEN)${RESET}"; \
+		echo -e "${RED}Error: No YAML files found in hack/crds directory${RESET}"; \
+		echo -e "${YELLOW}Run 'make download-viti-crds' first to download the CRDs (requires GITHUB_TOKEN)${RESET}"; \
 		exit 1; \
 	fi
-	@echo "Found CRD files:"
+	@echo -e "Found CRD files:"
 	@ls -1 hack/crds/*.yaml | sed 's/^/  - /'
 	${KUBECTL} apply -f hack/crds/
-	@echo "${GREEN}CRDs installed successfully${RESET}"
+	@echo -e "${GREEN}CRDs installed successfully${RESET}"
 
 k8s-download-viti-crds: ## Download CRDs from private repository (requires GITHUB_TOKEN)
-	@echo "${GREEN}Downloading CRDs from private repository...${RESET}"
-	@if [ -z "$$GITHUB_TOKEN" ]; then \
-		echo "${RED}Error: GITHUB_TOKEN environment variable is required for private repository access${RESET}"; \
+	@echo -e "${GREEN}Downloading CRDs from private repository...${RESET}"
+	@if [ -z "$(GITHUB_TOKEN)" ]; then \
+		echo -e "${RED}Error: GITHUB_TOKEN environment variable is required for private repository access${RESET}"; \
+		echo -e "${YELLOW}Please set your GITHUB_TOKEN environment variable${RESET}"; \
 		exit 1; \
 	fi
 	@mkdir -p hack/crds
 	@echo "Downloading vitistack.io_datacenters.yaml..."
-	@if ! curl --fail -H "Authorization: token $$GITHUB_TOKEN" \
+	@if ! curl --fail -H "Authorization: token $(GITHUB_TOKEN)" \
 		-H "Accept: application/vnd.github.v3.raw" \
 		-o hack/crds/vitistack.io_datacenters.yaml \
 		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_datacenters.yaml; then \
-		echo "${RED}Error: Failed to download vitistack.io_datacenters.yaml${RESET}"; \
+		echo -e "${RED}Error: Failed to download vitistack.io_datacenters.yaml${RESET}"; \
 		exit 1; \
 	fi
 	@echo "Downloading vitistack.io_kubernetesproviders.yaml..."
-	@if ! curl --fail -H "Authorization: token $$GITHUB_TOKEN" \
+	@if ! curl --fail -H "Authorization: token $(GITHUB_TOKEN)" \
 		-H "Accept: application/vnd.github.v3.raw" \
 		-o hack/crds/vitistack.io_kubernetesproviders.yaml \
 		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_kubernetesproviders.yaml; then \
-		echo "${RED}Error: Failed to download vitistack.io_kubernetesproviders.yaml${RESET}"; \
+		echo -e "${RED}Error: Failed to download vitistack.io_kubernetesproviders.yaml${RESET}"; \
 		exit 1; \
 	fi
 	@echo "Downloading vitistack.io_machineproviders.yaml..."
-	@if ! curl --fail -H "Authorization: token $$GITHUB_TOKEN" \
+	@if ! curl --fail -H "Authorization: token $(GITHUB_TOKEN)" \
 		-H "Accept: application/vnd.github.v3.raw" \
 		-o hack/crds/vitistack.io_machineproviders.yaml \
 		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_machineproviders.yaml; then \
-		echo "${RED}Error: Failed to download vitistack.io_machineproviders.yaml${RESET}"; \
+		echo -e "${RED}Error: Failed to download vitistack.io_machineproviders.yaml${RESET}"; \
 		exit 1; \
 	fi
 	@echo "Downloading vitistack.io_machines.yaml..."
-	@if ! curl --fail -H "Authorization: token $$GITHUB_TOKEN" \
+	@if ! curl --fail -H "Authorization: token $(GITHUB_TOKEN)" \
 		-H "Accept: application/vnd.github.v3.raw" \
 		-o hack/crds/vitistack.io_machines.yaml \
 		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_machines.yaml; then \
-		echo "${RED}Error: Failed to download vitistack.io_machines.yaml${RESET}"; \
+		echo -e "${RED}Error: Failed to download vitistack.io_machines.yaml${RESET}"; \
 		exit 1; \
 	fi
 	@echo "Downloading vitistack.io_kubernetesclusters.yaml..."
-	@if ! curl --fail -H "Authorization: token $$GITHUB_TOKEN" \
+	@if ! curl --fail -H "Authorization: token $(GITHUB_TOKEN)" \
 		-H "Accept: application/vnd.github.v3.raw" \
 		-o hack/crds/vitistack.io_kubernetesclusters.yaml \
 		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_kubernetesclusters.yaml; then \
-		echo "${RED}Error: Failed to download vitistack.io_kubernetesclusters.yaml${RESET}"; \
+		echo -e "${RED}Error: Failed to download vitistack.io_kubernetesclusters.yaml${RESET}"; \
 		exit 1; \
 	fi
-	@echo "${GREEN}CRDs downloaded successfully${RESET}"
+	@echo -e "${GREEN}CRDs downloaded successfully${RESET}"
 
 k8s-uninstall-viti-crds: check-kubectl ## Uninstall CRDs into a cluster
-	@echo "${RED}Uninstalling CRDs...${RESET}"
+	@echo -e "${RED}Uninstalling CRDs...${RESET}"
 	${KUBECTL} delete -f hack/crds/

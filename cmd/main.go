@@ -130,7 +130,7 @@ func parseFlags() *Flags {
 
 	flag.StringVar(&flags.MetricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
-	flag.StringVar(&flags.ProbeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&flags.ProbeAddr, "health-probe-bind-address", ":8082", "The address the probe endpoint binds to.")
 	flag.BoolVar(&flags.EnableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -285,24 +285,12 @@ func setupHealthChecks(mgr ctrl.Manager) {
 }
 
 func setupReconcilers(mgr ctrl.Manager, metricsCertWatcher *certwatcher.CertWatcher, webhookCertWatcher *certwatcher.CertWatcher) {
-	// Add reconcilers here
-	// Example:
-	// if err := (&controllers.MyReconciler{
-	// 	Client: mgr.GetClient(),
-	// 	Scheme: mgr.GetScheme(),
-	// }).SetupWithManager(mgr); err != nil {
-	// 	setupLog.Error(err, "unable to create controller", "controller", "MyReconciler")
-	// 	os.Exit(1)
-	// }
-
 	// +kubebuilder:scaffold:builder
 
 	setupLog.Info("All controllers and webhooks are set up")
-	if err := (&controllers.KubernetesClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "KubernetesClusterReconciler")
+	kubernetesClusterReconciler := controllers.NewKubernetesClusterReconciler(mgr.GetClient(), mgr.GetScheme())
+	if err := kubernetesClusterReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Machine")
 		os.Exit(1)
 	}
 }
