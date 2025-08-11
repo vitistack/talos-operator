@@ -181,8 +181,8 @@ github.com/twitchyliquid64/golang-asm v0.15.1 h1:SU5vSMR7hnwNxj24w34ZyCi/FmDZTkS
 github.com/twitchyliquid64/golang-asm v0.15.1/go.mod h1:a1lVb/DtPvCB8fslRZhAngC2+aY1QWCk3Cedj/Gdt08=
 github.com/ugorji/go/codec v1.3.0 h1:Qd2W2sQawAfG8XSvzwhBeoGq71zXOC/Q1E9y/wUcsUA=
 github.com/ugorji/go/codec v1.3.0/go.mod h1:pRBVtBSKl77K30Bv8R2P+cLSGaTtex6fsA2Wjqmfxj4=
-github.com/vitistack/crds v0.0.1-alpha17 h1:SWJlokNh430FEqnKgf7ZwM1gabobPW0Kqf9X97W3RkU=
-github.com/vitistack/crds v0.0.1-alpha17/go.mod h1:VHUYsWpY2O8YTgAhibMl/YMLEkDCILcNHBHO1yW4gHE=
+github.com/vitistack/crds v0.0.1-alpha18 h1:fb0Y4IOaY00PE3k0yx4g4HxTWEOCCBQn7Oq7X+T+Pfs=
+github.com/vitistack/crds v0.0.1-alpha18/go.mod h1:VHUYsWpY2O8YTgAhibMl/YMLEkDCILcNHBHO1yW4gHE=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
 github.com/yuin/goldmark v1.1.27/go.mod h1:3hX8gzYuyVAZsxl0MRgGTJEmQBFcNTphYh9decYSb74=
