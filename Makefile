@@ -287,12 +287,12 @@ k8s-download-viti-crds: ## Download CRDs from private repository (requires GITHU
 		exit 1; \
 	fi
 	@mkdir -p hack/crds
-	@echo "Downloading vitistack.io_datacenters.yaml..."
+	@echo "Downloading vitistack.io_vitistacks.yaml..."
 	@if ! curl --fail -H "Authorization: token $(GITHUB_TOKEN)" \
 		-H "Accept: application/vnd.github.v3.raw" \
-		-o hack/crds/vitistack.io_datacenters.yaml \
-		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_datacenters.yaml; then \
-		echo -e "${RED}Error: Failed to download vitistack.io_datacenters.yaml${RESET}"; \
+		-o hack/crds/vitistack.io_vitistacks.yaml \
+		https://api.github.com/repos/vitistack/crds/contents/crds/vitistack.io_vitistacks.yaml; then \
+		echo -e "${RED}Error: Failed to download vitistack.io_vitistacks.yaml${RESET}"; \
 		exit 1; \
 	fi
 	@echo "Downloading vitistack.io_kubernetesproviders.yaml..."
