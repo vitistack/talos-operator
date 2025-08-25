@@ -79,10 +79,18 @@ func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitis
 	// Extract machine information needed for Talos
 	machineInfos := t.extractMachineInfos(readyMachines)
 
+	// Fetch disk info and install talos on disk
+	if err := t.installTalosOnDisk(ctx, machineInfos); err != nil {
+		return fmt.Errorf("failed to install Talos on disk: %w", err)
+	}
+
 	// Generate Talos configuration
 	if err := t.generateTalosConfig(ctx, cluster, machineInfos); err != nil {
 		return fmt.Errorf("failed to generate Talos config: %w", err)
 	}
+
+	// todo registert VIP ip addresses to NAM
+	// write to a crd, so others can handle load balancing of control planes
 
 	// Bootstrap the cluster
 	if err := t.bootstrapTalosCluster(ctx, cluster, machineInfos); err != nil {
@@ -91,6 +99,11 @@ func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitis
 
 	log.Info("Successfully reconciled Talos cluster", "cluster", cluster.Name)
 	return nil
+}
+
+func (t *TalosManager) installTalosOnDisk(ctx context.Context, machineInfos []MachineInfo) error {
+	// todo implement
+	return fmt.Errorf("not implemented")
 }
 
 // getClusterMachines retrieves all machines associated with the cluster

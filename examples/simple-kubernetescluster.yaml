@@ -45,7 +45,7 @@ spec:
           # Defaults to "standard" machine class
           machineClass: standard
           autoscaling:
-            enabled: true
+            enabled: false
             minReplicas: 1
             maxReplicas: 5
             scalingRules:
