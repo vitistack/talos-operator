@@ -20,8 +20,11 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/onsi/ginkgo/v2"
@@ -62,16 +65,29 @@ func Run(cmd *exec.Cmd) (string, error) {
 
 // InstallPrometheusOperator installs the prometheus Operator to be used to export the enabled metrics.
 func InstallPrometheusOperator() error {
-	url := fmt.Sprintf(prometheusOperatorURL, prometheusOperatorVersion)
-	cmd := exec.Command("kubectl", "create", "-f", url)
+	bundleURL := fmt.Sprintf(prometheusOperatorURL, prometheusOperatorVersion)
+	if err := validateReleaseURL(bundleURL, []string{
+		"/prometheus-operator/prometheus-operator/releases/download/",
+	}); err != nil {
+		return err
+	}
+	// #nosec G204 - test helper executes kubectl with a pinned, validated HTTPS URL
+	cmd := exec.Command("kubectl", "create", "-f", bundleURL)
 	_, err := Run(cmd)
 	return err
 }
 
 // UninstallPrometheusOperator uninstalls the prometheus
 func UninstallPrometheusOperator() {
-	url := fmt.Sprintf(prometheusOperatorURL, prometheusOperatorVersion)
-	cmd := exec.Command("kubectl", "delete", "-f", url)
+	bundleURL := fmt.Sprintf(prometheusOperatorURL, prometheusOperatorVersion)
+	if err := validateReleaseURL(bundleURL, []string{
+		"/prometheus-operator/prometheus-operator/releases/download/",
+	}); err != nil {
+		warnError(err)
+		return
+	}
+	// #nosec G204 - test helper executes kubectl with a pinned, validated HTTPS URL
+	cmd := exec.Command("kubectl", "delete", "-f", bundleURL)
 	if _, err := Run(cmd); err != nil {
 		warnError(err)
 	}
@@ -106,8 +122,15 @@ func IsPrometheusCRDsInstalled() bool {
 
 // UninstallCertManager uninstalls the cert manager
 func UninstallCertManager() {
-	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	cmd := exec.Command("kubectl", "delete", "-f", url)
+	cmURL := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
+	if err := validateReleaseURL(cmURL, []string{
+		"/cert-manager/cert-manager/releases/download/",
+	}); err != nil {
+		warnError(err)
+		return
+	}
+	// #nosec G204 - test helper executes kubectl with a pinned, validated HTTPS URL
+	cmd := exec.Command("kubectl", "delete", "-f", cmURL)
 	if _, err := Run(cmd); err != nil {
 		warnError(err)
 	}
@@ -115,13 +138,20 @@ func UninstallCertManager() {
 
 // InstallCertManager installs the cert manager bundle.
 func InstallCertManager() error {
-	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
-	cmd := exec.Command("kubectl", "apply", "-f", url)
+	cmURL := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
+	if err := validateReleaseURL(cmURL, []string{
+		"/cert-manager/cert-manager/releases/download/",
+	}); err != nil {
+		return err
+	}
+	// #nosec G204 - test helper executes kubectl with a pinned, validated HTTPS URL
+	cmd := exec.Command("kubectl", "apply", "-f", cmURL)
 	if _, err := Run(cmd); err != nil {
 		return err
 	}
 	// Wait for cert-manager-webhook to be ready, which can take time if cert-manager
 	// was re-installed after uninstalling on a cluster.
+	// #nosec G204 - safe constant arguments to kubectl wait
 	cmd = exec.Command("kubectl", "wait", "deployment.apps/cert-manager-webhook",
 		"--for", "condition=Available",
 		"--namespace", "cert-manager",
@@ -169,9 +199,15 @@ func IsCertManagerCRDsInstalled() bool {
 func LoadImageToKindClusterWithName(name string) error {
 	cluster := "kind"
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
-		cluster = v
+		// validate cluster name to avoid command injection via env
+		if isSafeClusterName(v) {
+			cluster = v
+		} else {
+			warnError(fmt.Errorf("invalid KIND_CLUSTER name; using default 'kind'"))
+		}
 	}
 	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
+	// #nosec G204 - test helper executes 'kind' with validated/safe parameters
 	cmd := exec.Command("kind", kindOptions...)
 	_, err := Run(cmd)
 	return err
@@ -204,9 +240,22 @@ func GetProjectDir() (string, error) {
 // UncommentCode searches for target in the file and remove the comment prefix
 // of the target content. The target content may span multiple lines.
 func UncommentCode(filename, target, prefix string) error {
-	// false positive
-	// nolint:gosec
-	content, err := os.ReadFile(filename)
+	// ensure the file path is within the project directory
+	projectDir, pErr := GetProjectDir()
+	if pErr != nil {
+		return pErr
+	}
+	absPath, aErr := filepath.Abs(filename)
+	if aErr != nil {
+		return aErr
+	}
+	cleanPath := filepath.Clean(absPath)
+	// Prevent path traversal or writing outside the repo directory
+	if !strings.HasPrefix(cleanPath, projectDir+string(filepath.Separator)) && cleanPath != projectDir {
+		return fmt.Errorf("unsafe path: %s", filename)
+	}
+	// #nosec G304 - file path validated against project root
+	content, err := os.ReadFile(cleanPath)
 	if err != nil {
 		return err
 	}
@@ -245,7 +294,35 @@ func UncommentCode(filename, target, prefix string) error {
 	if err != nil {
 		return err
 	}
-	// false positive
-	// nolint:gosec
-	return os.WriteFile(filename, out.Bytes(), 0644)
+	// #nosec G304 - file path already validated above
+	return os.WriteFile(cleanPath, out.Bytes(), 0o600)
+}
+
+// validateReleaseURL ensures the URL is HTTPS, points to github.com, and matches an allowed path prefix.
+func validateReleaseURL(raw string, allowedPrefixes []string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("invalid scheme: %s", u.Scheme)
+	}
+	if !strings.EqualFold(u.Host, "github.com") {
+		return fmt.Errorf("unexpected host: %s", u.Host)
+	}
+	for _, p := range allowedPrefixes {
+		if strings.HasPrefix(u.Path, p) {
+			return nil
+		}
+	}
+	return fmt.Errorf("unexpected path: %s", u.Path)
+}
+
+var clusterNameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+func isSafeClusterName(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	return clusterNameRe.MatchString(s)
 }

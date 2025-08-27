@@ -4,6 +4,7 @@ metadata:
   name: simple-cluster
 spec:
   data:
+    clusterUid: "a30fbc8d-596f-48d0-8541-dbc23bca28a1"
     clusterId: "simple-cluster-id"
     provider: talos
     environment: dev
@@ -22,7 +23,7 @@ spec:
       # Defaults to 1 replica
       replicas: 1
       version: "1.33"
-      machineClass: standard
+      machineClass: large
       provider: kubevirt
       storage:
         - class: "standard"
@@ -43,7 +44,7 @@ spec:
           # Defaults to 1 replica
           replicas: 1
           # Defaults to "standard" machine class
-          machineClass: standard
+          machineClass: large
           autoscaling:
             enabled: false
             minReplicas: 1

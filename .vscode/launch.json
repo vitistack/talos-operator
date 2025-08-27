@@ -11,7 +11,8 @@
       "mode": "auto",
       "program": "${workspaceFolder}/cmd/main.go",
       "env": {
-        "MACHINE_MANIFESTS_PATH": "${workspaceFolder}/hack/results"
+        "MACHINE_MANIFESTS_PATH": "${workspaceFolder}/hack/machine-manifests",
+        "TALOS_CONFIG_BASE_PATH": "${workspaceFolder}/hack/talos-configs"
       }
     }
   ]

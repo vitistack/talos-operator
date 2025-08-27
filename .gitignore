@@ -35,3 +35,7 @@ cover.html
 
 hack/crds/
 hack/results
+hack/talos-configs/**/*
+hack/machine-manifests/**/*
+!hack/talos-configs/.gitkeep
+!hack/machine-manifests/.gitkeep
