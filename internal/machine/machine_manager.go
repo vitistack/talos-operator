@@ -89,7 +89,7 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 			Spec: vitistackcrdsv1alpha1.MachineSpec{
 				Name: fmt.Sprintf("%s-control-plane-%d", clusterName, i),
 				// We'll set basic required fields from the machine CRD spec
-				InstanceType: "standard", // Default value, can be overridden from cluster spec
+				InstanceType: "large", // Default value, can be overridden from cluster spec
 				Tags: map[string]string{
 					"cluster": clusterName,
 					"role":    "control-plane",
@@ -140,7 +140,7 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 				},
 				Spec: vitistackcrdsv1alpha1.MachineSpec{
 					Name:         fmt.Sprintf("%s-worker-%d", clusterName, i),
-					InstanceType: "standard",
+					InstanceType: "medium",
 					Tags: map[string]string{
 						"cluster": clusterName,
 						"role":    "worker",
