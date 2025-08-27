@@ -107,6 +107,16 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
+##@ Security
+.PHONY: go-security-scan
+go-security-scan: install-security-scanner ## Run gosec security scan (fails on findings)
+	$(GOSEC) ./...
+
+.PHONY: go-security-scan-docker
+go-security-scan-docker: ## Run gosec scan using official container (alternative if local install fails)
+	@echo "Running gosec via Docker container..."; \
+	$(CONTAINER_TOOL) run --rm -v $(PWD):/workspace -w /workspace securego/gosec/gosec:latest ./...
+
 ##@ Dependencies
 
 deps: ## Download and verify dependencies
@@ -203,6 +213,7 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOSEC ?= $(LOCALBIN)/gosec
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
@@ -212,6 +223,7 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.1.6
+GOSEC_VERSION ?= v2.22.8
 
 ##@ Tools
 
@@ -242,6 +254,20 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: install-security-scanner
+install-security-scanner: $(GOSEC) ## Install gosec security scanner locally (static analysis for security issues)
+$(GOSEC): $(LOCALBIN)
+	@set -e; echo "Attempting to install gosec $(GOSEC_VERSION)"; \
+	if ! GOBIN=$(LOCALBIN) go install github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) 2>/dev/null; then \
+		echo "Primary install failed, attempting install from @main (compatibility fallback)"; \
+		if ! GOBIN=$(LOCALBIN) go install github.com/securego/gosec/v2/cmd/gosec@main; then \
+			echo "gosec installation failed for versions $(GOSEC_VERSION) and @main"; \
+			exit 1; \
+		fi; \
+	fi; \
+	echo "gosec installed at $(GOSEC)"; \
+	chmod +x $(GOSEC)
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

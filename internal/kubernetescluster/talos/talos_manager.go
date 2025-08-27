@@ -3,7 +3,6 @@ package talos
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
@@ -46,7 +45,7 @@ type TalosManager struct {
 type TalosClusterConfig struct {
 	ClusterName     string
 	SecretGenerated bool
-	MachineConfigs  map[string]string // machine name -> config (placeholder for now)
+	MachineConfigs  map[string][]byte // machine name -> machine config YAML
 	Bootstrapped    bool
 }
 
@@ -67,6 +66,7 @@ type MachineInfo struct {
 }
 
 // ReconcileTalosCluster waits for machines to be ready and creates a Talos cluster
+// nolint:gocyclo // Reconcile flow is linear; refactor will be done separately.
 func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) error {
 	log := ctrl.LoggerFrom(ctx)
 
@@ -89,14 +89,6 @@ func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitis
 		return fmt.Errorf("failed waiting for machines to be ready: %w", err)
 	}
 
-	// Extract machine information needed for Talos
-	//machineInfos := t.extractMachineInfos(readyMachines)
-
-	// Fetch disk info and install talos on disk
-	// if err := t.installTalosOnDisk(ctx, machineInfos); err != nil {
-	// 	return fmt.Errorf("failed to install Talos on disk: %w", err)
-	// }
-
 	// Generate Talos configuration
 	clientConfig, err := t.generateTalosConfig(ctx, cluster, readyMachines)
 	if err != nil {
@@ -111,8 +103,8 @@ func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitis
 	// get other nodes except control plane
 	workers := []*vitistackcrdsv1alpha1.Machine{}
 	for _, machine := range readyMachines {
-		role, ok := machine.Labels["role"]
-		if !ok || role != "control-plane" {
+		role := machine.Labels["cluster.vitistack.io/role"]
+		if role != "control-plane" {
 			workers = append(workers, machine)
 		}
 	}
@@ -131,17 +123,23 @@ func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitis
 		}
 	}
 
-	err = applyTalosConfigurationToControlPlanes(ctx, clientConfig, controlPlaneIPs)
+	if len(controlPlaneIPs) == 0 {
+		return fmt.Errorf("no control plane IPs available to apply configuration")
+	}
+
+	err = t.applyTalosConfigurationToControlPlanes(ctx, cluster, clientConfig, controlPlaneIPs, controlPlanes)
 	if err != nil {
 		return err
 	}
 
-	err = applyTalosConfigurationToWorkers(ctx, clientConfig, workerIPs)
-	if err != nil {
-		return err
+	if len(workerIPs) > 0 {
+		err = t.applyTalosConfigurationToWorkers(ctx, cluster, clientConfig, workerIPs, workers)
+		if err != nil {
+			return err
+		}
 	}
 
-	// todo registert VIP ip addresses to NAM
+	// todo registert VIP ip addresses to create loadbalancers for talos control planes
 	// write to a crd, so others can handle load balancing of control planes
 
 	// Bootstrap the cluster (bootstrap exactly one control-plane)
@@ -165,50 +163,55 @@ func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitis
 		log.Info("Kubeconfig stored in Secret", "secret", kubeconfigSecretName(cluster))
 	}
 
-	//log.Info("Successfully reconciled Talos cluster", "cluster", cluster.Name)
+	//
 	return nil
 }
 
-func applyTalosConfigurationToControlPlanes(ctx context.Context, clientConfig *clientconfig.Config, controlPlaneIps []string) error {
-	//log := ctrl.LoggerFrom(ctx)
+func (t *TalosManager) applyTalosConfigurationToControlPlanes(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, clientConfig *clientconfig.Config, controlPlaneIps []string, controlPlanes []*vitistackcrdsv1alpha1.Machine) error {
 	tClient, err := talosclient.New(ctx, talosclient.WithConfig(clientConfig), talosclient.WithEndpoints(controlPlaneIps...))
 	if err != nil {
 		return fmt.Errorf("failed to create Talos client: %w", err)
 	}
-	// target control plane nodes explicitly via context
-	ctxWithNodes := talosclient.WithNodes(ctx, controlPlaneIps...)
-	return applyConfiguration(ctxWithNodes, clientConfig, tClient)
+	return t.applyPerNodeConfiguration(ctx, cluster, tClient, controlPlanes)
 }
 
-func applyTalosConfigurationToWorkers(ctx context.Context, clientConfig *clientconfig.Config, workerIps []string) error {
-	//log := ctrl.LoggerFrom(ctx)
-	// connect directly to worker endpoints
+func (t *TalosManager) applyTalosConfigurationToWorkers(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, clientConfig *clientconfig.Config, workerIps []string, workers []*vitistackcrdsv1alpha1.Machine) error {
 	tClient, err := talosclient.New(ctx, talosclient.WithConfig(clientConfig), talosclient.WithEndpoints(workerIps...))
 	if err != nil {
 		return fmt.Errorf("failed to create Talos client: %w", err)
 	}
-	// and set target nodes via context
-	ctxWithNodes := talosclient.WithNodes(ctx, workerIps...)
-	return applyConfiguration(ctxWithNodes, clientConfig, tClient)
+	return t.applyPerNodeConfiguration(ctx, cluster, tClient, workers)
 }
 
-func applyConfiguration(ctx context.Context, clientConfig *clientconfig.Config, tClient *talosclient.Client) error {
+func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, tClient *talosclient.Client, machines []*vitistackcrdsv1alpha1.Machine) error {
 	log := ctrl.LoggerFrom(ctx)
-	clientConfigInBytes, err := clientConfig.Bytes()
-	if err != nil {
-		return fmt.Errorf("failed to serialize Talos client config: %w", err)
-	}
-	resp, err := tClient.ApplyConfiguration(ctx, &machineapi.ApplyConfigurationRequest{
-		Data:           clientConfigInBytes,
-		Mode:           machineapi.ApplyConfigurationRequest_AUTO,
-		DryRun:         false,
-		TryModeTimeout: durationpb.New(time.Duration(2 * time.Minute)),
-	})
-	if err != nil {
-		return fmt.Errorf("error applying new configuration: %s", err)
+
+	clusterCfg := t.clusterConfigurations[cluster.Name]
+	if clusterCfg == nil {
+		return fmt.Errorf("no cached Talos cluster config for %s", cluster.Name)
 	}
 
-	log.Info("Talos apply configuration response", "messages", resp.Messages)
+	for _, m := range machines {
+		if len(m.Status.NetworkInterfaces) == 0 || len(m.Status.NetworkInterfaces[0].IPAddresses) == 0 {
+			continue
+		}
+		ip := m.Status.NetworkInterfaces[0].IPAddresses[0]
+		cfgBytes, ok := clusterCfg.MachineConfigs[m.Name]
+		if !ok || len(cfgBytes) == 0 {
+			return fmt.Errorf("no machine config cached for node %s", m.Name)
+		}
+		nodeCtx := talosclient.WithNodes(ctx, ip)
+		resp, err := tClient.ApplyConfiguration(nodeCtx, &machineapi.ApplyConfigurationRequest{
+			Data:           cfgBytes,
+			Mode:           machineapi.ApplyConfigurationRequest_AUTO,
+			DryRun:         false,
+			TryModeTimeout: durationpb.New(2 * time.Minute),
+		})
+		if err != nil {
+			return fmt.Errorf("error applying configuration to node %s: %w", ip, err)
+		}
+		log.Info("Talos apply configuration response", "node", ip, "messages", resp.Messages)
+	}
 	return nil
 }
 
@@ -388,14 +391,16 @@ func (t *TalosManager) isMachineReady(m *vitistackcrdsv1alpha1.Machine) bool {
 
 	hasNetwork := false
 	hasDisk := false
-	for _, disk := range m.Status.Disks {
+	for i := range m.Status.Disks {
+		disk := &m.Status.Disks[i]
 		if disk.PVCName != "" && disk.Device != "" {
 			hasDisk = true
 			break
 		}
 	}
 
-	for _, iface := range m.Status.NetworkInterfaces {
+	for i := range m.Status.NetworkInterfaces {
+		iface := &m.Status.NetworkInterfaces[i]
 		if iface.MACAddress != "" && (len(iface.IPAddresses) > 0 || len(iface.IPv6Addresses) > 0) {
 			hasNetwork = true
 			break
@@ -441,12 +446,12 @@ func (t *TalosManager) isMachineReady(m *vitistackcrdsv1alpha1.Machine) bool {
 func (t *TalosManager) generateTalosConfig(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, machines []*vitistackcrdsv1alpha1.Machine) (*clientconfig.Config, error) {
 	log := ctrl.LoggerFrom(ctx)
 	controlPlanes := filterMachinesByRole(machines, "control-plane")
-	//workers := filterMachinesByRole(machines, "worker")
+	//
 
-	firstCP := controlPlanes[0]
-	if firstCP == nil {
+	if len(controlPlanes) == 0 {
 		return nil, fmt.Errorf("no control plane found for cluster %s", cluster.Name)
 	}
+	firstCP := controlPlanes[0]
 
 	clusterName := cluster.Name
 	controlPlaneEndpoint := fmt.Sprintf("https://%s:6443", firstCP.Status.NetworkInterfaces[0].IPAddresses[0]) // Using first control plane's private IP
@@ -456,7 +461,7 @@ func (t *TalosManager) generateTalosConfig(ctx context.Context, cluster *vitista
 
 	// * version contract defines the version of the Talos cluster configuration is generated for
 	//   generate package can generate machine configuration compatible with current and previous versions of Talos
-	//targetVersion := config.TalosVersionCurrent // := "v1.0"
+	// targetVersion := config.TalosVersionCurrent // := "v1.0"
 
 	// parse the version contract
 	// var (
@@ -464,10 +469,7 @@ func (t *TalosManager) generateTalosConfig(ctx context.Context, cluster *vitista
 	// 	err             error
 	// )
 
-	// versionContract, err := config.ParseContractFromVersion(targetVersion)
-	// if err != nil {
-	// 	log.Error(err, "failed to parse version contract: %s", err)
-	// }
+	// (parsing a specific version contract can be added later if needed)
 
 	versionContract := config.TalosVersionCurrent
 	// generate the cluster-wide secrets once and use it for every node machine configuration
@@ -478,7 +480,9 @@ func (t *TalosManager) generateTalosConfig(ctx context.Context, cluster *vitista
 	}
 	endpointlist := []string{}
 	for _, cp := range controlPlanes {
-		endpointlist = append(endpointlist, cp.Status.NetworkInterfaces[0].IPAddresses[0])
+		if len(cp.Status.NetworkInterfaces) > 0 && len(cp.Status.NetworkInterfaces[0].IPAddresses) > 0 {
+			endpointlist = append(endpointlist, cp.Status.NetworkInterfaces[0].IPAddresses[0])
+		}
 	}
 
 	input, err := generate.NewInput(clusterName, controlPlaneEndpoint, kubernetesVersion,
@@ -492,34 +496,38 @@ func (t *TalosManager) generateTalosConfig(ctx context.Context, cluster *vitista
 		log.Error(err, "failed to generate input: %s", err)
 	}
 
-	// generate the machine config for each node of the cluster using the secrets
-	for _, node := range machines {
-		var cfg config.Provider
-
-		// generate the machine config for the node, using the right machine type:
-		// * machine.TypeConrolPlane for control plane nodes
-		// * machine.TypeWorker for worker nodes
-		cfg, err = input.Config(machine.TypeControlPlane)
-		if err != nil {
-			log.Error(err, "failed to generate config for node %q: %s", node, err)
-		}
-
-		// config can be tweaked at this point to add machine-specific configuration, e.g.:
-		cfg.RawV1Alpha1().MachineConfig.MachineInstall.InstallDisk = "/dev/sdb"
-
-		// marshal the config to YAML
-		var marshaledCfg []byte
-
-		marshaledCfg, err = cfg.Bytes()
-		if err != nil {
-			log.Error(err, "failed to generate config for node %q: %s", node, err)
-		}
-
-		// write the config to a file
-		if err = os.WriteFile(clusterName+"-"+node.Name+".yaml", marshaledCfg, 0o600); err != nil {
-			log.Error(err, "failed to write config for node %q: %s", node, err)
-		}
+	// Prepare or update cached cluster configuration holder
+	clusterCfg := &TalosClusterConfig{
+		ClusterName:     clusterName,
+		SecretGenerated: true,
+		MachineConfigs:  make(map[string][]byte),
 	}
+
+	// generate the machine config for each node of the cluster using the secrets and keep in-memory
+	for _, node := range machines {
+		var prov config.Provider
+		mType := machine.TypeWorker
+		if node.Labels["cluster.vitistack.io/role"] == "control-plane" {
+			mType = machine.TypeControlPlane
+		}
+		prov, err = input.Config(mType)
+		if err != nil {
+			log.Error(err, "failed to generate config for node %q: %s", node.Name, err)
+			continue
+		}
+		// TODO: Pull desired install disk from Machine spec
+		prov.RawV1Alpha1().MachineConfig.MachineInstall.InstallDisk = "/dev/sdb"
+
+		marshaledCfg, err := prov.Bytes()
+		if err != nil {
+			log.Error(err, "failed to serialize config for node %q: %s", node.Name, err)
+			continue
+		}
+		clusterCfg.MachineConfigs[node.Name] = marshaledCfg
+	}
+
+	// cache
+	t.clusterConfigurations[clusterName] = clusterCfg
 
 	// generate the client Talos configuration (for API access, e.g. talosctl)
 	clientCfg, err := input.Talosconfig()
@@ -527,9 +535,7 @@ func (t *TalosManager) generateTalosConfig(ctx context.Context, cluster *vitista
 		log.Error(err, "failed to generate client config: %s", err)
 	}
 
-	if err = clientCfg.Save(clusterName + "-talosconfig"); err != nil {
-		log.Error(err, "failed to save client config: %s", err)
-	}
+	// Optionally persist client config can be added later; avoid writing on controller FS.
 
 	return clientCfg, nil
 }
@@ -540,7 +546,7 @@ func (t *TalosManager) generateTalosConfig(ctx context.Context, cluster *vitista
 func filterMachinesByRole(machines []*vitistackcrdsv1alpha1.Machine, role string) []*vitistackcrdsv1alpha1.Machine {
 	var filtered []*vitistackcrdsv1alpha1.Machine
 	for _, machine := range machines {
-		if machine.Labels["role"] == role {
+		if machine.Labels["cluster.vitistack.io/role"] == role {
 			filtered = append(filtered, machine)
 		}
 	}

@@ -4,60 +4,61 @@ kind: ClusterRole
 metadata:
   name: manager-role
 rules:
-  - apiGroups:
-      - kubevirt.io
-    resources:
-      - virtualmachines
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - kubevirt.io
-    resources:
-      - virtualmachines/status
-    verbs:
-      - get
-  - apiGroups:
-      - vitistack.io
-    resources:
-      - kubernetesclusters
-      - machines
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - vitistack.io
-    resources:
-      - kubernetesclusters/finalizers
-    verbs:
-      - update
-  - apiGroups:
-      - vitistack.io
-    resources:
-      - kubernetesclusters/status
-      - machines/status
-    verbs:
-      - get
-      - patch
-      - update
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kubevirt.io
+  resources:
+  - virtualmachines
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kubevirt.io
+  resources:
+  - virtualmachines/status
+  verbs:
+  - get
+- apiGroups:
+  - vitistack.io
+  resources:
+  - kubernetesclusters
+  - machines
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - vitistack.io
+  resources:
+  - kubernetesclusters/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - vitistack.io
+  resources:
+  - kubernetesclusters/status
+  - machines/status
+  verbs:
+  - get
+  - patch
+  - update

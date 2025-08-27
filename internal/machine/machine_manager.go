@@ -101,7 +101,8 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 
 	// Create worker nodes based on node pools if available
 	if len(cluster.Spec.Topology.Workers.NodePools) > 0 {
-		for _, nodePool := range cluster.Spec.Topology.Workers.NodePools {
+		for idx := range cluster.Spec.Topology.Workers.NodePools {
+			nodePool := cluster.Spec.Topology.Workers.NodePools[idx]
 			for i := 0; i < nodePool.Replicas; i++ {
 				virtualMachine := &vitistackcrdsv1alpha1.Machine{
 					ObjectMeta: metav1.ObjectMeta{
@@ -233,9 +234,10 @@ func (m *MachineManager) CleanupMachines(ctx context.Context, clusterName, names
 	}
 
 	// Delete each machine
-	for _, machine := range machineList.Items {
+	for i := range machineList.Items {
+		machine := &machineList.Items[i]
 		log.Info("Deleting machine", "machine", machine.Name)
-		if err := m.Delete(ctx, &machine); err != nil {
+		if err := m.Delete(ctx, machine); err != nil {
 			if !errors.IsNotFound(err) {
 				return fmt.Errorf("failed to delete machine %s: %w", machine.Name, err)
 			}

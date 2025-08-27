@@ -33,6 +33,7 @@ const (
 // +kubebuilder:rbac:groups=vitistack.io,resources=machines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines/status,verbs=get
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
@@ -40,17 +41,8 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Fetch the KubernetesCluster instance
 	var kubernetesCluster vitistackcrdsv1alpha1.KubernetesCluster
 	if err := r.Get(ctx, req.NamespacedName, &kubernetesCluster); err != nil {
-		if client.IgnoreNotFound(err) == nil {
-			// Resource was deleted - clean up any associated machines
-			log.Info("KubernetesCluster resource deleted - cleaning up machines", "name", req.Name, "namespace", req.Namespace)
-			if err := r.MachineManager.CleanupMachines(ctx, req.Name, req.Namespace); err != nil {
-				log.Error(err, "Failed to cleanup machines")
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
-		}
-		log.Error(err, "unable to fetch KubernetesCluster")
-		return ctrl.Result{}, err
+		// If not found, nothing to do. Finalizer-based deletion will have handled cleanup.
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	log.Info("Reconciling KubernetesCluster", "name", kubernetesCluster.Name, "namespace", kubernetesCluster.Namespace)
@@ -79,8 +71,8 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Reconcile Talos cluster after machines are created
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, &kubernetesCluster); err != nil {
 		log.Error(err, "Failed to reconcile Talos cluster")
-		// Don't fail reconciliation immediately, requeue to retry
-		return ctrl.Result{RequeueAfter: time.Minute * 2}, err
+		// Requeue for a later retry without surfacing an error
+		return ctrl.Result{RequeueAfter: time.Minute * 2}, nil
 	}
 
 	return ctrl.Result{RequeueAfter: time.Minute * 5}, nil

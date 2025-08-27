@@ -284,7 +284,7 @@ func setupHealthChecks(mgr ctrl.Manager) {
 	}
 }
 
-func setupReconcilers(mgr ctrl.Manager, metricsCertWatcher *certwatcher.CertWatcher, webhookCertWatcher *certwatcher.CertWatcher) {
+func setupReconcilers(mgr ctrl.Manager, _ *certwatcher.CertWatcher, _ *certwatcher.CertWatcher) {
 	// +kubebuilder:scaffold:builder
 
 	setupLog.Info("All controllers and webhooks are set up")
