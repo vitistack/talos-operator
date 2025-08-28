@@ -161,7 +161,7 @@ func (m *MachineManager) SaveMachinesToFiles(machines []*vitistackcrdsv1alpha1.M
 	clusterDir := filepath.Join(baseDir, clusterName)
 
 	// Create cluster-specific directory
-	if err := os.MkdirAll(clusterDir, 0755); err != nil {
+	if err := os.MkdirAll(clusterDir, 0750); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", clusterDir, err)
 	}
 
@@ -174,7 +174,7 @@ func (m *MachineManager) SaveMachinesToFiles(machines []*vitistackcrdsv1alpha1.M
 
 		// Save to file
 		filename := filepath.Join(clusterDir, fmt.Sprintf("%s.yaml", machine.Name))
-		if err := os.WriteFile(filename, machineYAML, 0644); err != nil {
+		if err := os.WriteFile(filename, machineYAML, 0600); err != nil {
 			return fmt.Errorf("failed to write machine file %s: %w", filename, err)
 		}
 	}
