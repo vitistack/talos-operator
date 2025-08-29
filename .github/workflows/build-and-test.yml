@@ -7,8 +7,8 @@ on:
     branches: ["main", "master"]
 
 jobs:
-  build:
-    name: Build
+  build-test-checksecurity:
+    name: Build test and check security
     runs-on: ubuntu-latest
     env:
       GOPRIVATE: github.com/vitistack
@@ -51,36 +51,6 @@ jobs:
           echo "Version $VERSION"
           make build
 
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    env:
-      GOPRIVATE: github.com/vitistack
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Configure Git for private repos
-        run: |
-          git config --global url.https://$GH_TOKEN@github.com/.insteadOf https://github.com/
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
-
-      # Cache bin folder (Go tools and built binaries)
-      - name: Cache bin folder
-        uses: actions/cache@v4
-        with:
-          path: bin
-          key: ${{ runner.os }}-bin-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
-          restore-keys: |
-            ${{ runner.os }}-bin-
-
       - name: Setup test environment
         run: |
           if [ ! -d "bin/k8s" ] || [ -z "$(ls -A bin/k8s 2>/dev/null)" ]; then
@@ -90,7 +60,6 @@ jobs:
             echo "Using cached test environment"
             make manifests generate
           fi
-
       - name: Run tests
         run: |
           make test
@@ -102,27 +71,6 @@ jobs:
           name: coverage
           path: coverage.out
           retention-days: 7
-
-  security-scan:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    env:
-      GOPRIVATE: github.com/vitistack
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Configure Git for private repos
-        run: |
-          git config --global url.https://$GH_TOKEN@github.com/.insteadOf https://github.com/
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
 
       - name: Run security scan
         run: |

@@ -31,16 +31,16 @@ import (
 )
 
 // namespace where the project is deployed in
-const namespace = "oss-talos-operator-system"
+const namespace = "viti-talos-operator-system"
 
 // serviceAccountName created for the project
-const serviceAccountName = "oss-talos-operator-controller-manager"
+const serviceAccountName = "viti-talos-operator-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "oss-talos-operator-controller-manager-metrics-service"
+const metricsServiceName = "viti-talos-operator-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "oss-talos-operator-metrics-binding"
+const metricsRoleBindingName = "viti-talos-operator-metrics-binding"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -173,7 +173,7 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=oss-talos-operator-metrics-reader",
+				"--clusterrole=viti-talos-operator-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)

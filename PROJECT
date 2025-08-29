@@ -5,6 +5,6 @@
 domain: vitistack.io
 layout:
   - go.kubebuilder.io/v4
-projectName: oss-talos-operator
+projectName: viti-talos-operator
 repo: github.com/vitistack/talos-operator
 version: "3"
