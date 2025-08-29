@@ -5,6 +5,7 @@ import (
 	"time"
 
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -80,11 +81,12 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 // NewKubernetesClusterReconciler creates a new KubernetesClusterReconciler with initialized managers
 func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *KubernetesClusterReconciler {
+	statusManager := status.NewManager(c)
 	return &KubernetesClusterReconciler{
 		Client: c,
 		Scheme: scheme,
 
-		TalosManager:   talos.NewTalosManager(c),
+		TalosManager:   talos.NewTalosManager(c, statusManager),
 		MachineManager: machine.NewMachineManager(c, scheme),
 	}
 }

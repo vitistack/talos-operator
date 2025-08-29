@@ -6,8 +6,8 @@ godebug default=go1.25
 
 require (
 	github.com/NorskHelsenett/ror v1.4.2
-	github.com/onsi/ginkgo/v2 v2.25.1
-	github.com/onsi/gomega v1.37.0
+	github.com/onsi/ginkgo/v2 v2.25.2
+	github.com/onsi/gomega v1.38.2
 	github.com/vitistack/crds v0.0.1-alpha26
 	k8s.io/apimachinery v0.34.0
 	k8s.io/client-go v0.34.0
