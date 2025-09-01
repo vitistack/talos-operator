@@ -8,6 +8,9 @@ import (
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -114,6 +117,14 @@ func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, cluste
 	if err := r.MachineManager.CleanupMachineFiles(cluster.Name); err != nil {
 		log.Error(err, "Failed to remove cluster directory")
 		// Don't fail the deletion if file cleanup fails
+	}
+
+	// Delete consolidated Talos Secret (k8s-<cluster>)
+	secretName := "k8s-" + cluster.Name
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: cluster.Namespace}}
+	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		log.Error(err, "Failed to delete Talos secret", "secret", secretName)
+		return ctrl.Result{}, err
 	}
 
 	// Remove finalizer
