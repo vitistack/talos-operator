@@ -86,11 +86,11 @@ resources:
 livenessProbe:
   httpGet:
     path: /
-    port: http
+    port: 9993
 readinessProbe:
   httpGet:
     path: /
-    port: http
+    port: 9993
 
 # This section is for setting up autoscaling more information can be found here: https://kubernetes.io/docs/concepts/workloads/autoscaling/
 autoscaling:
