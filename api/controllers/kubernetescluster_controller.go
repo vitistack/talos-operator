@@ -11,7 +11,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -24,6 +26,7 @@ type KubernetesClusterReconciler struct {
 
 	TalosManager   *talos.TalosManager     // Manager for Talos clusters
 	MachineManager *machine.MachineManager // Manager for Machine resources
+	StatusManager  *status.StatusManager   // Manager for status updates
 }
 
 const (
@@ -42,19 +45,17 @@ const (
 func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
 
-	// Fetch the KubernetesCluster instance
-	var kubernetesCluster vitistackcrdsv1alpha1.KubernetesCluster
-	if err := r.Get(ctx, req.NamespacedName, &kubernetesCluster); err != nil {
-		// If not found, nothing to do. Finalizer-based deletion will have handled cleanup.
+	// Fetch the KubernetesCluster as unstructured to avoid decoding Quantity in status
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "vitistack.io", Version: "v1alpha1", Kind: "KubernetesCluster"})
+	if err := r.Get(ctx, req.NamespacedName, u); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	log.Info("Reconciling KubernetesCluster", "name", kubernetesCluster.Name, "namespace", kubernetesCluster.Namespace)
-
 	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(&kubernetesCluster, KubernetesClusterFinalizer) {
-		controllerutil.AddFinalizer(&kubernetesCluster, KubernetesClusterFinalizer)
-		if err := r.Update(ctx, &kubernetesCluster); err != nil {
+	if !controllerutil.ContainsFinalizer(u, KubernetesClusterFinalizer) {
+		controllerutil.AddFinalizer(u, KubernetesClusterFinalizer)
+		if err := r.Update(ctx, u); err != nil {
 			log.Error(err, "Failed to add finalizer")
 			return ctrl.Result{}, err
 		}
@@ -62,11 +63,46 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Handle deletion
-	if kubernetesCluster.DeletionTimestamp != nil {
-		return r.handleDeletion(ctx, &kubernetesCluster)
+	if u.GetDeletionTimestamp() != nil {
+		// Handle deletion inline using unstructured
+		// Clean up machines
+		if err := r.MachineManager.CleanupMachines(ctx, u.GetName(), u.GetNamespace()); err != nil {
+			log.Error(err, "Failed to cleanup machines during deletion")
+			return ctrl.Result{}, err
+		}
+		// Clean up files
+		if err := r.MachineManager.CleanupMachineFiles(u.GetName()); err != nil {
+			log.Error(err, "Failed to remove cluster directory")
+			// don't fail deletion on file errors
+		}
+		// Delete consolidated Talos Secret (k8s-<cluster>)
+		secretName := "k8s-" + u.GetName()
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: u.GetNamespace()}}
+		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+			log.Error(err, "Failed to delete Talos secret", "secret", secretName)
+			return ctrl.Result{}, err
+		}
+		// Remove finalizer
+		controllerutil.RemoveFinalizer(u, KubernetesClusterFinalizer)
+		if err := r.Update(ctx, u); err != nil {
+			return ctrl.Result{}, err
+		}
+		log.Info("Successfully deleted KubernetesCluster", "cluster", u.GetName())
+		return ctrl.Result{}, nil
 	}
 
 	// Reconcile machines based on cluster spec
+	// Build typed object with Spec only for downstream managers
+	var kubernetesCluster vitistackcrdsv1alpha1.KubernetesCluster
+	kubernetesCluster.ObjectMeta = metav1.ObjectMeta{Name: u.GetName(), Namespace: u.GetNamespace()}
+	if specMap, found, _ := unstructured.NestedMap(u.Object, "spec"); found {
+		// Convert spec map into typed Spec; ignore status entirely
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(specMap, &kubernetesCluster.Spec); err != nil {
+			log.Error(err, "Failed to convert spec to typed KubernetesCluster.Spec")
+			return ctrl.Result{}, err
+		}
+	}
+
 	if err := r.MachineManager.ReconcileMachines(ctx, &kubernetesCluster); err != nil {
 		log.Error(err, "Failed to reconcile machines")
 		return ctrl.Result{}, err
@@ -76,10 +112,15 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, &kubernetesCluster); err != nil {
 		log.Error(err, "Failed to reconcile Talos cluster")
 		// Requeue for a later retry without surfacing an error
-		return ctrl.Result{RequeueAfter: time.Minute * 2}, nil
+		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
-	return ctrl.Result{RequeueAfter: time.Minute * 5}, nil
+	// Update KubernetesCluster status
+	if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, &kubernetesCluster); err != nil {
+		log.Error(err, "Failed to update KubernetesCluster status")
+	}
+
+	return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 }
 
 // NewKubernetesClusterReconciler creates a new KubernetesClusterReconciler with initialized managers
@@ -91,48 +132,16 @@ func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *Ku
 
 		TalosManager:   talos.NewTalosManager(c, statusManager),
 		MachineManager: machine.NewMachineManager(c, scheme),
+		StatusManager:  statusManager,
 	}
 }
 
 func (r *KubernetesClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Watch the KubernetesCluster as unstructured to avoid decoding rortypes.Quantity in status
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "vitistack.io", Version: "v1alpha1", Kind: "KubernetesCluster"})
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&vitistackcrdsv1alpha1.KubernetesCluster{}).
+		For(u).
 		Owns(&vitistackcrdsv1alpha1.Machine{}).
 		Complete(r)
-}
-
-// handleDeletion handles cleanup when a KubernetesCluster is being deleted
-func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (ctrl.Result, error) {
-	log := ctrl.LoggerFrom(ctx)
-
-	log.Info("Handling deletion of KubernetesCluster", "cluster", cluster.Name)
-
-	// Clean up machines
-	if err := r.MachineManager.CleanupMachines(ctx, cluster.Name, cluster.Namespace); err != nil {
-		log.Error(err, "Failed to cleanup machines during deletion")
-		return ctrl.Result{}, err
-	}
-
-	// Clean up files
-	if err := r.MachineManager.CleanupMachineFiles(cluster.Name); err != nil {
-		log.Error(err, "Failed to remove cluster directory")
-		// Don't fail the deletion if file cleanup fails
-	}
-
-	// Delete consolidated Talos Secret (k8s-<cluster>)
-	secretName := "k8s-" + cluster.Name
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: cluster.Namespace}}
-	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-		log.Error(err, "Failed to delete Talos secret", "secret", secretName)
-		return ctrl.Result{}, err
-	}
-
-	// Remove finalizer
-	controllerutil.RemoveFinalizer(cluster, KubernetesClusterFinalizer)
-	if err := r.Update(ctx, cluster); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	log.Info("Successfully deleted KubernetesCluster", "cluster", cluster.Name)
-	return ctrl.Result{}, nil
 }

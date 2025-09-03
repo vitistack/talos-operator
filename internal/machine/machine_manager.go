@@ -58,7 +58,6 @@ func (m *MachineManager) ReconcileMachines(ctx context.Context, cluster *vitista
 		}
 	}
 
-	log.Info("Successfully reconciled machines", "cluster", cluster.Name, "machineCount", len(machines))
 	return nil
 }
 
@@ -207,7 +206,6 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackcrd
 		}
 	} else {
 		// Machine exists, update it if needed
-		log.Info("Updating machine", "machine", machine.Name)
 		existingMachine.Spec = machine.Spec
 		existingMachine.Labels = machine.Labels
 		if err := m.Update(ctx, existingMachine); err != nil {
