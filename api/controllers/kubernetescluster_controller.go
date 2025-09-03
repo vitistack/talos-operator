@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/NorskHelsenett/ror/pkg/rlog"
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
@@ -43,8 +44,6 @@ const (
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := ctrl.LoggerFrom(ctx)
-
 	// Fetch the KubernetesCluster as unstructured to avoid decoding Quantity in status
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "vitistack.io", Version: "v1alpha1", Kind: "KubernetesCluster"})
@@ -56,7 +55,7 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if !controllerutil.ContainsFinalizer(u, KubernetesClusterFinalizer) {
 		controllerutil.AddFinalizer(u, KubernetesClusterFinalizer)
 		if err := r.Update(ctx, u); err != nil {
-			log.Error(err, "Failed to add finalizer")
+			rlog.Error("Failed to add finalizer", err)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -67,19 +66,19 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		// Handle deletion inline using unstructured
 		// Clean up machines
 		if err := r.MachineManager.CleanupMachines(ctx, u.GetName(), u.GetNamespace()); err != nil {
-			log.Error(err, "Failed to cleanup machines during deletion")
+			rlog.Error("Failed to cleanup machines during deletion", err)
 			return ctrl.Result{}, err
 		}
 		// Clean up files
 		if err := r.MachineManager.CleanupMachineFiles(u.GetName()); err != nil {
-			log.Error(err, "Failed to remove cluster directory")
+			rlog.Error("Failed to remove cluster directory", err)
 			// don't fail deletion on file errors
 		}
 		// Delete consolidated Talos Secret (k8s-<cluster>)
 		secretName := "k8s-" + u.GetName()
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: u.GetNamespace()}}
 		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			log.Error(err, "Failed to delete Talos secret", "secret", secretName)
+			rlog.Error("Failed to delete Talos secret: "+secretName, err)
 			return ctrl.Result{}, err
 		}
 		// Remove finalizer
@@ -87,7 +86,7 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if err := r.Update(ctx, u); err != nil {
 			return ctrl.Result{}, err
 		}
-		log.Info("Successfully deleted KubernetesCluster", "cluster", u.GetName())
+		rlog.Info("Successfully deleted KubernetesCluster: cluster=" + u.GetName())
 		return ctrl.Result{}, nil
 	}
 
@@ -98,26 +97,26 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if specMap, found, _ := unstructured.NestedMap(u.Object, "spec"); found {
 		// Convert spec map into typed Spec; ignore status entirely
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(specMap, &kubernetesCluster.Spec); err != nil {
-			log.Error(err, "Failed to convert spec to typed KubernetesCluster.Spec")
+			rlog.Error("Failed to convert spec to typed KubernetesCluster.Spec", err)
 			return ctrl.Result{}, err
 		}
 	}
 
 	if err := r.MachineManager.ReconcileMachines(ctx, &kubernetesCluster); err != nil {
-		log.Error(err, "Failed to reconcile machines")
+		rlog.Error("Failed to reconcile machines", err)
 		return ctrl.Result{}, err
 	}
 
 	// Reconcile Talos cluster after machines are created
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, &kubernetesCluster); err != nil {
-		log.Error(err, "Failed to reconcile Talos cluster")
+		rlog.Error("Failed to reconcile Talos cluster", err)
 		// Requeue for a later retry without surfacing an error
 		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
 	// Update KubernetesCluster status
 	if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, &kubernetesCluster); err != nil {
-		log.Error(err, "Failed to update KubernetesCluster status")
+		rlog.Error("Failed to update KubernetesCluster status", err)
 	}
 
 	return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil

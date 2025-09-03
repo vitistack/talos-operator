@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/NorskHelsenett/ror/pkg/rlog"
 	"github.com/spf13/viper"
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/pkg/consts"
@@ -13,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/yaml"
@@ -34,8 +34,6 @@ func NewMachineManager(c client.Client, scheme *runtime.Scheme) *MachineManager 
 
 // ReconcileMachines creates or updates machine manifests based on the KubernetesCluster spec
 func (m *MachineManager) ReconcileMachines(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) error {
-	log := ctrl.LoggerFrom(ctx)
-
 	// Extract node information from cluster spec
 	machines, err := m.GenerateMachinesFromCluster(cluster)
 	if err != nil {
@@ -46,7 +44,7 @@ func (m *MachineManager) ReconcileMachines(ctx context.Context, cluster *vitista
 	// Save machines to files
 	if persistMachineManifests {
 		if err := m.SaveMachinesToFiles(machines, cluster.Name); err != nil {
-			log.Error(err, "Failed to save machines to files")
+			rlog.Error("Failed to save machines to files", err)
 			// Don't fail reconciliation if file save fails, but log the error
 		}
 	}
@@ -183,8 +181,6 @@ func (m *MachineManager) SaveMachinesToFiles(machines []*vitistackcrdsv1alpha1.M
 
 // applyMachine creates or updates a Machine resource in Kubernetes
 func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackcrdsv1alpha1.Machine, cluster *vitistackcrdsv1alpha1.KubernetesCluster) error {
-	log := ctrl.LoggerFrom(ctx)
-
 	// Set owner reference
 	if err := controllerutil.SetControllerReference(cluster, machine, m.Scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference: %w", err)
@@ -197,7 +193,7 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackcrd
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Machine doesn't exist, create it
-			log.Info("Creating machine", "machine", machine.Name)
+			rlog.Info("Creating machine: " + machine.Name)
 			if err := m.Create(ctx, machine); err != nil {
 				return fmt.Errorf("failed to create machine: %w", err)
 			}
@@ -218,8 +214,6 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackcrd
 
 // CleanupMachines deletes all machines associated with a cluster
 func (m *MachineManager) CleanupMachines(ctx context.Context, clusterName, namespace string) error {
-	log := ctrl.LoggerFrom(ctx)
-
 	// List all machines with the cluster label
 	machineList := &vitistackcrdsv1alpha1.MachineList{}
 	listOpts := []client.ListOption{
@@ -234,7 +228,7 @@ func (m *MachineManager) CleanupMachines(ctx context.Context, clusterName, names
 	// Delete each machine
 	for i := range machineList.Items {
 		machine := &machineList.Items[i]
-		log.Info("Deleting machine", "machine", machine.Name)
+		rlog.Info("Deleting machine: " + machine.Name)
 		if err := m.Delete(ctx, machine); err != nil {
 			if !errors.IsNotFound(err) {
 				return fmt.Errorf("failed to delete machine %s: %w", machine.Name, err)
@@ -242,7 +236,7 @@ func (m *MachineManager) CleanupMachines(ctx context.Context, clusterName, names
 		}
 	}
 
-	log.Info("Successfully cleaned up machines", "cluster", clusterName, "machineCount", len(machineList.Items))
+	rlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s machineCount=%d", clusterName, len(machineList.Items)))
 	return nil
 }
 
