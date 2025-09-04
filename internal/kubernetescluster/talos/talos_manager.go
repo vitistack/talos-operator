@@ -10,7 +10,7 @@ import (
 	"crypto/tls"
 	"net"
 
-	"github.com/NorskHelsenett/ror/pkg/rlog"
+	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -73,7 +73,7 @@ func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitis
 	err := initializeTalosCluster(ctx, t, cluster)
 	// Always update status based on current persisted flags/conditions
 	if sErr := t.statusManager.UpdateKubernetesClusterStatus(ctx, cluster); sErr != nil {
-		rlog.Error("failed to update Kubernetes cluster status", sErr)
+		vlog.Error("failed to update Kubernetes cluster status", sErr)
 	}
 	return err
 }
@@ -92,14 +92,14 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	}
 
 	if len(machines) == 0 {
-		rlog.Info("No machines found for cluster, skipping Talos reconciliation: cluster=" + cluster.Name)
+		vlog.Info("No machines found for cluster, skipping Talos reconciliation: cluster=" + cluster.Name)
 		_ = t.statusManager.SetPhase(ctx, cluster, "Pending")
 		_ = t.statusManager.SetCondition(ctx, cluster, "MachinesDiscovered", "False", "NoMachines", "No machines found yet for this cluster")
 		return nil
 	}
 
 	// Wait for all machines to be in running state
-	//_ = t.statusManager.SetPhase(ctx, cluster, "WaitingForMachines")
+	// _ = t.statusManager.SetPhase(ctx, cluster, "WaitingForMachines")
 	_ = t.statusManager.SetCondition(ctx, cluster, "MachinesReady", "False", "Waiting", "Waiting for machines to be running with IP addresses")
 	readyMachines, err := t.waitForMachinesReady(ctx, machines)
 	if err != nil {
@@ -158,11 +158,11 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	}
 	if !fromSecret {
 		// Generate Talos configuration
-		genClientCfg, cpYAML, wYAML, err := t.generateTalosConfig(ctx, cluster, readyMachines, endpointIP)
+		genClientCfg, cpYAML, wYAML, err := t.generateTalosConfig(cluster, readyMachines, endpointIP)
 		if err != nil {
 			return fmt.Errorf("failed to generate Talos config: %w", err)
 		}
-		rlog.Info(fmt.Sprintf("Generated Talos client config: cluster=%s hasConfig=%t", cluster.Name, genClientCfg != nil))
+		vlog.Info(fmt.Sprintf("Generated Talos client config: cluster=%s hasConfig=%t", cluster.Name, genClientCfg != nil))
 		// Update status phase: config generated
 		_ = t.statusManager.SetPhase(ctx, cluster, "ConfigGenerated")
 		_ = t.statusManager.SetCondition(ctx, cluster, "ConfigGenerated", "True", "Generated", "Talos client and role configs generated")
@@ -172,7 +172,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		}
 		clientConfig = genClientCfg
 	} else {
-		rlog.Info("Loaded Talos artifacts from Secret: cluster=" + cluster.Name)
+		vlog.Info("Loaded Talos artifacts from Secret: cluster=" + cluster.Name)
 	}
 
 	insecure := true // self signed certificates at freshly installed talos nodes
@@ -191,7 +191,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		_ = t.setTalosSecretFlags(ctx, cluster, map[string]bool{"controlplane_applied": true})
 		_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneConfigApplied", "True", "Applied", "Talos config applied to control planes")
 	} else {
-		rlog.Info("Control-plane config already applied, skipping: cluster=" + cluster.Name)
+		vlog.Info("Control-plane config already applied, skipping: cluster=" + cluster.Name)
 	}
 
 	if !flags.WorkerApplied {
@@ -202,7 +202,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		_ = t.setTalosSecretFlags(ctx, cluster, map[string]bool{"worker_applied": true})
 		_ = t.statusManager.SetCondition(ctx, cluster, "WorkerConfigApplied", "True", "Applied", "Talos config applied to workers")
 	} else {
-		rlog.Info("Worker config already applied, skipping: cluster=" + cluster.Name)
+		vlog.Info("Worker config already applied, skipping: cluster=" + cluster.Name)
 	}
 
 	// Update status phase: configs applied
@@ -224,7 +224,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		// Wait for control-plane nodes to be ready with their new config (Talos API reachable securely)
 		_ = t.statusManager.SetPhase(ctx, cluster, "WaitingForTalosAPI")
 		_ = t.statusManager.SetCondition(ctx, cluster, "WaitingForTalosAPI", "True", "Waiting", "Waiting for Talos API on control planes")
-		if err := t.waitForTalosAPIs(ctx, cluster, clientConfig, controlPlanes, false, 10*time.Minute, 10*time.Second); err != nil {
+		if err := t.waitForTalosAPIs(cluster, clientConfig, controlPlanes, false, 10*time.Minute, 10*time.Second); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "False", "NotReady", err.Error())
 			return fmt.Errorf("control planes not ready for bootstrap: %w", err)
 		}
@@ -241,7 +241,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		// mark bootstrapped in the persistent Secret
 		_ = t.setTalosSecretFlags(ctx, cluster, map[string]bool{"bootstrapped": true})
 	} else if clusterState.Bootstrapped {
-		rlog.Info("Cluster already bootstrapped, skipping bootstrap step: cluster=" + cluster.Name)
+		vlog.Info("Cluster already bootstrapped, skipping bootstrap step: cluster=" + cluster.Name)
 	}
 
 	// Get Kubernetes access (fetch kubeconfig and store it as a Secret)
@@ -261,10 +261,10 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "True", "Persisted", "Kubeconfig stored in Secret")
 
 		if !hasKubeconfig {
-			rlog.Info("Kubeconfig stored in Secret: secret=" + fmt.Sprintf("k8s-%s", cluster.Name))
+			vlog.Info("Kubeconfig stored in Secret: secret=" + fmt.Sprintf("k8s-%s", cluster.Name))
 		}
 	} else if clusterState.ClusterAccess {
-		rlog.Info("Cluster access already established (kubeconfig present), skipping fetch: cluster=" + cluster.Name)
+		vlog.Info("Cluster access already established (kubeconfig present), skipping fetch: cluster=" + cluster.Name)
 	}
 	return nil
 }
@@ -503,7 +503,7 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 		if err != nil {
 			return fmt.Errorf("error applying configuration to node %s: %w", ip, err)
 		}
-		rlog.Info(fmt.Sprintf("Talos apply configuration response: node=%s messages=%v", ip, resp.Messages))
+		vlog.Info(fmt.Sprintf("Talos apply configuration response: node=%s messages=%v", ip, resp.Messages))
 	}
 	return nil
 }
@@ -661,7 +661,6 @@ func (t *TalosManager) upsertTalosClusterConfigSecretWithRoleYAML(
 // waitForTalosAPIs waits until Talos API on the given machines is reachable.
 // If insecure=true, connects with InsecureSkipVerify to handle first-boot state.
 func (t *TalosManager) waitForTalosAPIs(
-	ctx context.Context,
 	_ *vitistackcrdsv1alpha1.KubernetesCluster,
 	_ *clientconfig.Config,
 	machines []*vitistackcrdsv1alpha1.Machine,
@@ -691,7 +690,7 @@ func (t *TalosManager) waitForTalosAPIs(
 			addr := net.JoinHostPort(ip, "50000")
 			conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 			if err != nil {
-				rlog.Info("Talos API port not reachable yet: node=" + ip + " error=" + err.Error())
+				vlog.Info("Talos API port not reachable yet: node=" + ip + " error=" + err.Error())
 				allOK = false
 				continue
 			}
@@ -717,7 +716,7 @@ func (t *TalosManager) bootstrapTalosControlPlane(ctx context.Context, tClient *
 		return fmt.Errorf("talos bootstrap failed: %w", err)
 	}
 
-	rlog.Info("Talos bootstrap initiated: node=" + controlPlaneIP)
+	vlog.Info("Talos bootstrap initiated: node=" + controlPlaneIP)
 	return nil
 }
 
@@ -782,7 +781,7 @@ func getKubeconfigWithRetry(ctx context.Context, clientCfg *clientconfig.Config,
 			return nil, fmt.Errorf("timeout waiting for kubeconfig: received empty config")
 		}
 
-		rlog.Info("Kubeconfig not ready yet, retrying: endpoint=" + endpoint)
+		vlog.Info("Kubeconfig not ready yet, retrying: endpoint=" + endpoint)
 		time.Sleep(interval)
 	}
 }
@@ -824,10 +823,10 @@ func (t *TalosManager) waitForMachinesReady(ctx context.Context, machines []*vit
 		case <-ticker.C:
 			readyMachines, allReady := t.checkMachinesReady(ctx, machines)
 			if allReady {
-				rlog.Info(fmt.Sprintf("All machines are ready: count=%d", len(readyMachines)))
+				vlog.Info(fmt.Sprintf("All machines are ready: count=%d", len(readyMachines)))
 				return readyMachines, nil
 			}
-			rlog.Info(fmt.Sprintf("Waiting for machines to be ready: ready=%d total=%d", len(readyMachines), len(machines)))
+			vlog.Info(fmt.Sprintf("Waiting for machines to be ready: ready=%d total=%d", len(readyMachines), len(machines)))
 		}
 	}
 }
@@ -884,7 +883,7 @@ func (t *TalosManager) isMachineReady(m *vitistackcrdsv1alpha1.Machine) bool {
 }
 
 // generateTalosConfig generates Talos configuration for the cluster
-func (t *TalosManager) generateTalosConfig(ctx context.Context,
+func (t *TalosManager) generateTalosConfig(
 	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
 	machines []*vitistackcrdsv1alpha1.Machine,
 	endpointIP string) (*clientconfig.Config, []byte, []byte, error) {
@@ -902,7 +901,7 @@ func (t *TalosManager) generateTalosConfig(ctx context.Context,
 	// secrets can be stashed for future use by marshaling the structure to YAML or JSON
 	secretsBundle, err := secrets.NewBundle(secrets.NewFixedClock(time.Now()), versionContract)
 	if err != nil {
-		rlog.Error("failed to generate secrets bundle", err)
+		vlog.Error("failed to generate secrets bundle", err)
 	}
 
 	endpointlist := []string{}
@@ -920,7 +919,7 @@ func (t *TalosManager) generateTalosConfig(ctx context.Context,
 		// there are many more generate options available which allow to tweak generated config programmatically
 	)
 	if err != nil {
-		rlog.Error("failed to generate input", err)
+		vlog.Error("failed to generate input", err)
 	}
 
 	// Role templates for control-plane and worker

@@ -25,10 +25,10 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
-	"github.com/NorskHelsenett/ror/pkg/rlog"
+	"github.com/vitistack/common/pkg/clients/k8sclient"
+	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/api/controllers"
-	"github.com/vitistack/talos-operator/internal/k8sclient"
 	"github.com/vitistack/talos-operator/internal/services/initializationservice"
 	"github.com/vitistack/talos-operator/internal/settings"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -96,17 +96,17 @@ func main() {
 
 	// Add certificate watchers to the manager if they exist
 	if metricsCertWatcher != nil {
-		rlog.Info("Adding metrics certificate watcher to manager")
+		vlog.Info("Adding metrics certificate watcher to manager")
 		if err := mgr.Add(metricsCertWatcher); err != nil {
-			rlog.Error("unable to add metrics certificate watcher to manager", err)
+			vlog.Error("unable to add metrics certificate watcher to manager", err)
 			os.Exit(1)
 		}
 	}
 
 	if webhookCertWatcher != nil {
-		rlog.Info("Adding webhook certificate watcher to manager")
+		vlog.Info("Adding webhook certificate watcher to manager")
 		if err := mgr.Add(webhookCertWatcher); err != nil {
-			rlog.Error("unable to add webhook certificate watcher to manager", err)
+			vlog.Error("unable to add webhook certificate watcher to manager", err)
 			os.Exit(1)
 		}
 	}
@@ -117,9 +117,9 @@ func main() {
 	setupHealthChecks(mgr)
 
 	// Start the manager
-	rlog.Info("starting manager")
+	vlog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		rlog.Error("problem running manager", err)
+		vlog.Error("problem running manager", err)
 		os.Exit(1)
 	}
 }
@@ -157,7 +157,13 @@ func parseFlags() *Flags {
 	flag.Parse()
 
 	// Set up the logger
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	// ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	_ = vlog.Setup(vlog.Options{Level: "info", ColorizeLine: true, AddCaller: true})
+	defer func() {
+		_ = vlog.Sync()
+	}()
+
+	ctrl.SetLogger(vlog.Logr())
 
 	return flags
 }
@@ -170,7 +176,7 @@ func configureTLS(enableHTTP2 bool) []func(*tls.Config) {
 	// This prevents vulnerabilities like HTTP/2 Stream Cancellation and Rapid Reset CVEs
 	if !enableHTTP2 {
 		disableHTTP2 := func(c *tls.Config) {
-			rlog.Info("Disabling http/2")
+			vlog.Info("Disabling http/2")
 			c.NextProtos = []string{"http/1.1"}
 		}
 		tlsOpts = append(tlsOpts, disableHTTP2)
@@ -187,10 +193,10 @@ func setupWebhookServer(flags *Flags, tlsOpts []func(*tls.Config)) (webhook.Serv
 
 	// Set up certificate watcher if path is provided
 	if len(flags.WebhookCertPath) > 0 {
-		rlog.Info("Initializing webhook certificate watcher using provided certificates",
-			rlog.String("webhook-cert-path", flags.WebhookCertPath),
-			rlog.String("webhook-cert-name", flags.WebhookCertName),
-			rlog.String("webhook-cert-key", flags.WebhookCertKey))
+		vlog.Info("Initializing webhook certificate watcher using provided certificates",
+			"webhook-cert-path", flags.WebhookCertPath,
+			"webhook-cert-name", flags.WebhookCertName,
+			"webhook-cert-key", flags.WebhookCertKey)
 
 		var err error
 		webhookCertWatcher, err = certwatcher.New(
@@ -198,7 +204,7 @@ func setupWebhookServer(flags *Flags, tlsOpts []func(*tls.Config)) (webhook.Serv
 			filepath.Join(flags.WebhookCertPath, flags.WebhookCertKey),
 		)
 		if err != nil {
-			rlog.Error("Failed to initialize webhook certificate watcher", err)
+			vlog.Error("Failed to initialize webhook certificate watcher", err)
 			os.Exit(1)
 		}
 
@@ -233,10 +239,10 @@ func setupMetricsServer(flags *Flags, tlsOpts []func(*tls.Config)) (metricsserve
 
 	// Set up certificate watcher if path is provided
 	if len(flags.MetricsCertPath) > 0 {
-		rlog.Info("Initializing metrics certificate watcher using provided certificates",
-			rlog.String("metrics-cert-path", flags.MetricsCertPath),
-			rlog.String("metrics-cert-name", flags.MetricsCertName),
-			rlog.String("metrics-cert-key", flags.MetricsCertKey))
+		vlog.Info("Initializing metrics certificate watcher using provided certificates",
+			"metrics-cert-path", flags.MetricsCertPath,
+			"metrics-cert-name", flags.MetricsCertName,
+			"metrics-cert-key", flags.MetricsCertKey)
 
 		var err error
 		metricsCertWatcher, err = certwatcher.New(
@@ -244,7 +250,7 @@ func setupMetricsServer(flags *Flags, tlsOpts []func(*tls.Config)) (metricsserve
 			filepath.Join(flags.MetricsCertPath, flags.MetricsCertKey),
 		)
 		if err != nil {
-			rlog.Error("Failed to initialize metrics certificate watcher", err)
+			vlog.Error("Failed to initialize metrics certificate watcher", err)
 			os.Exit(1)
 		}
 
@@ -269,7 +275,7 @@ func setupManager(flags *Flags, metricsOpts *metricsserver.Options, webhookServe
 		// LeaderElectionReleaseOnCancel: true, // Commented out as in original
 	})
 	if err != nil {
-		rlog.Error("unable to start manager", err)
+		vlog.Error("unable to start manager", err)
 		os.Exit(1)
 	}
 
@@ -279,11 +285,11 @@ func setupManager(flags *Flags, metricsOpts *metricsserver.Options, webhookServe
 // setupHealthChecks adds health and readiness checks to the manager
 func setupHealthChecks(mgr ctrl.Manager) {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		rlog.Error("unable to set up health check", err)
+		vlog.Error("unable to set up health check", err)
 		os.Exit(1)
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		rlog.Error("unable to set up ready check", err)
+		vlog.Error("unable to set up ready check", err)
 		os.Exit(1)
 	}
 }
@@ -291,10 +297,10 @@ func setupHealthChecks(mgr ctrl.Manager) {
 func setupReconcilers(mgr ctrl.Manager, _ *certwatcher.CertWatcher, _ *certwatcher.CertWatcher) {
 	// +kubebuilder:scaffold:builder
 
-	rlog.Info("All controllers and webhooks are set up")
+	vlog.Info("All controllers and webhooks are set up")
 	kubernetesClusterReconciler := controllers.NewKubernetesClusterReconciler(mgr.GetClient(), mgr.GetScheme())
 	if err := kubernetesClusterReconciler.SetupWithManager(mgr); err != nil {
-		rlog.Error("unable to create controller", err)
+		vlog.Error("unable to create controller", err)
 		os.Exit(1)
 	}
 }

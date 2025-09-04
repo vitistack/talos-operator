@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/NorskHelsenett/ror/pkg/rlog"
+	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,7 +57,7 @@ func (m *StatusManager) UpdateKubernetesClusterStatus(ctx context.Context, kuber
 			// If we can reach the target cluster via kubeconfig, mark Ready
 			_ = m.SetPhase(ctx, kubernetesCluster, phaseReady)
 		} else if err != nil {
-			rlog.Debug("Failed to get kube-system creation time from target cluster: " + err.Error())
+			vlog.Debug("Failed to get kube-system creation time from target cluster: " + err.Error())
 		}
 	}
 	// Aggregate machine info into status (best effort)
@@ -143,7 +143,7 @@ func (m *StatusManager) SetStateCreated(ctx context.Context, kc *vitistackv1alph
 		return err
 	}
 	if err := ensureStatusMap(u); err != nil {
-		rlog.Error("Failed to ensure status map exists for SetStateCreated: cluster="+kc.Name, err)
+		vlog.Error("Failed to ensure status map exists for SetStateCreated: cluster="+kc.Name, err)
 		return err
 	}
 	createdStr := created.UTC().Format(time.RFC3339Nano)
@@ -297,11 +297,11 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 		return err
 	}
 	if err := ensureStatusMap(u); err != nil {
-		rlog.Error("Failed to ensure status map exists: cluster="+kc.Name, err)
+		vlog.Error("Failed to ensure status map exists: cluster="+kc.Name, err)
 		return err
 	}
 	if err := unstructured.SetNestedField(u.Object, phase, "status", "phase"); err != nil {
-		rlog.Error("Failed to set nested field for phase: cluster="+kc.Name+" phase="+phase, err)
+		vlog.Error("Failed to set nested field for phase: cluster="+kc.Name+" phase="+phase, err)
 		return err
 	}
 	// Update state.lastUpdated and lastUpdatedBy
@@ -310,13 +310,13 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
 	// Do not set status.state here; it's an object in the CRD. ensureStatusMap already ensures it exists.
 	if err := m.Status().Update(ctx, u); err != nil {
-		rlog.Error("Status().Update failed, trying fallback Update: cluster="+kc.Name, err)
+		vlog.Error("Status().Update failed, trying fallback Update: cluster="+kc.Name, err)
 		// fallback for CRDs without status subresource
 		if fallbackErr := m.Update(ctx, u); fallbackErr != nil {
-			rlog.Error("Fallback Update also failed: cluster="+kc.Name, fallbackErr)
+			vlog.Error("Fallback Update also failed: cluster="+kc.Name, fallbackErr)
 			return fallbackErr
 		}
-		rlog.Info("Fallback Update succeeded: cluster=" + kc.Name)
+		vlog.Info("Fallback Update succeeded: cluster=" + kc.Name)
 	}
 	return nil
 }
@@ -336,7 +336,7 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 		return err
 	}
 	if err := ensureStatusMap(u); err != nil {
-		rlog.Error("Failed to ensure status map exists for condition: cluster="+kc.Name, err)
+		vlog.Error("Failed to ensure status map exists for condition: cluster="+kc.Name, err)
 		return err
 	}
 
@@ -378,7 +378,7 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 	}
 
 	if err := unstructured.SetNestedSlice(u.Object, conds, "status", "conditions"); err != nil {
-		rlog.Error("Failed to set nested slice for conditions: cluster="+kc.Name+" condition="+condType, err)
+		vlog.Error("Failed to set nested slice for conditions: cluster="+kc.Name+" condition="+condType, err)
 		return err
 	}
 	// Touch state.lastUpdated and lastUpdatedBy
@@ -387,13 +387,13 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
 
 	if err := m.Status().Update(ctx, u); err != nil {
-		rlog.Error("Status().Update failed for condition, trying fallback Update: cluster="+kc.Name+" condition="+condType, err)
+		vlog.Error("Status().Update failed for condition, trying fallback Update: cluster="+kc.Name+" condition="+condType, err)
 		// fallback for CRDs without status subresource
 		if fallbackErr := m.Update(ctx, u); fallbackErr != nil {
-			rlog.Error("Fallback Update also failed for condition: cluster="+kc.Name+" condition="+condType, fallbackErr)
+			vlog.Error("Fallback Update also failed for condition: cluster="+kc.Name+" condition="+condType, fallbackErr)
 			return fallbackErr
 		}
-		rlog.Info("Fallback Update succeeded for condition: cluster=" + kc.Name + " condition=" + condType)
+		vlog.Info("Fallback Update succeeded for condition: cluster=" + kc.Name + " condition=" + condType)
 	}
 	return nil
 }
@@ -406,7 +406,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 		client.InNamespace(kc.Namespace),
 		client.MatchingLabels{"cluster.vitistack.io/cluster-name": kc.Name},
 	); err != nil {
-		rlog.Debug("failed to list machines for aggregation: cluster=" + kc.Name + " error=" + err.Error())
+		vlog.Debug("failed to list machines for aggregation: cluster=" + kc.Name + " error=" + err.Error())
 		return err
 	}
 

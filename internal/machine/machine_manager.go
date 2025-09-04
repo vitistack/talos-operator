@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/NorskHelsenett/ror/pkg/rlog"
 	"github.com/spf13/viper"
+	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -44,7 +44,7 @@ func (m *MachineManager) ReconcileMachines(ctx context.Context, cluster *vitista
 	// Save machines to files
 	if persistMachineManifests {
 		if err := m.SaveMachinesToFiles(machines, cluster.Name); err != nil {
-			rlog.Error("Failed to save machines to files", err)
+			vlog.Error("Failed to save machines to files", err)
 			// Don't fail reconciliation if file save fails, but log the error
 		}
 	}
@@ -193,7 +193,7 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackcrd
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Machine doesn't exist, create it
-			rlog.Info("Creating machine: " + machine.Name)
+			vlog.Info("Creating machine: " + machine.Name)
 			if err := m.Create(ctx, machine); err != nil {
 				return fmt.Errorf("failed to create machine: %w", err)
 			}
@@ -228,7 +228,7 @@ func (m *MachineManager) CleanupMachines(ctx context.Context, clusterName, names
 	// Delete each machine
 	for i := range machineList.Items {
 		machine := &machineList.Items[i]
-		rlog.Info("Deleting machine: " + machine.Name)
+		vlog.Info("Deleting machine: " + machine.Name)
 		if err := m.Delete(ctx, machine); err != nil {
 			if !errors.IsNotFound(err) {
 				return fmt.Errorf("failed to delete machine %s: %w", machine.Name, err)
@@ -236,7 +236,7 @@ func (m *MachineManager) CleanupMachines(ctx context.Context, clusterName, names
 		}
 	}
 
-	rlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s machineCount=%d", clusterName, len(machineList.Items)))
+	vlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s machineCount=%d", clusterName, len(machineList.Items)))
 	return nil
 }
 
