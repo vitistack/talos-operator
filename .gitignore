@@ -33,7 +33,8 @@ coverage.out
 coverage.html
 cover.html
 
-hack/crds/
+hack/crds/ 
+hack/vitistack-crds/ 
 hack/results
 hack/talos-configs/**/*
 hack/machine-manifests/**/*
