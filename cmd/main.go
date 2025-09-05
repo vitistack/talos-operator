@@ -25,12 +25,14 @@ import (
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
+	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/clients/k8sclient"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/api/controllers"
 	"github.com/vitistack/talos-operator/internal/services/initializationservice"
 	"github.com/vitistack/talos-operator/internal/settings"
+	"github.com/vitistack/talos-operator/pkg/consts"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -158,7 +160,7 @@ func parseFlags() *Flags {
 
 	// Set up the logger
 	// ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-	_ = vlog.Setup(vlog.Options{Level: "info", ColorizeLine: true, AddCaller: true})
+	_ = vlog.Setup(vlog.Options{Level: viper.GetString(consts.LOG_LEVEL), ColorizeLine: true, AddCaller: true})
 	defer func() {
 		_ = vlog.Sync()
 	}()

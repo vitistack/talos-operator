@@ -13,7 +13,9 @@
       "debugAdapter": "dlv-dap",
       "env": {
         "MACHINE_MANIFESTS_PATH": "${workspaceFolder}/hack/machine-manifests",
-        "TALOS_CONFIG_BASE_PATH": "${workspaceFolder}/hack/talos-configs"
+        "TALOS_CONFIG_BASE_PATH": "${workspaceFolder}/hack/talos-configs",
+        "JSON_LOGGING": "true",
+        "LOG_LEVEL": "debug"
       }
     }
   ]

@@ -440,8 +440,6 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 	clientConfig *clientconfig.Config,
 	machines []*vitistackcrdsv1alpha1.Machine,
 	insecure bool) error {
-	// rlog used for logging
-
 	// Load role templates from persistent Secret
 	secretName := fmt.Sprintf("k8s-%s", cluster.Name)
 	secret := &corev1.Secret{}
@@ -668,7 +666,6 @@ func (t *TalosManager) waitForTalosAPIs(
 	timeout time.Duration,
 	interval time.Duration,
 ) error {
-	// rlog used for logging
 	deadline := time.Now().Add(timeout)
 
 	// Collect node IPs
@@ -706,8 +703,6 @@ func (t *TalosManager) waitForTalosAPIs(
 
 // bootstrapTalosControlPlane bootstraps the cluster against a single control plane node.
 func (t *TalosManager) bootstrapTalosControlPlane(ctx context.Context, tClient *talosclient.Client, controlPlaneIP string) error {
-	// rlog used for logging
-
 	// Ensure we target a single node for bootstrap
 	ctx = talosclient.WithNodes(ctx, controlPlaneIP)
 
@@ -751,7 +746,6 @@ func isTLSHandshakeAuthError(err error) bool {
 
 // getKubeconfigWithRetry tries to fetch kubeconfig until timeout, waiting interval between tries.
 func getKubeconfigWithRetry(ctx context.Context, clientCfg *clientconfig.Config, endpoint string, timeout time.Duration, interval time.Duration) ([]byte, error) {
-	// rlog used for logging
 	deadline := time.Now().Add(timeout)
 	for {
 		select {
@@ -808,8 +802,6 @@ func (t *TalosManager) getClusterMachines(ctx context.Context, cluster *vitistac
 
 // waitForMachinesReady waits for all machines to be in running state with IP addresses
 func (t *TalosManager) waitForMachinesReady(ctx context.Context, machines []*vitistackcrdsv1alpha1.Machine) ([]*vitistackcrdsv1alpha1.Machine, error) {
-	// rlog used for logging
-
 	timeout := time.After(DefaultMachineTimeout)
 	ticker := time.NewTicker(DefaultMachineCheckInterval)
 	defer ticker.Stop()
@@ -887,7 +879,6 @@ func (t *TalosManager) generateTalosConfig(
 	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
 	machines []*vitistackcrdsv1alpha1.Machine,
 	endpointIP string) (*clientconfig.Config, []byte, []byte, error) {
-	// rlog used for logging
 
 	controlPlanes := filterMachinesByRole(machines, "control-plane")
 

@@ -15,6 +15,8 @@ import (
 func Init() {
 	viper.SetDefault(consts.MACHINE_MANIFESTS_PATH, "/")
 	viper.SetDefault(consts.PERSIST_MACHINE_MANIFESTS, false)
+	viper.SetDefault(consts.JSON_LOGGING, true)
+	viper.SetDefault(consts.LOG_LEVEL, "info")
 
 	viper.AutomaticEnv()
 }
