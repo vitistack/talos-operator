@@ -879,7 +879,6 @@ func (t *TalosManager) generateTalosConfig(
 	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
 	machines []*vitistackcrdsv1alpha1.Machine,
 	endpointIP string) (*clientconfig.Config, []byte, []byte, error) {
-
 	controlPlanes := filterMachinesByRole(machines, "control-plane")
 
 	clusterName := cluster.Name
