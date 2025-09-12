@@ -29,7 +29,7 @@ import (
 	"github.com/vitistack/common/pkg/clients/k8sclient"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
-	"github.com/vitistack/talos-operator/api/controllers"
+	"github.com/vitistack/talos-operator/api/controllers/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/initializationservice"
 	"github.com/vitistack/talos-operator/internal/settings"
 	"github.com/vitistack/talos-operator/pkg/consts"
@@ -300,7 +300,7 @@ func setupReconcilers(mgr ctrl.Manager, _ *certwatcher.CertWatcher, _ *certwatch
 	// +kubebuilder:scaffold:builder
 
 	vlog.Info("All controllers and webhooks are set up")
-	kubernetesClusterReconciler := controllers.NewKubernetesClusterReconciler(mgr.GetClient(), mgr.GetScheme())
+	kubernetesClusterReconciler := v1alpha1.NewKubernetesClusterReconciler(mgr.GetClient(), mgr.GetScheme())
 	if err := kubernetesClusterReconciler.SetupWithManager(mgr); err != nil {
 		vlog.Error("unable to create controller", err)
 		os.Exit(1)

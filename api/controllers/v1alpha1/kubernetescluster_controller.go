@@ -1,4 +1,4 @@
-package controllers
+package v1alpha1
 
 import (
 	"context"
@@ -51,20 +51,75 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(u, KubernetesClusterFinalizer) {
-		controllerutil.AddFinalizer(u, KubernetesClusterFinalizer)
-		if err := r.Update(ctx, u); err != nil {
-			vlog.Error("Failed to add finalizer", err)
-			return ctrl.Result{}, err
-		}
+	// Handle deletion first and only perform cleanup when our finalizer is present
+	if u.GetDeletionTimestamp() != nil {
+		return r.handleDeletion(ctx, u)
+	}
+
+	// Only reconcile clusters with spec.data.provider == "talos"
+	if !r.isTalosProvider(u) {
+		vlog.Info("Skipping KubernetesCluster: unsupported provider (need 'talos'): cluster=" + u.GetName())
+		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer if not present (only for talos-managed clusters)
+	if requeue, err := r.ensureFinalizer(ctx, u); err != nil {
+		vlog.Error("Failed to add finalizer", err)
+		return ctrl.Result{}, err
+	} else if requeue {
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Handle deletion
-	if u.GetDeletionTimestamp() != nil {
-		// Handle deletion inline using unstructured
-		// Clean up machines
+	// Reconcile machines based on cluster spec
+	// Build typed object with Spec only for downstream managers
+	kubernetesCluster, err := buildTypedClusterFromUnstructured(u)
+	if err != nil {
+		vlog.Error("Failed to convert spec to typed KubernetesCluster.Spec", err)
+		return ctrl.Result{}, err
+	}
+
+	if err := r.MachineManager.ReconcileMachines(ctx, kubernetesCluster); err != nil {
+		vlog.Error("Failed to reconcile machines", err)
+		return ctrl.Result{}, err
+	}
+
+	// Reconcile Talos cluster after machines are created
+	if err := r.TalosManager.ReconcileTalosCluster(ctx, kubernetesCluster); err != nil {
+		vlog.Error("Failed to reconcile Talos cluster", err)
+		// Requeue for a later retry without surfacing an error
+		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+	}
+
+	// Update KubernetesCluster status
+	if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, kubernetesCluster); err != nil {
+		vlog.Error("Failed to update KubernetesCluster status", err)
+	}
+
+	return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+}
+
+// isTalosProvider returns true if spec.data.provider == "talos"
+func (r *KubernetesClusterReconciler) isTalosProvider(u *unstructured.Unstructured) bool {
+	provider, _, _ := unstructured.NestedString(u.Object, "spec", "data", "provider")
+	return provider == "talos"
+}
+
+// ensureFinalizer adds the finalizer if not present. Returns requeue=true when an update was made.
+func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, u *unstructured.Unstructured) (bool, error) {
+	if controllerutil.ContainsFinalizer(u, KubernetesClusterFinalizer) {
+		return false, nil
+	}
+	controllerutil.AddFinalizer(u, KubernetesClusterFinalizer)
+	if err := r.Update(ctx, u); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// handleDeletion performs cleanup and removes the finalizer when present
+func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, u *unstructured.Unstructured) (ctrl.Result, error) {
+	if controllerutil.ContainsFinalizer(u, KubernetesClusterFinalizer) {
+		// Clean up machines managed by this operator
 		if err := r.MachineManager.CleanupMachines(ctx, u.GetName(), u.GetNamespace()); err != nil {
 			vlog.Error("Failed to cleanup machines during deletion", err)
 			return ctrl.Result{}, err
@@ -87,39 +142,22 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			return ctrl.Result{}, err
 		}
 		vlog.Info("Successfully deleted KubernetesCluster: cluster=" + u.GetName())
-		return ctrl.Result{}, nil
 	}
+	// If no finalizer, nothing to do for us
+	return ctrl.Result{}, nil
+}
 
-	// Reconcile machines based on cluster spec
-	// Build typed object with Spec only for downstream managers
-	var kubernetesCluster vitistackcrdsv1alpha1.KubernetesCluster
-	kubernetesCluster.ObjectMeta = metav1.ObjectMeta{Name: u.GetName(), Namespace: u.GetNamespace()}
+// buildTypedClusterFromUnstructured constructs a typed KubernetesCluster with only metadata and spec
+func buildTypedClusterFromUnstructured(u *unstructured.Unstructured) (*vitistackcrdsv1alpha1.KubernetesCluster, error) {
+	var kc vitistackcrdsv1alpha1.KubernetesCluster
+	kc.ObjectMeta = metav1.ObjectMeta{Name: u.GetName(), Namespace: u.GetNamespace()}
 	if specMap, found, _ := unstructured.NestedMap(u.Object, "spec"); found {
 		// Convert spec map into typed Spec; ignore status entirely
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(specMap, &kubernetesCluster.Spec); err != nil {
-			vlog.Error("Failed to convert spec to typed KubernetesCluster.Spec", err)
-			return ctrl.Result{}, err
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(specMap, &kc.Spec); err != nil {
+			return nil, err
 		}
 	}
-
-	if err := r.MachineManager.ReconcileMachines(ctx, &kubernetesCluster); err != nil {
-		vlog.Error("Failed to reconcile machines", err)
-		return ctrl.Result{}, err
-	}
-
-	// Reconcile Talos cluster after machines are created
-	if err := r.TalosManager.ReconcileTalosCluster(ctx, &kubernetesCluster); err != nil {
-		vlog.Error("Failed to reconcile Talos cluster", err)
-		// Requeue for a later retry without surfacing an error
-		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
-	}
-
-	// Update KubernetesCluster status
-	if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, &kubernetesCluster); err != nil {
-		vlog.Error("Failed to update KubernetesCluster status", err)
-	}
-
-	return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+	return &kc, nil
 }
 
 // NewKubernetesClusterReconciler creates a new KubernetesClusterReconciler with initialized managers
