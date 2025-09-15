@@ -8,7 +8,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.25.3
 	github.com/onsi/gomega v1.38.2
 	github.com/vitistack/common v0.0.6
-	github.com/vitistack/crds v0.0.6
+	github.com/vitistack/crds v0.0.7
 	k8s.io/apimachinery v0.34.1
 	k8s.io/client-go v0.34.1
 	sigs.k8s.io/controller-runtime v0.22.1
@@ -18,7 +18,7 @@ require (
 require (
 	cel.dev/expr v0.24.0 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
-	github.com/NorskHelsenett/ror v1.4.19 // indirect
+	github.com/NorskHelsenett/ror v1.4.20 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/ProtonMail/go-mime v0.0.0-20230322103455-7d82a3887f2f // indirect
 	github.com/ProtonMail/gopenpgp/v2 v2.9.0 // indirect
