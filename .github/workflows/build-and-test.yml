@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-test-checksecurity:
-    name: Build test and check security
+    name: Build, lint, test and check security
     runs-on: ubuntu-latest
     env:
       GOPRIVATE: github.com/vitistack
@@ -22,7 +22,7 @@ jobs:
           git config --global url.https://$GH_TOKEN@github.com/.insteadOf https://github.com/
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -50,6 +50,10 @@ jobs:
           VERSION="${VERSION#v*}"
           echo "Version $VERSION"
           make build
+
+      - name: Lint
+        run: |
+          make lint
 
       - name: Setup test environment
         run: |
