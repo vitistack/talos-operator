@@ -5,7 +5,7 @@ go 1.25.2
 godebug default=go1.25
 
 require (
-	github.com/onsi/ginkgo/v2 v2.26.0
+	github.com/onsi/ginkgo/v2 v2.27.1
 	github.com/onsi/gomega v1.38.2
 	github.com/vitistack/common v0.0.15
 	github.com/vitistack/crds v0.2.9
