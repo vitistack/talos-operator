@@ -2,9 +2,9 @@ name: Build and Test
 
 on:
   push:
-    branches: ["*"]
+    branches: ['*']
   pull_request:
-    branches: ["main", "master"]
+    branches: ['main', 'master']
 
 jobs:
   build-test-checksecurity:
@@ -70,7 +70,7 @@ jobs:
           go tool cover -func=coverage.out
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: coverage
           path: coverage.out
