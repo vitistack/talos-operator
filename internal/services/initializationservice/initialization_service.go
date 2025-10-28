@@ -20,7 +20,7 @@ func CheckPrerequisites() {
 		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "machineproviders"},
 		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "networknamespaces"},
 		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "networkconfigurations"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "vitistack"},
+		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "vitistacks"},
 	)
 
 	vlog.Info("✅ Prerequisite checks passed")
