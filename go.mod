@@ -118,7 +118,7 @@ require (
 	github.com/siderolabs/go-pointer v1.0.1 // indirect
 	github.com/siderolabs/net v0.4.0 // indirect
 	github.com/siderolabs/protoenc v0.2.4 // indirect
-	github.com/siderolabs/talos/pkg/machinery v1.11.3
+	github.com/siderolabs/talos/pkg/machinery v1.11.5
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/cobra v1.10.1 // indirect
