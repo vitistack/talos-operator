@@ -233,7 +233,7 @@ GOSEC_VERSION ?= latest
 # Override VITISTACK_CRDS_REF to pin a branch, tag, or commit (default: main)
 VITISTACK_CRDS_REF ?= main
 # GitHub API endpoint to list files under crds/ at a specific ref
-VITISTACK_CRDS_API ?= https://api.github.com/repos/vitistack/crds/contents/crds?ref=$(VITISTACK_CRDS_REF)
+VITISTACK_CRDS_API ?= https://api.github.com/repos/vitistack/common/contents/crds?ref=$(VITISTACK_CRDS_REF)
 # Local directory where CRDs will be downloaded
 CRDS_DOWNLOAD_DIR ?= hack/vitistack-crds
 
