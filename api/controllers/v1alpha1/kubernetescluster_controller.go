@@ -4,17 +4,18 @@ import (
 	"context"
 	"time"
 
+	"github.com/NorskHelsenett/ror/pkg/kubernetes/providers/providermodels"
+	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
+	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
+	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -44,26 +45,25 @@ const (
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	// Fetch the KubernetesCluster as unstructured to avoid decoding Quantity in status
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "vitistack.io", Version: "v1alpha1", Kind: "KubernetesCluster"})
-	if err := r.Get(ctx, req.NamespacedName, u); err != nil {
+	// Fetch the KubernetesCluster
+	kubernetesCluster := &vitistackcrdsv1alpha1.KubernetesCluster{}
+	if err := r.Get(ctx, req.NamespacedName, kubernetesCluster); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Handle deletion first and only perform cleanup when our finalizer is present
-	if u.GetDeletionTimestamp() != nil {
-		return r.handleDeletion(ctx, u)
+	if kubernetesCluster.GetDeletionTimestamp() != nil {
+		return r.handleDeletion(ctx, kubernetesCluster)
 	}
 
-	// Only reconcile clusters with spec.data.provider == "talos"
-	if !r.isTalosProvider(u) {
-		vlog.Info("Skipping KubernetesCluster: unsupported provider (need 'talos'): cluster=" + u.GetName())
+	// Only reconcile clusters with spec.cluster.provider == "talos"
+	if !r.isTalosProvider(kubernetesCluster) {
+		vlog.Info("Skipping KubernetesCluster: unsupported provider (need 'talos'): cluster=" + kubernetesCluster.GetName())
 		return ctrl.Result{}, nil
 	}
 
 	// Add finalizer if not present (only for talos-managed clusters)
-	if requeue, err := r.ensureFinalizer(ctx, u); err != nil {
+	if requeue, err := r.ensureFinalizer(ctx, kubernetesCluster); err != nil {
 		vlog.Error("Failed to add finalizer", err)
 		return ctrl.Result{}, err
 	} else if requeue {
@@ -71,13 +71,6 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Reconcile machines based on cluster spec
-	// Build typed object with Spec only for downstream managers
-	kubernetesCluster, err := buildTypedClusterFromUnstructured(u)
-	if err != nil {
-		vlog.Error("Failed to convert spec to typed KubernetesCluster.Spec", err)
-		return ctrl.Result{}, err
-	}
-
 	if err := r.MachineManager.ReconcileMachines(ctx, kubernetesCluster); err != nil {
 		vlog.Error("Failed to reconcile machines", err)
 		return ctrl.Result{}, err
@@ -99,65 +92,52 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 }
 
 // isTalosProvider returns true if spec.data.provider == "talos"
-func (r *KubernetesClusterReconciler) isTalosProvider(u *unstructured.Unstructured) bool {
-	provider, _, _ := unstructured.NestedString(u.Object, "spec", "data", "provider")
-	return provider == "talos"
+// TODO: Fix this - need to determine how to access spec.data.provider from typed struct
+func (r *KubernetesClusterReconciler) isTalosProvider(kc *vitistackcrdsv1alpha1.KubernetesCluster) bool {
+	return kc.Spec.Cluster.Provider == providermodels.ProviderTypeTalos.String()
 }
 
 // ensureFinalizer adds the finalizer if not present. Returns requeue=true when an update was made.
-func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, u *unstructured.Unstructured) (bool, error) {
-	if controllerutil.ContainsFinalizer(u, KubernetesClusterFinalizer) {
+func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (bool, error) {
+	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
 		return false, nil
 	}
-	controllerutil.AddFinalizer(u, KubernetesClusterFinalizer)
-	if err := r.Update(ctx, u); err != nil {
+	controllerutil.AddFinalizer(kc, KubernetesClusterFinalizer)
+	if err := r.Update(ctx, kc); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
 // handleDeletion performs cleanup and removes the finalizer when present
-func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, u *unstructured.Unstructured) (ctrl.Result, error) {
-	if controllerutil.ContainsFinalizer(u, KubernetesClusterFinalizer) {
+func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (ctrl.Result, error) {
+	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
 		// Clean up machines managed by this operator
-		if err := r.MachineManager.CleanupMachines(ctx, u.GetName(), u.GetNamespace()); err != nil {
+		if err := r.MachineManager.CleanupMachines(ctx, kc.GetName(), kc.GetNamespace()); err != nil {
 			vlog.Error("Failed to cleanup machines during deletion", err)
 			return ctrl.Result{}, err
 		}
 		// Clean up files
-		if err := r.MachineManager.CleanupMachineFiles(u.GetName()); err != nil {
+		if err := r.MachineManager.CleanupMachineFiles(kc.GetName()); err != nil {
 			vlog.Error("Failed to remove cluster directory", err)
 			// don't fail deletion on file errors
 		}
 		// Delete consolidated Talos Secret (k8s-<cluster>)
-		secretName := "k8s-" + u.GetName()
-		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: u.GetNamespace()}}
+		secretName := viper.GetString(consts.SECRET_PREFIX) + kc.GetName()
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: kc.GetNamespace()}}
 		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
 			vlog.Error("Failed to delete Talos secret: "+secretName, err)
 			return ctrl.Result{}, err
 		}
 		// Remove finalizer
-		controllerutil.RemoveFinalizer(u, KubernetesClusterFinalizer)
-		if err := r.Update(ctx, u); err != nil {
+		controllerutil.RemoveFinalizer(kc, KubernetesClusterFinalizer)
+		if err := r.Update(ctx, kc); err != nil {
 			return ctrl.Result{}, err
 		}
-		vlog.Info("Successfully deleted KubernetesCluster: cluster=" + u.GetName())
+		vlog.Info("Successfully deleted KubernetesCluster: cluster=" + kc.GetName())
 	}
 	// If no finalizer, nothing to do for us
 	return ctrl.Result{}, nil
-}
-
-// buildTypedClusterFromUnstructured constructs a typed KubernetesCluster with only metadata and spec
-func buildTypedClusterFromUnstructured(u *unstructured.Unstructured) (*vitistackcrdsv1alpha1.KubernetesCluster, error) {
-	var kc vitistackcrdsv1alpha1.KubernetesCluster
-	kc.ObjectMeta = metav1.ObjectMeta{Name: u.GetName(), Namespace: u.GetNamespace()}
-	if specMap, found, _ := unstructured.NestedMap(u.Object, "spec"); found {
-		// Convert spec map into typed Spec; ignore status entirely
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(specMap, &kc.Spec); err != nil {
-			return nil, err
-		}
-	}
-	return &kc, nil
 }
 
 // NewKubernetesClusterReconciler creates a new KubernetesClusterReconciler with initialized managers
@@ -174,11 +154,8 @@ func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *Ku
 }
 
 func (r *KubernetesClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Watch the KubernetesCluster as unstructured to avoid decoding rortypes.Quantity in status
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "vitistack.io", Version: "v1alpha1", Kind: "KubernetesCluster"})
 	return ctrl.NewControllerManagedBy(mgr).
-		For(u).
+		For(&vitistackcrdsv1alpha1.KubernetesCluster{}).
 		Owns(&vitistackcrdsv1alpha1.Machine{}).
 		Complete(r)
 }

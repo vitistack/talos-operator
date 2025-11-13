@@ -5,11 +5,11 @@ import (
 	"time"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
+	"github.com/vitistack/common/pkg/unstructuredutil"
+	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -23,6 +23,7 @@ const (
 	phaseConfigApplied = "ConfigApplied"
 	phaseBootstrapped  = "Bootstrapped"
 	phaseReady         = "Ready"
+	phaseRunning       = "Running"
 )
 
 // StatusManager handles machine status updates and monitoring
@@ -133,11 +134,11 @@ func condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) []con
 
 // SetStateCreated sets status.state.created to the provided timestamp (RFC3339Nano) and bumps lastUpdated fields.
 func (m *StatusManager) SetStateCreated(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster, created time.Time) error {
-	gvk := schema.GroupVersionKind{Group: "vitistack.io", Version: "v1alpha1", Kind: "KubernetesCluster"}
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(gvk)
-	u.SetNamespace(kc.Namespace)
-	u.SetName(kc.Name)
+	// Convert typed KubernetesCluster to unstructured for status manipulation
+	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
+	if err != nil {
+		return err
+	}
 
 	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
 		return err
@@ -287,11 +288,11 @@ func defaultResourceUsage() map[string]any {
 
 // SetPhase sets the simple phase string on status.
 func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster, phase string) error {
-	gvk := schema.GroupVersionKind{Group: "vitistack.io", Version: "v1alpha1", Kind: "KubernetesCluster"}
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(gvk)
-	u.SetNamespace(kc.Namespace)
-	u.SetName(kc.Name)
+	// Convert typed KubernetesCluster to unstructured for status manipulation
+	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
+	if err != nil {
+		return err
+	}
 
 	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
 		return err
@@ -326,11 +327,11 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster,
 	condType, status, reason, message string,
 ) error {
-	gvk := schema.GroupVersionKind{Group: "vitistack.io", Version: "v1alpha1", Kind: "KubernetesCluster"}
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(gvk)
-	u.SetNamespace(kc.Namespace)
-	u.SetName(kc.Name)
+	// Convert typed KubernetesCluster to unstructured for status manipulation
+	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
+	if err != nil {
+		return err
+	}
 
 	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
 		return err
@@ -411,8 +412,37 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	}
 
 	// Build aggregates
-	var totalCPU, totalMem, diskCap, diskUsed int64
-	var cpCount, cpRunning int64
+	totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning := aggregateMachineResources(ml)
+
+	// Convert typed KubernetesCluster to unstructured for status manipulation
+	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
+	if err != nil {
+		return err
+	}
+
+	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
+		return err
+	}
+	if err := ensureStatusMap(u); err != nil {
+		return err
+	}
+
+	// Update control plane status
+	if err := m.updateControlPlaneStatus(ctx, u, kc, cpCount, cpRunning); err != nil {
+		return err
+	}
+
+	// Update cluster resource aggregates
+	updateClusterResourceStatus(u, totalCPU, totalMem, diskCap, diskUsed)
+
+	// Touch timestamps
+	updateStatusTimestamps(u)
+
+	return m.updateStatus(ctx, u)
+}
+
+// aggregateMachineResources aggregates resource usage from all machines in the list
+func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) (totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning int64) {
 	for i := range ml.Items {
 		mObj := &ml.Items[i]
 		// Sum resources
@@ -424,51 +454,64 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 			diskUsed += d.UsedBytes
 		}
 		// Control-plane specifics
-		if role, ok := mObj.Labels["cluster.vitistack.io/role"]; ok && role == "control-plane" {
+		if isControlPlaneMachine(mObj) {
 			cpCount++
-			if mObj.Status.Phase == "Running" {
+			if mObj.Status.Phase == phaseRunning {
 				cpRunning++
 			}
 		}
 	}
+	return
+}
 
-	// Fetch unstructured cluster to update status
-	gvk := schema.GroupVersionKind{Group: "vitistack.io", Version: "v1alpha1", Kind: "KubernetesCluster"}
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(gvk)
-	u.SetNamespace(kc.Namespace)
-	u.SetName(kc.Name)
-	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
-		return err
-	}
-	if err := ensureStatusMap(u); err != nil {
-		return err
-	}
+// isControlPlaneMachine checks if a machine is a control plane node
+func isControlPlaneMachine(m *vitistackv1alpha1.Machine) bool {
+	role, ok := m.Labels["cluster.vitistack.io/role"]
+	return ok && role == "control-plane"
+}
 
-	// Update controlplane summary
+// updateControlPlaneStatus updates the control plane status in the unstructured object
+func (m *StatusManager) updateControlPlaneStatus(ctx context.Context, u *unstructured.Unstructured, kc *vitistackv1alpha1.KubernetesCluster, cpCount, cpRunning int64) error {
 	_ = unstructured.SetNestedField(u.Object, cpCount, "status", "state", "cluster", "controlplane", "scale")
-	cpStatus := "Pending"
-	if cpCount > 0 && cpRunning == cpCount {
-		cpStatus = "Running"
-		// All control plane machines are running; mark cluster Ready
-		_ = m.SetPhase(ctx, kc, phaseReady)
-	} else if cpCount > 0 && cpRunning > 0 {
-		cpStatus = "Partial"
-	}
+
+	cpStatus := determineControlPlaneStatus(cpCount, cpRunning)
 	_ = unstructured.SetNestedField(u.Object, cpStatus, "status", "state", "cluster", "controlplane", "status")
 
-	// Update cluster.resources aggregates
+	// Mark cluster Ready if all control plane machines are running
+	if cpStatus == phaseRunning {
+		_ = m.SetPhase(ctx, kc, phaseReady)
+	}
+	return nil
+}
+
+// determineControlPlaneStatus determines the control plane status based on machine counts
+func determineControlPlaneStatus(cpCount, cpRunning int64) string {
+	if cpCount > 0 && cpRunning == cpCount {
+		return phaseRunning
+	} else if cpCount > 0 && cpRunning > 0 {
+		return "Partial"
+	}
+	return "Pending"
+}
+
+// updateClusterResourceStatus updates resource usage in the unstructured object
+func updateClusterResourceStatus(u *unstructured.Unstructured, totalCPU, totalMem, diskCap, diskUsed int64) {
 	// CPU and memory used are unknown here; set used=0, percentage=0
 	_ = setResourceUsage(u, []string{"status", "state", "cluster", "resources", "cpu"}, totalCPU, 0)
 	_ = setResourceUsage(u, []string{"status", "state", "cluster", "resources", "memory"}, totalMem, 0)
 	// Disk: can compute used percentage
 	_ = setResourceUsage(u, []string{"status", "state", "cluster", "resources", "disk"}, diskCap, diskUsed)
+}
 
-	// Touch timestamps
+// updateStatusTimestamps updates the lastUpdated and lastUpdatedBy fields
+func updateStatusTimestamps(u *unstructured.Unstructured) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
 	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+}
 
+// updateStatus updates the status with fallback to regular update
+func (m *StatusManager) updateStatus(ctx context.Context, u *unstructured.Unstructured) error {
 	if err := m.Status().Update(ctx, u); err != nil {
 		if fallbackErr := m.Update(ctx, u); fallbackErr != nil {
 			return fallbackErr

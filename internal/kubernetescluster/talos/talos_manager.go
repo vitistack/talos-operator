@@ -11,7 +11,7 @@ import (
 	"net"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
+	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +22,7 @@ import (
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/siderolabs/talos/pkg/machinery/config"
+	"github.com/siderolabs/talos/pkg/machinery/config/encoder"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
@@ -904,8 +905,7 @@ func (t *TalosManager) generateTalosConfig(
 	input, err := generate.NewInput(clusterName, controlPlaneEndpoint, kubernetesVersion,
 		generate.WithVersionContract(versionContract),
 		generate.WithSecretsBundle(secretsBundle),
-		generate.WithEndpointList(
-			endpointlist),
+		generate.WithEndpointList(endpointlist),
 		// there are many more generate options available which allow to tweak generated config programmatically
 	)
 	if err != nil {
@@ -913,9 +913,14 @@ func (t *TalosManager) generateTalosConfig(
 	}
 
 	// Role templates for control-plane and worker
+	// Configure encoder to generate minimal YAML without comments and examples
+	encoderOpts := []encoder.Option{
+		encoder.WithComments(encoder.CommentsDisabled),
+	}
+
 	var controlPlaneYAML, workerYAML []byte
 	if cpProv, err := input.Config(machine.TypeControlPlane); err == nil {
-		if b, err := cpProv.Bytes(); err == nil {
+		if b, err := cpProv.EncodeBytes(encoderOpts...); err == nil {
 			controlPlaneYAML = b
 		} else {
 			return nil, nil, nil, fmt.Errorf("failed to render control plane template: %w", err)
@@ -924,7 +929,7 @@ func (t *TalosManager) generateTalosConfig(
 		return nil, nil, nil, fmt.Errorf("failed to get control plane config provider: %w", err)
 	}
 	if wProv, err := input.Config(machine.TypeWorker); err == nil {
-		if b, err := wProv.Bytes(); err == nil {
+		if b, err := wProv.EncodeBytes(encoderOpts...); err == nil {
 			workerYAML = b
 		} else {
 			return nil, nil, nil, fmt.Errorf("failed to render worker template: %w", err)

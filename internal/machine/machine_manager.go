@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
+	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

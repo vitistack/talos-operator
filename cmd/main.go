@@ -28,7 +28,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/clients/k8sclient"
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackcrdsv1alpha1 "github.com/vitistack/crds/pkg/v1alpha1"
+	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/api/controllers/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/initializationservice"
 	"github.com/vitistack/talos-operator/internal/settings"

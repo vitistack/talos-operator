@@ -7,4 +7,5 @@ var (
 	TALOS_CONFIG_BASE_PATH            = "TALOS_CONFIG_BASE_PATH"
 	JSON_LOGGING                      = "JSON_LOGGING"
 	LOG_LEVEL                         = "LOG_LEVEL"
+	SECRET_PREFIX                     = "SECRET_PREFIX"
 )
