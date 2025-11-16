@@ -79,15 +79,17 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, kubernetesCluster); err != nil {
 		vlog.Error("Failed to reconcile Talos cluster", err)
 		// Requeue for a later retry without surfacing an error
-		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Update KubernetesCluster status
-	if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, kubernetesCluster); err != nil {
-		vlog.Error("Failed to update KubernetesCluster status", err)
+	// Update KubernetesCluster status (skip if being deleted)
+	if kubernetesCluster.GetDeletionTimestamp() == nil {
+		if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, kubernetesCluster); err != nil {
+			vlog.Error("Failed to update KubernetesCluster status", err)
+		}
 	}
 
-	return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 // isTalosProvider returns true if spec.data.provider == "talos"
@@ -111,22 +113,26 @@ func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *v
 // handleDeletion performs cleanup and removes the finalizer when present
 func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (ctrl.Result, error) {
 	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
-		// Clean up machines managed by this operator
-		if err := r.MachineManager.CleanupMachines(ctx, kc.GetName(), kc.GetNamespace()); err != nil {
-			vlog.Error("Failed to cleanup machines during deletion", err)
-			return ctrl.Result{}, err
-		}
-		// Clean up files
-		if err := r.MachineManager.CleanupMachineFiles(kc.GetName()); err != nil {
-			vlog.Error("Failed to remove cluster directory", err)
-			// don't fail deletion on file errors
-		}
-		// Delete consolidated Talos Secret (k8s-<cluster>)
-		secretName := viper.GetString(consts.SECRET_PREFIX) + kc.GetName()
+		// Delete consolidated Talos Secret FIRST (before finalizer removal)
+		// This ensures the secret is deleted even if finalizer removal fails
+		// Note: Secret name uses cluster.Name, not cluster.Spec.Cluster.ClusterId
+		secretName := viper.GetString(consts.SECRET_PREFIX) + kc.Spec.Cluster.ClusterId
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: kc.GetNamespace()}}
 		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
 			vlog.Error("Failed to delete Talos secret: "+secretName, err)
 			return ctrl.Result{}, err
+		}
+		vlog.Info("Deleted Talos secret: " + secretName)
+
+		// Clean up machines managed by this operator
+		if err := r.MachineManager.CleanupMachines(ctx, kc.Spec.Cluster.ClusterId, kc.GetNamespace()); err != nil {
+			vlog.Error("Failed to cleanup machines during deletion", err)
+			return ctrl.Result{}, err
+		}
+		// Clean up files
+		if err := r.MachineManager.CleanupMachineFiles(kc.Spec.Cluster.ClusterId); err != nil {
+			vlog.Error("Failed to remove cluster directory", err)
+			// don't fail deletion on file errors
 		}
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(kc, KubernetesClusterFinalizer)

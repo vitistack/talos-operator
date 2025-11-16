@@ -142,14 +142,12 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		}
 	}
 
-	var workerIPs []string
 	for _, m := range workers {
 		ipv4Found := false
 		if len(m.Status.NetworkInterfaces) > 0 {
 			for _, ipAddr := range m.Status.NetworkInterfaces[0].IPAddresses {
 				ip := net.ParseIP(ipAddr)
 				if ip != nil && ip.To4() != nil {
-					workerIPs = append(workerIPs, ipAddr)
 					ipv4Found = true
 					break
 				}
@@ -497,7 +495,7 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 
 		// Select install disk and prepare configuration
 		installDisk := selectInstallDisk(m)
-		patched, err := prepareNodeConfig(roleYAML, installDisk, m)
+		patched, err := prepareNodeConfig(cluster, roleYAML, installDisk, m)
 		if err != nil {
 			return fmt.Errorf("failed to prepare config for node %s: %w", m.Name, err)
 		}
@@ -548,11 +546,17 @@ func selectInstallDisk(m *vitistackcrdsv1alpha1.Machine) string {
 }
 
 // prepareNodeConfig prepares the Talos configuration for a specific node
-func prepareNodeConfig(roleYAML []byte, installDisk string, m *vitistackcrdsv1alpha1.Machine) ([]byte, error) {
+func prepareNodeConfig(cluster *vitistackcrdsv1alpha1.KubernetesCluster, roleYAML []byte, installDisk string, m *vitistackcrdsv1alpha1.Machine) ([]byte, error) {
 	// patch install disk into YAML
 	patched, err := patchInstallDiskYAML(roleYAML, installDisk)
 	if err != nil {
 		return nil, fmt.Errorf("failed to patch install disk: %w", err)
+	}
+
+	// Patch hostname to match machine name
+	patched, err = patchHostname(patched, m.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to patch hostname: %w", err)
 	}
 
 	// Check if machine is on a virtual provider and apply VM customizations
@@ -567,6 +571,12 @@ func prepareNodeConfig(roleYAML []byte, installDisk string, m *vitistackcrdsv1al
 		if err != nil {
 			return nil, fmt.Errorf("failed to patch VM customization: %w", err)
 		}
+	}
+
+	// Add node annotations with cluster metadata
+	patched, err = patchNodeAnnotations(cluster, patched, m)
+	if err != nil {
+		return nil, fmt.Errorf("failed to patch node annotations: %w", err)
 	}
 
 	return patched, nil
@@ -589,6 +599,26 @@ func patchInstallDiskYAML(in []byte, disk string) ([]byte, error) {
 		m["install"] = inst
 	}
 	inst["disk"] = disk
+	return yaml.Marshal(cfg)
+}
+
+// patchHostname updates machine.network.hostname in the Talos config YAML.
+func patchHostname(in []byte, hostname string) ([]byte, error) {
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal(in, &cfg); err != nil {
+		return nil, err
+	}
+	m, _ := cfg["machine"].(map[string]interface{})
+	if m == nil {
+		m = map[string]interface{}{}
+		cfg["machine"] = m
+	}
+	network, _ := m["network"].(map[string]interface{})
+	if network == nil {
+		network = map[string]interface{}{}
+		m["network"] = network
+	}
+	network["hostname"] = hostname
 	return yaml.Marshal(cfg)
 }
 
@@ -672,6 +702,63 @@ func patchVirtualMachineCustomization(in []byte, installImage string) ([]byte, e
 	}
 
 	return yaml.Marshal(cfg)
+}
+
+// patchNodeAnnotations adds cluster metadata as node annotations to the Talos config
+func patchNodeAnnotations(cluster *vitistackcrdsv1alpha1.KubernetesCluster, in []byte, m *vitistackcrdsv1alpha1.Machine) ([]byte, error) {
+	var cfg map[string]any
+	if err := yaml.Unmarshal(in, &cfg); err != nil {
+		return nil, err
+	}
+
+	machineSection, _ := cfg["machine"].(map[string]any)
+	if machineSection == nil {
+		machineSection = map[string]any{}
+		cfg["machine"] = machineSection
+	}
+
+	// Get or create machine.nodeAnnotations section
+	nodeAnnotations, _ := machineSection["nodeAnnotations"].(map[string]any)
+	if nodeAnnotations == nil {
+		nodeAnnotations = map[string]any{}
+		machineSection["nodeAnnotations"] = nodeAnnotations
+	}
+
+	// Extract country and AZ from datacenter (format: <country>-<region>-<az>)
+	country, az := extractDatacenterInfo(cluster.Spec.Cluster.Datacenter)
+
+	// Add cluster metadata annotations
+	// TODO: workspace field should come from cluster.Spec.Cluster.Workspace once available
+	nodeAnnotations["vitistack.io/workspace"] = "TODO-workspace-not-yet-available"
+	nodeAnnotations["vitistack.io/clustername"] = cluster.Name
+	nodeAnnotations["vitistack.io/clusterid"] = cluster.Spec.Cluster.ClusterId
+	nodeAnnotations["vitistack.io/country"] = country
+	nodeAnnotations["vitistack.io/az"] = az
+	nodeAnnotations["vitistack.io/region"] = cluster.Spec.Cluster.Region
+	nodeAnnotations["vitistack.io/vmprovider"] = m.Status.Provider
+	nodeAnnotations["vitistack.io/kubernetesprovider"] = cluster.Spec.Cluster.Provider
+	// TODO: kubernetes-endpoint-addr should be set to the actual control plane endpoint once available
+	nodeAnnotations["vitistack.io/kubernetes-endpoint-addr"] = "TODO-endpoint-not-yet-available"
+
+	return yaml.Marshal(cfg)
+}
+
+// extractDatacenterInfo extracts country and availability zone from datacenter string
+// Expected format: <country>-<region>-<az> (e.g., "test-south-az1")
+func extractDatacenterInfo(datacenter string) (country string, az string) {
+	parts := strings.Split(datacenter, "-")
+	switch {
+	case len(parts) >= 3:
+		country = parts[0]
+		az = parts[len(parts)-1]
+	case len(parts) == 2:
+		country = parts[0]
+		az = ""
+	default:
+		country = datacenter
+		az = ""
+	}
+	return country, az
 }
 
 // marshalTalosClientConfig serializes the Talos client config if present.
@@ -933,7 +1020,7 @@ func (t *TalosManager) getClusterMachines(ctx context.Context, cluster *vitistac
 	machineList := &vitistackcrdsv1alpha1.MachineList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(cluster.Namespace),
-		client.MatchingLabels{"cluster.vitistack.io/cluster-name": cluster.Name},
+		client.MatchingLabels{"cluster.vitistack.io/cluster-id": cluster.Spec.Cluster.ClusterId},
 	}
 
 	if err := t.List(ctx, machineList, listOpts...); err != nil {
@@ -1029,7 +1116,7 @@ func (t *TalosManager) generateTalosConfig(
 	endpointIP string) (*clientconfig.Config, []byte, []byte, error) {
 	controlPlanes := filterMachinesByRole(machines, "control-plane")
 
-	clusterName := cluster.Name
+	clusterId := cluster.Spec.Cluster.ClusterId
 	controlPlaneEndpoint := fmt.Sprintf("https://%s:6443", endpointIP) // Using first control plane's private IP
 
 	// * Kubernetes version to install, using the latest here
@@ -1049,7 +1136,7 @@ func (t *TalosManager) generateTalosConfig(
 		}
 	}
 
-	input, err := generate.NewInput(clusterName, controlPlaneEndpoint, kubernetesVersion,
+	input, err := generate.NewInput(clusterId, controlPlaneEndpoint, kubernetesVersion,
 		generate.WithVersionContract(versionContract),
 		generate.WithSecretsBundle(secretsBundle),
 		generate.WithEndpointList(endpointlist),

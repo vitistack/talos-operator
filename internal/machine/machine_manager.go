@@ -43,7 +43,7 @@ func (m *MachineManager) ReconcileMachines(ctx context.Context, cluster *vitista
 	persistMachineManifests := viper.GetBool(consts.PERSIST_MACHINE_MANIFESTS)
 	// Save machines to files
 	if persistMachineManifests {
-		if err := m.SaveMachinesToFiles(machines, cluster.Name); err != nil {
+		if err := m.SaveMachinesToFiles(machines, cluster.Spec.Cluster.ClusterId); err != nil {
 			vlog.Error("Failed to save machines to files", err)
 			// Don't fail reconciliation if file save fails, but log the error
 		}
@@ -64,7 +64,7 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 	var machines []*vitistackcrdsv1alpha1.Machine
 
 	// Extract basic information from cluster
-	clusterName := cluster.Name
+	clusterId := cluster.Spec.Cluster.ClusterId
 	namespace := cluster.Namespace
 
 	// Create control plane nodes (assuming at least 1)
@@ -76,19 +76,20 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 	for i := 0; i < controlPlaneReplicas; i++ {
 		machine := &vitistackcrdsv1alpha1.Machine{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("vm-%s-cp%d", clusterName, i),
+				Name:      fmt.Sprintf("%s-ctp%d", clusterId, i),
 				Namespace: namespace,
 				Labels: map[string]string{
-					"cluster.vitistack.io/cluster-name": clusterName,
-					"cluster.vitistack.io/role":         "control-plane",
+					"cluster.vitistack.io/cluster-id": clusterId,
+					"cluster.vitistack.io/role":       "control-plane",
 				},
 			},
 			Spec: vitistackcrdsv1alpha1.MachineSpec{
-				Name: fmt.Sprintf("vm-%s-cp%d", clusterName, i),
+				Name: fmt.Sprintf("%s-ctp%d", clusterId, i),
 				// We'll set basic required fields from the machine CRD spec
 				InstanceType: "large", // Default value, can be overridden from cluster spec
+				Provider:     cluster.Spec.Topology.ControlPlane.Provider,
 				Tags: map[string]string{
-					"cluster": clusterName,
+					"cluster": clusterId,
 					"role":    "control-plane",
 				},
 			},
@@ -98,30 +99,35 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 
 	// Create worker nodes based on node pools if available
 	if len(cluster.Spec.Topology.Workers.NodePools) > 0 {
+		workerIndex := 0
 		for idx := range cluster.Spec.Topology.Workers.NodePools {
 			nodePool := cluster.Spec.Topology.Workers.NodePools[idx]
 			for i := 0; i < nodePool.Replicas; i++ {
 				virtualMachine := &vitistackcrdsv1alpha1.Machine{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("vm-%s-wp%d-%d", clusterName, idx, i),
+						Name:      fmt.Sprintf("%s-wrk%d", clusterId, workerIndex),
 						Namespace: namespace,
 						Labels: map[string]string{
-							"cluster.vitistack.io/cluster-name": clusterName,
-							"cluster.vitistack.io/role":         "worker",
-							"cluster.vitistack.io/nodepool":     nodePool.Name,
+							"cluster.vitistack.io/cluster-id": clusterId,
+							"cluster.vitistack.io/role":       "worker",
+						},
+						Annotations: map[string]string{
+							"cluster.vitistack.io/nodepool": nodePool.Name,
 						},
 					},
 					Spec: vitistackcrdsv1alpha1.MachineSpec{
-						Name:         fmt.Sprintf("vm-%s-wp%d-%d", clusterName, idx, i),
+						Name:         fmt.Sprintf("%s-wrk%d", clusterId, workerIndex),
 						InstanceType: nodePool.MachineClass,
+						Provider:     nodePool.Provider,
 						Tags: map[string]string{
-							"cluster":  clusterName,
+							"cluster":  clusterId,
 							"role":     "worker",
 							"nodepool": nodePool.Name,
 						},
 					},
 				}
 				machines = append(machines, virtualMachine)
+				workerIndex++
 			}
 		}
 	} else {
@@ -129,18 +135,18 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 		for i := 0; i < 1; i++ {
 			machine := &vitistackcrdsv1alpha1.Machine{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("vm-%s-w%d", clusterName, i),
+					Name:      fmt.Sprintf("%s-wrk%d", clusterId, i),
 					Namespace: namespace,
 					Labels: map[string]string{
-						"cluster.vitistack.io/cluster-name": clusterName,
-						"cluster.vitistack.io/role":         "worker",
+						"cluster.vitistack.io/cluster-id": clusterId,
+						"cluster.vitistack.io/role":       "worker",
 					},
 				},
 				Spec: vitistackcrdsv1alpha1.MachineSpec{
-					Name:         fmt.Sprintf("vm-%s-w%d", clusterName, i),
+					Name:         fmt.Sprintf("%s-wrk%d", clusterId, i),
 					InstanceType: "medium",
 					Tags: map[string]string{
-						"cluster": clusterName,
+						"cluster": clusterId,
 						"role":    "worker",
 					},
 				},
@@ -153,9 +159,9 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 }
 
 // SaveMachinesToFiles saves machine manifests as YAML files in the configured path
-func (m *MachineManager) SaveMachinesToFiles(machines []*vitistackcrdsv1alpha1.Machine, clusterName string) error {
+func (m *MachineManager) SaveMachinesToFiles(machines []*vitistackcrdsv1alpha1.Machine, clusterId string) error {
 	baseDir := viper.GetString(consts.MACHINE_MANIFESTS_PATH)
-	clusterDir := filepath.Join(baseDir, clusterName)
+	clusterDir := filepath.Join(baseDir, clusterId)
 
 	// Create cluster-specific directory
 	if err := os.MkdirAll(clusterDir, 0750); err != nil {
@@ -201,11 +207,19 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackcrd
 			return fmt.Errorf("failed to get machine: %w", err)
 		}
 	} else {
-		// Machine exists, update it if needed
+		// Machine exists, update it if needed using strategic merge patch to avoid conflicts
+		patch := client.MergeFrom(existingMachine.DeepCopy())
 		existingMachine.Spec = machine.Spec
 		existingMachine.Labels = machine.Labels
-		if err := m.Update(ctx, existingMachine); err != nil {
-			return fmt.Errorf("failed to update machine: %w", err)
+		existingMachine.Annotations = machine.Annotations
+		if err := m.Patch(ctx, existingMachine, patch); err != nil {
+			// If patch fails due to conflict, it's likely because status was updated
+			// Log as debug and skip - the spec should be reconciled on next iteration
+			if errors.IsConflict(err) {
+				vlog.Debug("Machine update conflict (object modified), will retry on next reconcile: machine=" + machine.Name)
+				return nil
+			}
+			return fmt.Errorf("failed to patch machine: %w", err)
 		}
 	}
 
@@ -213,12 +227,12 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackcrd
 }
 
 // CleanupMachines deletes all machines associated with a cluster
-func (m *MachineManager) CleanupMachines(ctx context.Context, clusterName, namespace string) error {
+func (m *MachineManager) CleanupMachines(ctx context.Context, clusterId, namespace string) error {
 	// List all machines with the cluster label
 	machineList := &vitistackcrdsv1alpha1.MachineList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(namespace),
-		client.MatchingLabels{"cluster.vitistack.io/cluster-name": clusterName},
+		client.MatchingLabels{"cluster.vitistack.io/cluster-id": clusterId},
 	}
 
 	if err := m.List(ctx, machineList, listOpts...); err != nil {
@@ -236,14 +250,14 @@ func (m *MachineManager) CleanupMachines(ctx context.Context, clusterName, names
 		}
 	}
 
-	vlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s machineCount=%d", clusterName, len(machineList.Items)))
+	vlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s machineCount=%d", clusterId, len(machineList.Items)))
 	return nil
 }
 
 // CleanupMachineFiles removes machine manifest files for a cluster
-func (m *MachineManager) CleanupMachineFiles(clusterName string) error {
+func (m *MachineManager) CleanupMachineFiles(clusterId string) error {
 	baseDir := viper.GetString(consts.MACHINE_MANIFESTS_PATH)
-	clusterDir := filepath.Join(baseDir, clusterName)
+	clusterDir := filepath.Join(baseDir, clusterId)
 
 	if err := os.RemoveAll(clusterDir); err != nil {
 		return fmt.Errorf("failed to remove cluster directory %s: %w", clusterDir, err)

@@ -8,6 +8,7 @@ import (
 	"github.com/vitistack/common/pkg/unstructuredutil"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -116,7 +117,10 @@ func phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) strin
 }
 
 func condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) []condSpec {
-	conds := []condSpec{}
+	conds := []condSpec{
+		// Created condition is always true once the cluster resource exists
+		{"Created", "True", "ClusterCreated", "Kubernetes cluster resource has been created"},
+	}
 	if cfgPresent {
 		conds = append(conds, condSpec{"ConfigGenerated", "True", "Generated", "Talos client and role configs generated"})
 	}
@@ -312,9 +316,18 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
 	// Do not set status.state here; it's an object in the CRD. ensureStatusMap already ensures it exists.
 	if err := m.Status().Update(ctx, u); err != nil {
+		// Check if this is a conflict error - if so, just log and skip
+		if apierrors.IsConflict(err) {
+			vlog.Debug("Status update conflict (object modified), skipping: cluster=" + kc.Name)
+			return nil
+		}
 		vlog.Error("Status().Update failed, trying fallback Update: cluster="+kc.Name, err)
 		// fallback for CRDs without status subresource
 		if fallbackErr := m.Update(ctx, u); fallbackErr != nil {
+			if apierrors.IsConflict(fallbackErr) {
+				vlog.Debug("Fallback update conflict, skipping: cluster=" + kc.Name)
+				return nil
+			}
 			vlog.Error("Fallback Update also failed: cluster="+kc.Name, fallbackErr)
 			return fallbackErr
 		}
@@ -325,6 +338,7 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 
 // SetCondition updates status.conditions with a condition entry (type, status, reason, message, lastTransitionTime).
 // Uses unstructured to avoid coupling to generated condition types from external CRD module.
+// nolint:gocyclo // Complexity handled through helper functions
 func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster,
 	condType, status, reason, message string,
 ) error {
@@ -342,6 +356,21 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 		return err
 	}
 
+	// Update conditions
+	if err := m.updateConditionInStatus(u, condType, status, reason, message, kc.Name); err != nil {
+		return err
+	}
+
+	// Touch state.lastUpdated and lastUpdatedBy
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
+	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+
+	return m.updateStatusWithConflictHandling(ctx, u, kc.Name, condType)
+}
+
+// updateConditionInStatus updates the condition in the status.conditions slice
+func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, condType, status, reason, message, clusterName string) error {
 	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
 	if !found {
 		conds = []any{}
@@ -357,45 +386,54 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 	}
 
 	// Replace existing condition of same type or append
-	replaced := false
+	conds = replaceOrAppendCondition(conds, newCond, condType)
+
+	if err := unstructured.SetNestedSlice(u.Object, conds, "status", "conditions"); err != nil {
+		vlog.Error("Failed to set nested slice for conditions: cluster="+clusterName+" condition="+condType, err)
+		return err
+	}
+	return nil
+}
+
+// replaceOrAppendCondition replaces an existing condition or appends a new one
+func replaceOrAppendCondition(conds []any, newCond map[string]any, condType string) []any {
 	for i, ci := range conds {
 		if cm, ok := ci.(map[string]any); ok {
 			if t, _ := cm["type"].(string); t == condType {
 				// Check if unchanged
-				if cm["status"] == status && cm["reason"] == reason && cm["message"] == message {
-					// Still bump lastObserved fields
+				if cm["status"] == newCond["status"] && cm["reason"] == newCond["reason"] && cm["message"] == newCond["message"] {
+					// Still bump lastTransitionTime
 					cm["lastTransitionTime"] = newCond["lastTransitionTime"]
 					conds[i] = cm
-					replaced = true
-					break
+					return conds
 				}
 				conds[i] = newCond
-				replaced = true
-				break
+				return conds
 			}
 		}
 	}
-	if !replaced {
-		conds = append(conds, newCond)
-	}
+	return append(conds, newCond)
+}
 
-	if err := unstructured.SetNestedSlice(u.Object, conds, "status", "conditions"); err != nil {
-		vlog.Error("Failed to set nested slice for conditions: cluster="+kc.Name+" condition="+condType, err)
-		return err
-	}
-	// Touch state.lastUpdated and lastUpdatedBy
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
-
+// updateStatusWithConflictHandling handles status update with conflict error handling
+func (m *StatusManager) updateStatusWithConflictHandling(ctx context.Context, u *unstructured.Unstructured, clusterName, condType string) error {
 	if err := m.Status().Update(ctx, u); err != nil {
-		vlog.Error("Status().Update failed for condition, trying fallback Update: cluster="+kc.Name+" condition="+condType, err)
+		// Check if this is a conflict error - if so, just log and skip
+		if apierrors.IsConflict(err) {
+			vlog.Debug("Status update conflict for condition (object modified), skipping: cluster=" + clusterName + " condition=" + condType)
+			return nil
+		}
+		vlog.Error("Status().Update failed for condition, trying fallback Update: cluster="+clusterName+" condition="+condType, err)
 		// fallback for CRDs without status subresource
 		if fallbackErr := m.Update(ctx, u); fallbackErr != nil {
-			vlog.Error("Fallback Update also failed for condition: cluster="+kc.Name+" condition="+condType, fallbackErr)
+			if apierrors.IsConflict(fallbackErr) {
+				vlog.Debug("Fallback update conflict for condition, skipping: cluster=" + clusterName + " condition=" + condType)
+				return nil
+			}
+			vlog.Error("Fallback Update also failed for condition: cluster="+clusterName+" condition="+condType, fallbackErr)
 			return fallbackErr
 		}
-		vlog.Info("Fallback Update succeeded for condition: cluster=" + kc.Name + " condition=" + condType)
+		vlog.Info("Fallback Update succeeded for condition: cluster=" + clusterName + " condition=" + condType)
 	}
 	return nil
 }

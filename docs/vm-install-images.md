@@ -90,10 +90,11 @@ The provider detection is substring-based, so providers named like "proxmox-prod
 apiVersion: vitistack.io/v1alpha1
 kind: KubernetesCluster
 metadata:
-  name: vm-cluster
+  name: t-test-001
   namespace: default
 spec:
-  clusterName: vm-cluster
+  clusterName: t-test-001
+  clusterId: t-test-001-4ty5
   kubernetes:
     version: "1.31.0"
   data:
@@ -133,11 +134,11 @@ factory.talos.dev/openstack-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe
 When VM customizations are applied, the operator logs:
 
 ```
-Detected virtual machine provider proxmox for node vm-cluster-control-plane-0, applying VM customizations with install image: factory.talos.dev/openstack-installer/...:v1.11.5
+Detected virtual machine provider proxmox for node cluster-control-plane-0, applying VM customizations with install image: factory.talos.dev/openstack-installer/...:v1.11.5
 ```
 
 Or without a custom image:
 
 ```
-Detected virtual machine provider proxmox for node vm-cluster-control-plane-0, applying VM customizations (no custom install image configured)
+Detected virtual machine provider proxmox for node cluster-control-plane-0, applying VM customizations (no custom install image configured)
 ```
