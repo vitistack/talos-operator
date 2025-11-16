@@ -27,7 +27,9 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
+	"github.com/spf13/viper"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
+	"github.com/vitistack/talos-operator/pkg/consts"
 	"google.golang.org/protobuf/types/known/durationpb"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -123,26 +125,40 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 	var controlPlaneIPs []string
 	for _, m := range controlPlanes {
-		if len(m.Status.NetworkInterfaces) > 0 && len(m.Status.NetworkInterfaces[0].IPAddresses) > 0 {
-			controlPlaneIPs = append(controlPlaneIPs, m.Status.NetworkInterfaces[0].IPAddresses[0])
+		ipv4Found := false
+		if len(m.Status.NetworkInterfaces) > 0 {
+			for _, ipAddr := range m.Status.NetworkInterfaces[0].IPAddresses {
+				ip := net.ParseIP(ipAddr)
+				if ip != nil && ip.To4() != nil {
+					controlPlaneIPs = append(controlPlaneIPs, ipAddr)
+					ipv4Found = true
+					break
+				}
+			}
+		}
+		if !ipv4Found {
+			_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneIPsReady", "False", "NotReady", "Some control-plane nodes are missing IPv4 addresses")
+			return fmt.Errorf("control planes not ready quite yet, missing IPv4 addresses before applying configuration")
 		}
 	}
 
 	var workerIPs []string
 	for _, m := range workers {
-		if len(m.Status.NetworkInterfaces) > 0 && len(m.Status.NetworkInterfaces[0].IPAddresses) > 0 {
-			workerIPs = append(workerIPs, m.Status.NetworkInterfaces[0].IPAddresses[0])
+		ipv4Found := false
+		if len(m.Status.NetworkInterfaces) > 0 {
+			for _, ipAddr := range m.Status.NetworkInterfaces[0].IPAddresses {
+				ip := net.ParseIP(ipAddr)
+				if ip != nil && ip.To4() != nil {
+					workerIPs = append(workerIPs, ipAddr)
+					ipv4Found = true
+					break
+				}
+			}
 		}
-	}
-
-	if len(controlPlaneIPs) != len(controlPlanes) {
-		_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneIPsReady", "False", "NotReady", "Some control-plane nodes are missing IP addresses")
-		return fmt.Errorf("control planes not ready quite yet, missing ip adresses before applying configuration")
-	}
-
-	if len(workerIPs) != len(workers) {
-		_ = t.statusManager.SetCondition(ctx, cluster, "WorkerIPsReady", "False", "NotReady", "Some worker nodes are missing IP addresses")
-		return fmt.Errorf("workers not ready quite yet, missing ip adresses before applying configuration")
+		if !ipv4Found {
+			_ = t.statusManager.SetCondition(ctx, cluster, "WorkerIPsReady", "False", "NotReady", "Some worker nodes are missing IPv4 addresses")
+			return fmt.Errorf("workers not ready quite yet, missing IPv4 addresses before applying configuration")
+		}
 	}
 
 	endpointIP := controlPlaneIPs[0]
@@ -454,8 +470,21 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 		if len(m.Status.NetworkInterfaces) == 0 || len(m.Status.NetworkInterfaces[0].IPAddresses) == 0 {
 			continue
 		}
-		ip := m.Status.NetworkInterfaces[0].IPAddresses[0]
-		// choose role template
+
+		// Find first IPv4 address
+		var ip string
+		for _, ipAddr := range m.Status.NetworkInterfaces[0].IPAddresses {
+			parsedIP := net.ParseIP(ipAddr)
+			if parsedIP != nil && parsedIP.To4() != nil {
+				ip = ipAddr
+				break
+			}
+		}
+		if ip == "" {
+			continue // Skip if no IPv4 address found
+		}
+
+		// Choose role template
 		var roleYAML []byte
 		if m.Labels["cluster.vitistack.io/role"] == "control-plane" {
 			roleYAML = cpTemplate
@@ -466,45 +495,81 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 			return fmt.Errorf("missing role template for node %s in secret %s", m.Name, secretName)
 		}
 
-		// select install disk
-		installDisk := ""
-		for i := range m.Status.Disks {
-			d := m.Status.Disks[i]
-			if d.Device != "" {
-				installDisk = d.Device
-				if d.PVCName != "" { // prefer PVC-backed device
-					break
-				}
-			}
-		}
-		if installDisk == "" {
-			installDisk = "/dev/vda"
+		// Select install disk and prepare configuration
+		installDisk := selectInstallDisk(m)
+		patched, err := prepareNodeConfig(roleYAML, installDisk, m)
+		if err != nil {
+			return fmt.Errorf("failed to prepare config for node %s: %w", m.Name, err)
 		}
 
-		// patch install disk into YAML
-		patched, err := patchInstallDiskYAML(roleYAML, installDisk)
-		if err != nil {
-			return fmt.Errorf("failed to patch install disk for node %s: %w", m.Name, err)
+		// Apply configuration to node
+		if err := t.applyConfigToNode(ctx, insecure, clientConfig, ip, patched); err != nil {
+			return fmt.Errorf("failed to apply config to node %s: %w", ip, err)
 		}
-		// Create a per-node client which talks directly to the node we configure.
-		// This is important for workers which might not be reachable via control-plane proxy yet.
-		nodeClient, err := createTalosClient(ctx, insecure, clientConfig, []string{ip})
-		if err != nil {
-			return fmt.Errorf("failed to create Talos client for node %s: %w", ip, err)
-		}
-		nodeCtx := talosclient.WithNodes(ctx, ip)
-		resp, err := nodeClient.ApplyConfiguration(nodeCtx, &machineapi.ApplyConfigurationRequest{
-			Data:           patched,
-			Mode:           machineapi.ApplyConfigurationRequest_AUTO,
-			DryRun:         false,
-			TryModeTimeout: durationpb.New(2 * time.Minute),
-		})
-		if err != nil {
-			return fmt.Errorf("error applying configuration to node %s: %w", ip, err)
-		}
-		vlog.Info(fmt.Sprintf("Talos apply configuration response: node=%s messages=%v", ip, resp.Messages))
 	}
 	return nil
+}
+
+// applyConfigToNode applies the Talos configuration to a specific node
+func (t *TalosManager) applyConfigToNode(ctx context.Context, insecure bool, clientConfig *clientconfig.Config, nodeIP string, configData []byte) error {
+	nodeClient, err := createTalosClient(ctx, insecure, clientConfig, []string{nodeIP})
+	if err != nil {
+		return fmt.Errorf("failed to create Talos client: %w", err)
+	}
+	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	resp, err := nodeClient.ApplyConfiguration(nodeCtx, &machineapi.ApplyConfigurationRequest{
+		Data:           configData,
+		Mode:           machineapi.ApplyConfigurationRequest_AUTO,
+		DryRun:         false,
+		TryModeTimeout: durationpb.New(2 * time.Minute),
+	})
+	if err != nil {
+		return fmt.Errorf("error applying configuration: %w", err)
+	}
+	vlog.Info(fmt.Sprintf("Talos apply configuration response: node=%s messages=%v", nodeIP, resp.Messages))
+	return nil
+}
+
+// selectInstallDisk selects the appropriate install disk from machine status
+func selectInstallDisk(m *vitistackcrdsv1alpha1.Machine) string {
+	for i := range m.Status.Disks {
+		d := m.Status.Disks[i]
+		if d.Device != "" {
+			if d.PVCName != "" { // prefer PVC-backed device
+				return d.Device
+			}
+			// fallback to first available device
+			if d.Device != "" {
+				return d.Device
+			}
+		}
+	}
+	return "/dev/vda" // default fallback
+}
+
+// prepareNodeConfig prepares the Talos configuration for a specific node
+func prepareNodeConfig(roleYAML []byte, installDisk string, m *vitistackcrdsv1alpha1.Machine) ([]byte, error) {
+	// patch install disk into YAML
+	patched, err := patchInstallDiskYAML(roleYAML, installDisk)
+	if err != nil {
+		return nil, fmt.Errorf("failed to patch install disk: %w", err)
+	}
+
+	// Check if machine is on a virtual provider and apply VM customizations
+	if m.Status.Provider != "" && isVirtualMachineProvider(m.Status.Provider) {
+		installImage := getVMInstallImage(m.Status.Provider)
+		if installImage != "" {
+			vlog.Info(fmt.Sprintf("Detected virtual machine provider %s for node %s, applying VM customizations with install image: %s", m.Status.Provider, m.Name, installImage))
+		} else {
+			vlog.Info(fmt.Sprintf("Detected virtual machine provider %s for node %s, applying VM customizations (no custom install image configured)", m.Status.Provider, m.Name))
+		}
+		patched, err = patchVirtualMachineCustomization(patched, installImage)
+		if err != nil {
+			return nil, fmt.Errorf("failed to patch VM customization: %w", err)
+		}
+	}
+
+	return patched, nil
 }
 
 // patchInstallDiskYAML updates machine.install.disk in the Talos config YAML.
@@ -524,6 +589,88 @@ func patchInstallDiskYAML(in []byte, disk string) ([]byte, error) {
 		m["install"] = inst
 	}
 	inst["disk"] = disk
+	return yaml.Marshal(cfg)
+}
+
+// isVirtualMachineProvider checks if the provider is a virtual machine type that needs special customization
+func isVirtualMachineProvider(provider string) bool {
+	provider = strings.ToLower(provider)
+	virtualProviders := []string{"proxmox", "kubevirt", "libvirt", "kvm", "qemu", "vmware", "virtualbox", "hyper-v"}
+	for _, vp := range virtualProviders {
+		if strings.Contains(provider, vp) {
+			return true
+		}
+	}
+	return false
+}
+
+// getVMInstallImage returns the appropriate Talos install image for a given VM provider
+// Images are fetched from viper configuration with provider-specific keys
+func getVMInstallImage(provider string) string {
+	provider = strings.ToLower(provider)
+
+	// Map provider names to their config keys
+	var configKey string
+	switch {
+	case strings.Contains(provider, "proxmox"):
+		configKey = consts.TALOS_VM_INSTALL_IMAGE_PROXMOX
+	case strings.Contains(provider, "kubevirt"):
+		configKey = consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT
+	case strings.Contains(provider, "libvirt"):
+		configKey = consts.TALOS_VM_INSTALL_IMAGE_LIBVIRT
+	case strings.Contains(provider, "kvm"):
+		configKey = consts.TALOS_VM_INSTALL_IMAGE_KVM
+	case strings.Contains(provider, "vmware"):
+		configKey = consts.TALOS_VM_INSTALL_IMAGE_VMWARE
+	case strings.Contains(provider, "virtualbox"):
+		configKey = consts.TALOS_VM_INSTALL_IMAGE_VIRTUALBOX
+	case strings.Contains(provider, "hyper-v"):
+		configKey = consts.TALOS_VM_INSTALL_IMAGE_HYPERV
+	default:
+		configKey = consts.TALOS_VM_INSTALL_IMAGE_DEFAULT
+	}
+
+	// Try provider-specific config first, fall back to default
+	image := viper.GetString(configKey)
+	if image == "" {
+		image = viper.GetString(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT)
+	}
+
+	return image
+}
+
+// patchVirtualMachineCustomization adds VM-specific customizations to Talos config YAML
+// This adds console kernel args and custom install image
+// Note: System extensions (like qemu-guest-agent) should be baked into the install image via Talos factory
+func patchVirtualMachineCustomization(in []byte, installImage string) ([]byte, error) {
+	var cfg map[string]any
+	if err := yaml.Unmarshal(in, &cfg); err != nil {
+		return nil, err
+	}
+
+	m, _ := cfg["machine"].(map[string]any)
+	if m == nil {
+		m = map[string]any{}
+		cfg["machine"] = m
+	}
+
+	// Add machine.install section
+	inst, _ := m["install"].(map[string]any)
+	if inst == nil {
+		inst = map[string]any{}
+		m["install"] = inst
+	}
+
+	// Add custom install image if provided (should include extensions)
+	if installImage != "" {
+		inst["image"] = installImage
+	}
+
+	// Add extraKernelArgs for serial console (directly under machine.install)
+	inst["extraKernelArgs"] = []any{
+		"console=ttyS0,115200",
+	}
+
 	return yaml.Marshal(cfg)
 }
 
@@ -688,7 +835,7 @@ func (t *TalosManager) waitForTalosAPIs(
 			addr := net.JoinHostPort(ip, "50000")
 			conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 			if err != nil {
-				vlog.Info("Talos API port not reachable yet: node=" + ip + " error=" + err.Error())
+				vlog.Warn("Talos API port not reachable yet: node=" + ip + " error=" + err.Error())
 				allOK = false
 				continue
 			}

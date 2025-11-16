@@ -263,6 +263,7 @@ func ensureStateCluster(state map[string]any) error {
 			"message":      "",
 			"status":       "Pending",
 			"scale":        int64(0),
+			"nodes":        []any{},
 			"resources":    defaultResources(),
 		}
 	}
@@ -412,7 +413,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	}
 
 	// Build aggregates
-	totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning := aggregateMachineResources(ml)
+	totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning, cpNodes := aggregateMachineResources(ml)
 
 	// Convert typed KubernetesCluster to unstructured for status manipulation
 	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
@@ -428,7 +429,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	}
 
 	// Update control plane status
-	if err := m.updateControlPlaneStatus(ctx, u, kc, cpCount, cpRunning); err != nil {
+	if err := m.updateControlPlaneStatus(ctx, u, kc, cpCount, cpRunning, cpNodes); err != nil {
 		return err
 	}
 
@@ -442,7 +443,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 }
 
 // aggregateMachineResources aggregates resource usage from all machines in the list
-func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) (totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning int64) {
+func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) (totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning int64, cpNodes []string) {
 	for i := range ml.Items {
 		mObj := &ml.Items[i]
 		// Sum resources
@@ -456,6 +457,7 @@ func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) (totalCPU, tot
 		// Control-plane specifics
 		if isControlPlaneMachine(mObj) {
 			cpCount++
+			cpNodes = append(cpNodes, mObj.Name)
 			if mObj.Status.Phase == phaseRunning {
 				cpRunning++
 			}
@@ -471,8 +473,15 @@ func isControlPlaneMachine(m *vitistackv1alpha1.Machine) bool {
 }
 
 // updateControlPlaneStatus updates the control plane status in the unstructured object
-func (m *StatusManager) updateControlPlaneStatus(ctx context.Context, u *unstructured.Unstructured, kc *vitistackv1alpha1.KubernetesCluster, cpCount, cpRunning int64) error {
+func (m *StatusManager) updateControlPlaneStatus(ctx context.Context, u *unstructured.Unstructured, kc *vitistackv1alpha1.KubernetesCluster, cpCount, cpRunning int64, cpNodes []string) error {
 	_ = unstructured.SetNestedField(u.Object, cpCount, "status", "state", "cluster", "controlplane", "scale")
+
+	// Set control plane node names
+	nodesAny := make([]any, len(cpNodes))
+	for i, node := range cpNodes {
+		nodesAny[i] = node
+	}
+	_ = unstructured.SetNestedSlice(u.Object, nodesAny, "status", "state", "cluster", "controlplane", "nodes")
 
 	cpStatus := determineControlPlaneStatus(cpCount, cpRunning)
 	_ = unstructured.SetNestedField(u.Object, cpStatus, "status", "state", "cluster", "controlplane", "status")

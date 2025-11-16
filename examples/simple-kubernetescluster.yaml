@@ -38,7 +38,7 @@ spec:
           region: west-trondelag
     workers:
       nodePools:
-        - name: default-worker-pool
+        - name: wp
           taint: []
           version: "1.34"
           # Defaults to 1 replica

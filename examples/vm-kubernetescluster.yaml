@@ -1,0 +1,44 @@
+---
+apiVersion: vitistack.io/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: example-vm-cluster
+  namespace: default
+spec:
+  clusterName: example-vm-cluster
+  kubernetes:
+    version: "1.31.0"
+  data:
+    provider: talos
+  topology:
+    controlPlane:
+      replicas: 1
+    workers:
+      nodePools:
+        - name: default
+          replicas: 2
+          machineClass: medium
+---
+# Virtual Machine Talos Configuration
+#
+# When the Machine status.provider is set to a virtual machine provider
+# (proxmox, kubevirt, libvirt, kvm, vmware, virtualbox, hyper-v),
+# the talos-operator will automatically add the following configuration:
+#
+# machine:
+#   install:
+#     image: <provider-specific-image>  # If configured via environment variables
+#     customization:
+#       extraKernelArgs:
+#         - console=ttyS0,115200
+#       systemExtensions:
+#         officialExtensions:
+#           - siderolabs/qemu-guest-agent
+#
+# Configure install images using environment variables:
+#
+# TALOS_VM_INSTALL_IMAGE_PROXMOX="factory.talos.dev/openstack-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.11.5"
+# TALOS_VM_INSTALL_IMAGE_KUBEVIRT="factory.talos.dev/kubevirt-installer/...:v1.11.5"
+# TALOS_VM_INSTALL_IMAGE_DEFAULT="factory.talos.dev/nocloud-installer/b027a2d9dddfa5c0752c249cf3194bb5c62294dc7cba591f3bec8119ab578aea:v1.11.5"
+#
+# See docs/vm-install-images.md for complete documentation

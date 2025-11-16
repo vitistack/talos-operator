@@ -18,6 +18,11 @@ func Init() {
 	viper.SetDefault(consts.JSON_LOGGING, true)
 	viper.SetDefault(consts.LOG_LEVEL, "info")
 	viper.SetDefault(consts.SECRET_PREFIX, "k8s-")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/b027a2d9dddfa5c0752c249cf3194bb5c62294dc7cba591f3bec8119ab578aea:v1.11.5")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_LIBVIRT, "factory.talos.dev/nocloud-installer/b027a2d9dddfa5c0752c249cf3194bb5c62294dc7cba591f3bec8119ab578aea:v1.11.5")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KVM, "factory.talos.dev/nocloud-installer/b027a2d9dddfa5c0752c249cf3194bb5c62294dc7cba591f3bec8119ab578aea:v1.11.5")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_PROXMOX, "factory.talos.dev/nocloud-installer/b027a2d9dddfa5c0752c249cf3194bb5c62294dc7cba591f3bec8119ab578aea:v1.11.5")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/b027a2d9dddfa5c0752c249cf3194bb5c62294dc7cba591f3bec8119ab578aea:v1.11.5")
 
 	viper.AutomaticEnv()
 }

@@ -76,7 +76,7 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 	for i := 0; i < controlPlaneReplicas; i++ {
 		machine := &vitistackcrdsv1alpha1.Machine{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-control-plane-%d", clusterName, i),
+				Name:      fmt.Sprintf("vm-%s-cp%d", clusterName, i),
 				Namespace: namespace,
 				Labels: map[string]string{
 					"cluster.vitistack.io/cluster-name": clusterName,
@@ -84,7 +84,7 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 				},
 			},
 			Spec: vitistackcrdsv1alpha1.MachineSpec{
-				Name: fmt.Sprintf("%s-control-plane-%d", clusterName, i),
+				Name: fmt.Sprintf("vm-%s-cp%d", clusterName, i),
 				// We'll set basic required fields from the machine CRD spec
 				InstanceType: "large", // Default value, can be overridden from cluster spec
 				Tags: map[string]string{
@@ -103,7 +103,7 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 			for i := 0; i < nodePool.Replicas; i++ {
 				virtualMachine := &vitistackcrdsv1alpha1.Machine{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("%s-worker-%s-%d", clusterName, nodePool.Name, i),
+						Name:      fmt.Sprintf("vm-%s-wp%d-%d", clusterName, idx, i),
 						Namespace: namespace,
 						Labels: map[string]string{
 							"cluster.vitistack.io/cluster-name": clusterName,
@@ -112,7 +112,7 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 						},
 					},
 					Spec: vitistackcrdsv1alpha1.MachineSpec{
-						Name:         fmt.Sprintf("%s-worker-%s-%d", clusterName, nodePool.Name, i),
+						Name:         fmt.Sprintf("vm-%s-wp%d-%d", clusterName, idx, i),
 						InstanceType: nodePool.MachineClass,
 						Tags: map[string]string{
 							"cluster":  clusterName,
@@ -129,7 +129,7 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 		for i := 0; i < 1; i++ {
 			machine := &vitistackcrdsv1alpha1.Machine{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("%s-worker-%d", clusterName, i),
+					Name:      fmt.Sprintf("vm-%s-w%d", clusterName, i),
 					Namespace: namespace,
 					Labels: map[string]string{
 						"cluster.vitistack.io/cluster-name": clusterName,
@@ -137,7 +137,7 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackcrdsv1alp
 					},
 				},
 				Spec: vitistackcrdsv1alpha1.MachineSpec{
-					Name:         fmt.Sprintf("%s-worker-%d", clusterName, i),
+					Name:         fmt.Sprintf("vm-%s-w%d", clusterName, i),
 					InstanceType: "medium",
 					Tags: map[string]string{
 						"cluster": clusterName,
