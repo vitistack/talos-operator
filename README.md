@@ -41,6 +41,16 @@ The operator includes a comprehensive reconciler for KubernetesCluster CRDs that
 
 See [`docs/kubernetescluster-reconciler.md`](docs/kubernetescluster-reconciler.md) for detailed documentation.
 
+## Tenant-specific Talos overrides
+
+- Customize cluster-wide Talos settings through the ConfigMap manifest in `hack/manifests/tenant-configmap.yaml`. The data under `config.yaml` must be valid Talos machine/cluster YAML; the operator replaces `#CLUSTERID#` with the reconciled `spec.cluster.clusterId` before applying it. See `docs/tenant-config-overrides.md` for a deeper walkthrough.
+- By default the operator looks for `talos-tenant-config` in the `default` namespace and merges it into every node config (lists are replaced, map entries override defaults). Use environment variables `TENANT_CONFIGMAP_NAME`, `TENANT_CONFIGMAP_NAMESPACE`, and `TENANT_CONFIGMAP_DATA_KEY` to change the lookup.
+- Apply or update the ConfigMap in the supervisor cluster (example kubeconfig from this repo):
+  ```bash
+  kubectl --kubeconfig ~/kubeconfig/viti-super-test.config apply -f hack/manifests/tenant-configmap.yaml
+  ```
+- Remove or comment settings you do not want to override; missing keys default back to the Talos operator's generated values.
+
 # Documentation
 
 Using https://kubebuilder.io and https://kubevirt.io/user-guide/

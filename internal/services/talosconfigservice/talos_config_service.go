@@ -91,10 +91,16 @@ func (s *TalosConfigService) PrepareNodeConfig(
 	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
 	roleYAML []byte,
 	installDisk string,
-	m *vitistackcrdsv1alpha1.Machine) ([]byte, error) {
+	m *vitistackcrdsv1alpha1.Machine,
+	tenantOverrides map[string]any) ([]byte, error) {
 	patched, err := s.PatchInstallDiskYAML(roleYAML, installDisk)
 	if err != nil {
 		return nil, fmt.Errorf("failed to patch install disk: %w", err)
+	}
+
+	patched, err = s.applyTenantOverrides(patched, tenantOverrides)
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge tenant overrides: %w", err)
 	}
 
 	patched, err = s.PatchHostname(patched, m.Name)
@@ -123,6 +129,126 @@ func (s *TalosConfigService) PrepareNodeConfig(
 	}
 
 	return patched, nil
+}
+
+// MergeRoleTemplateWithOverrides returns the role template combined with tenant overrides only.
+// When no overrides are provided, it returns nil to signal "no tenant template".
+func (s *TalosConfigService) MergeRoleTemplateWithOverrides(roleYAML []byte, tenantOverrides map[string]any) ([]byte, error) {
+	if len(roleYAML) == 0 || len(tenantOverrides) == 0 {
+		return nil, nil
+	}
+
+	merged, err := s.applyTenantOverrides(roleYAML, tenantOverrides)
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge tenant overrides into role template: %w", err)
+	}
+	return merged, nil
+}
+
+func (s *TalosConfigService) applyTenantOverrides(in []byte, overrides map[string]any) ([]byte, error) {
+	if len(overrides) == 0 {
+		return in, nil
+	}
+
+	var base map[string]any
+	if err := yaml.Unmarshal(in, &base); err != nil {
+		return nil, err
+	}
+	merged := mergeTenantOverrides(base, overrides)
+	return yaml.Marshal(merged)
+}
+
+func mergeTenantOverrides(base map[string]any, overrides map[string]any) map[string]any {
+	if base == nil {
+		base = map[string]any{}
+	}
+	for key, overrideVal := range overrides {
+		switch typed := overrideVal.(type) {
+		case map[string]any:
+			existing, _ := base[key].(map[string]any)
+			base[key] = mergeTenantOverrides(existing, typed)
+		case []any:
+			existing, _ := base[key].([]any)
+			base[key] = mergeTenantOverrideSlices(existing, typed)
+		default:
+			base[key] = deepCopyValue(overrideVal)
+		}
+	}
+	return base
+}
+
+func mergeTenantOverrideSlices(base, overrides []any) []any {
+	if len(overrides) == 0 {
+		return base
+	}
+	if len(base) == 0 {
+		copied, _ := deepCopyValue(overrides).([]any)
+		return copied
+	}
+	if !sliceOfNamedMaps(base) || !sliceOfNamedMaps(overrides) {
+		copied, _ := deepCopyValue(overrides).([]any)
+		return copied
+	}
+
+	indexByName := make(map[string]int, len(base))
+	for idx, item := range base {
+		if entry, ok := item.(map[string]any); ok {
+			if name, _ := entry["name"].(string); name != "" {
+				indexByName[name] = idx
+			}
+		}
+	}
+
+	for _, overrideItem := range overrides {
+		overrideMap, ok := overrideItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := overrideMap["name"].(string)
+		if name == "" {
+			continue
+		}
+		if idx, exists := indexByName[name]; exists {
+			existingMap, _ := base[idx].(map[string]any)
+			base[idx] = mergeTenantOverrides(existingMap, overrideMap)
+			continue
+		}
+		base = append(base, deepCopyValue(overrideMap))
+	}
+
+	return base
+}
+
+func sliceOfNamedMaps(items []any) bool {
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			return false
+		}
+		if _, ok := entry["name"].(string); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func deepCopyValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cpy := make(map[string]any, len(typed))
+		for k, v := range typed {
+			cpy[k] = deepCopyValue(v)
+		}
+		return cpy
+	case []any:
+		cpy := make([]any, len(typed))
+		for idx, v := range typed {
+			cpy[idx] = deepCopyValue(v)
+		}
+		return cpy
+	default:
+		return typed
+	}
 }
 
 func (s *TalosConfigService) PatchInstallDiskYAML(in []byte, disk string) ([]byte, error) {

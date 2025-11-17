@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"net"
@@ -155,6 +156,11 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 	endpointIP := controlPlaneIPs[0]
 
+	tenantOverrides, err := t.loadTenantOverrides(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to load tenant overrides: %w", err)
+	}
+
 	// Prefer existing artifacts from Secret; generate only if missing
 	clientConfig, fromSecret, err := t.loadTalosArtifacts(ctx, cluster)
 	if err != nil {
@@ -179,6 +185,10 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		vlog.Info("Loaded Talos artifacts from Secret: cluster=" + cluster.Name)
 	}
 
+	if err := t.persistTenantRoleTemplates(ctx, cluster, tenantOverrides); err != nil {
+		return fmt.Errorf("failed to persist tenant role templates: %w", err)
+	}
+
 	// Use insecure connections only until Talos API is confirmed ready with certificates
 	flags, _ := t.getTalosSecretFlags(ctx, cluster)
 	insecure := !flags.TalosAPIReady // Use secure connections once API is ready with certs
@@ -198,7 +208,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			return fmt.Errorf("role templates not present in secret yet, cannot apply config (this should not happen)")
 		}
 
-		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, controlPlanes, insecure); err != nil {
+		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, controlPlanes, insecure, tenantOverrides); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneConfigApplied", "False", "ApplyError", err.Error())
 			return err
 		}
@@ -213,7 +223,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	}
 
 	if !flags.WorkerApplied {
-		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, workers, insecure); err != nil {
+		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, workers, insecure, tenantOverrides); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "WorkerConfigApplied", "False", "ApplyError", err.Error())
 			return err
 		}
@@ -514,7 +524,8 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
 	clientConfig *clientconfig.Config,
 	machines []*vitistackcrdsv1alpha1.Machine,
-	insecure bool) error {
+	insecure bool,
+	tenantOverrides map[string]any) error {
 	// Load role templates from persistent Secret
 	secret, err := t.secretService.GetTalosSecret(ctx, cluster)
 	if err != nil {
@@ -554,7 +565,7 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 
 		// Select install disk and prepare configuration
 		installDisk := t.configService.SelectInstallDisk(m)
-		patched, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m)
+		patched, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides)
 		if err != nil {
 			return fmt.Errorf("failed to prepare config for node %s: %w", m.Name, err)
 		}
@@ -565,6 +576,98 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 		}
 	}
 	return nil
+}
+
+func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (map[string]any, error) {
+	name := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAME))
+	if name == "" {
+		return nil, nil
+	}
+
+	namespace := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAMESPACE))
+	if namespace == "" {
+		namespace = cluster.Namespace
+	}
+
+	dataKey := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_DATA_KEY))
+	if dataKey == "" {
+		dataKey = "config.yaml"
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := t.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			vlog.Info(fmt.Sprintf("Tenant overrides ConfigMap %s/%s not found, skipping overrides", namespace, name))
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read tenant overrides ConfigMap %s/%s: %w", namespace, name, err)
+	}
+
+	raw, ok := cm.Data[dataKey]
+	if !ok || strings.TrimSpace(raw) == "" {
+		vlog.Warn(fmt.Sprintf("Tenant overrides ConfigMap %s/%s missing data key %s, skipping overrides", namespace, name, dataKey))
+		return nil, nil
+	}
+
+	replaced := strings.ReplaceAll(raw, "#CLUSTERID#", cluster.Spec.Cluster.ClusterId)
+	overrides := map[string]any{}
+	if err := yaml.Unmarshal([]byte(replaced), &overrides); err != nil {
+		return nil, fmt.Errorf("failed to parse tenant overrides from ConfigMap %s/%s key %s: %w", namespace, name, dataKey, err)
+	}
+
+	return overrides, nil
+}
+
+func (t *TalosManager) persistTenantRoleTemplates(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, tenantOverrides map[string]any) error {
+	if len(tenantOverrides) == 0 {
+		return nil
+	}
+
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := t.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		cp := secret.Data["controlplane.yaml"]
+		w := secret.Data["worker.yaml"]
+		if len(cp) == 0 && len(w) == 0 {
+			return nil
+		}
+
+		updated := false
+		if mergedCP, err := t.configService.MergeRoleTemplateWithOverrides(cp, tenantOverrides); err != nil {
+			return err
+		} else if len(mergedCP) > 0 {
+			secret.Data["controlplane-tenant.yaml"] = mergedCP
+			updated = true
+		}
+		if mergedWorker, err := t.configService.MergeRoleTemplateWithOverrides(w, tenantOverrides); err != nil {
+			return err
+		} else if len(mergedWorker) > 0 {
+			secret.Data["worker-tenant.yaml"] = mergedWorker
+			updated = true
+		}
+
+		if !updated {
+			return nil
+		}
+
+		if err := t.secretService.UpdateTalosSecret(ctx, secret); err != nil {
+			if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+				time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+
+	return fmt.Errorf("failed to persist tenant role templates after %d retries", maxRetries)
 }
 
 // mergeBootstrappedFlag ensures we preserve the bootstrapped flag from an existing Secret,
@@ -669,10 +772,6 @@ func (t *TalosManager) upsertTalosClusterConfigSecretWithRoleYAML(
 	applyDataToSecret(secret, data)
 	return t.secretService.UpdateTalosSecret(ctx, secret)
 }
-
-// setTalosSecretBootstrapped is deprecated in favor of setTalosSecretFlags
-
-// setTalosSecretBootstrapped is deprecated in favor of setTalosSecretFlags
 
 // upsertTalosClusterConfigSecret stores Talos client config, role configs, kubeconfig, and bootstrapped flag in a single Secret.
 // Secret name: <cluster id>
