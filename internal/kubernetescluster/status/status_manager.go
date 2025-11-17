@@ -4,9 +4,11 @@ import (
 	"context"
 	"time"
 
+	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	"github.com/vitistack/common/pkg/unstructuredutil"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,7 +44,7 @@ func NewManager(c client.Client) *StatusManager {
 // UpdateMachineStatus updates the machine status with the given state
 func (m *StatusManager) UpdateKubernetesClusterStatus(ctx context.Context, kubernetesCluster *vitistackv1alpha1.KubernetesCluster) error {
 	// Load cluster Secret and derive phase/conditions
-	secretName := "k8s-" + kubernetesCluster.Name
+	secretName := viper.GetString(consts.SECRET_PREFIX) + kubernetesCluster.Spec.Cluster.ClusterId
 	secret := &corev1.Secret{}
 	_ = m.Get(ctx, types.NamespacedName{Name: secretName, Namespace: kubernetesCluster.Namespace}, secret)
 

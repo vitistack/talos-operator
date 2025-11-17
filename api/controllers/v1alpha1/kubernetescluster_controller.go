@@ -115,7 +115,7 @@ func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vi
 	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
 		// Delete consolidated Talos Secret FIRST (before finalizer removal)
 		// This ensures the secret is deleted even if finalizer removal fails
-		// Note: Secret name uses cluster.Name, not cluster.Spec.Cluster.ClusterId
+		// Note: Secret name uses cluster.Spec.Cluster.ClusterId
 		secretName := viper.GetString(consts.SECRET_PREFIX) + kc.Spec.Cluster.ClusterId
 		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: kc.GetNamespace()}}
 		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {

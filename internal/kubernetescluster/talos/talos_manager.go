@@ -276,7 +276,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "True", "Persisted", "Kubeconfig stored in Secret")
 
 		if !hasKubeconfig {
-			vlog.Info("Kubeconfig stored in Secret: secret=" + fmt.Sprintf("k8s-%s", cluster.Name))
+			vlog.Info("Kubeconfig stored in Secret: secret=" + fmt.Sprintf("%s%s", viper.GetString(consts.SECRET_PREFIX), cluster.Spec.Cluster.ClusterId))
 		}
 	} else if clusterState.ClusterAccess {
 		vlog.Info("Cluster access already established (kubeconfig present), skipping fetch: cluster=" + cluster.Name)
@@ -286,7 +286,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 // ensureTalosSecretExists creates the consolidated Secret if it does not exist yet with default flags
 func (t *TalosManager) ensureTalosSecretExists(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) error {
-	name := fmt.Sprintf("k8s-%s", cluster.Name)
+	name := fmt.Sprintf("%s%s", viper.GetString(consts.SECRET_PREFIX), cluster.Spec.Cluster.ClusterId)
 	secret := &corev1.Secret{}
 	err := t.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, secret)
 	if err == nil {
@@ -311,7 +311,7 @@ func (t *TalosManager) ensureTalosSecretExists(ctx context.Context, cluster *vit
 			Name:      name,
 			Namespace: cluster.Namespace,
 			Labels: map[string]string{
-				"cluster.vitistack.io/cluster-name": cluster.Name,
+				"cluster.vitistack.io/cluster-id": cluster.Spec.Cluster.ClusterId,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -322,7 +322,7 @@ func (t *TalosManager) ensureTalosSecretExists(ctx context.Context, cluster *vit
 
 // getTalosSecretState returns persisted state flags from the cluster's consolidated Secret.
 func (t *TalosManager) getTalosSecretState(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (bootstrapped bool, hasKubeconfig bool, err error) {
-	name := fmt.Sprintf("k8s-%s", cluster.Name)
+	name := fmt.Sprintf("%s%s", viper.GetString(consts.SECRET_PREFIX), cluster.Spec.Cluster.ClusterId)
 	secret := &corev1.Secret{}
 	if e := t.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, secret); e != nil {
 		return false, false, e
@@ -342,7 +342,7 @@ func (t *TalosManager) getTalosSecretState(ctx context.Context, cluster *vitista
 // loadTalosArtifacts attempts to read talosconfig (and ensures role templates exist) from the consolidated Secret.
 // Returns fromSecret=true when talosconfig and both role templates are present.
 func (t *TalosManager) loadTalosArtifacts(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (*clientconfig.Config, bool, error) {
-	name := fmt.Sprintf("k8s-%s", cluster.Name)
+	name := fmt.Sprintf("k8s-%s", cluster.Spec.Cluster.ClusterId)
 	secret := &corev1.Secret{}
 	if err := t.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, secret); err != nil {
 		return nil, false, nil
@@ -378,7 +378,7 @@ type talosSecretFlags struct {
 
 // getTalosSecretFlags reads boolean flags from the consolidated Secret
 func (t *TalosManager) getTalosSecretFlags(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (talosSecretFlags, error) {
-	name := fmt.Sprintf("k8s-%s", cluster.Name)
+	name := fmt.Sprintf("k8s-%s", cluster.Spec.Cluster.ClusterId)
 	secret := &corev1.Secret{}
 	if err := t.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, secret); err != nil {
 		return talosSecretFlags{}, err
@@ -408,7 +408,7 @@ func (t *TalosManager) getTalosSecretFlags(ctx context.Context, cluster *vitista
 
 // setTalosSecretFlags sets provided boolean flags in the consolidated Secret
 func (t *TalosManager) setTalosSecretFlags(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, updates map[string]bool) error {
-	name := fmt.Sprintf("k8s-%s", cluster.Name)
+	name := fmt.Sprintf("k8s-%s", cluster.Spec.Cluster.ClusterId)
 	secret := &corev1.Secret{}
 	if err := t.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, secret); err != nil {
 		return err
@@ -456,7 +456,7 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 	machines []*vitistackcrdsv1alpha1.Machine,
 	insecure bool) error {
 	// Load role templates from persistent Secret
-	secretName := fmt.Sprintf("k8s-%s", cluster.Name)
+	secretName := fmt.Sprintf("k8s-%s", cluster.Spec.Cluster.ClusterId)
 	secret := &corev1.Secret{}
 	if err := t.Get(ctx, types.NamespacedName{Name: secretName, Namespace: cluster.Namespace}, secret); err != nil {
 		return fmt.Errorf("failed to get talos secret %s: %w", secretName, err)
@@ -839,7 +839,7 @@ func (t *TalosManager) upsertTalosClusterConfigSecretWithRoleYAML(
 	workerYAML []byte,
 	kubeconfig []byte,
 ) error {
-	name := fmt.Sprintf("k8s-%s", cluster.Name)
+	name := fmt.Sprintf("k8s-%s", cluster.Spec.Cluster.ClusterId)
 	secret := &corev1.Secret{}
 	err := t.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, secret)
 
@@ -877,7 +877,7 @@ func (t *TalosManager) upsertTalosClusterConfigSecretWithRoleYAML(
 				Name:      name,
 				Namespace: cluster.Namespace,
 				Labels: map[string]string{
-					"cluster.vitistack.io/cluster-name": cluster.Name,
+					"cluster.vitistack.io/cluster-id": cluster.Spec.Cluster.ClusterId,
 				},
 			},
 			Type: corev1.SecretTypeOpaque,
@@ -1186,14 +1186,14 @@ func (t *TalosManager) generateTalosConfig(
 }
 
 // upsertTalosClusterConfigSecret stores Talos client config, role configs, kubeconfig, and bootstrapped flag in a single Secret.
-// Secret name: k8s-<cluster name>
+// Secret name: k8s-<cluster id>
 func (t *TalosManager) upsertTalosClusterConfigSecret(
 	ctx context.Context,
 	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
 	clientCfg *clientconfig.Config,
 	kubeconfig []byte,
 ) error {
-	name := fmt.Sprintf("k8s-%s", cluster.Name)
+	name := fmt.Sprintf("k8s-%s", cluster.Spec.Cluster.ClusterId)
 	secret := &corev1.Secret{}
 	err := t.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, secret)
 
@@ -1239,7 +1239,7 @@ func (t *TalosManager) upsertTalosClusterConfigSecret(
 				Name:      name,
 				Namespace: cluster.Namespace,
 				Labels: map[string]string{
-					"cluster.vitistack.io/cluster-name": cluster.Name,
+					"cluster.vitistack.io/cluster-id": cluster.Spec.Cluster.ClusterId,
 				},
 			},
 			Type: corev1.SecretTypeOpaque,
