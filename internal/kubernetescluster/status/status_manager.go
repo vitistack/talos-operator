@@ -4,16 +4,14 @@ import (
 	"context"
 	"time"
 
-	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	"github.com/vitistack/common/pkg/unstructuredutil"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
-	"github.com/vitistack/talos-operator/pkg/consts"
+	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -32,21 +30,30 @@ const (
 // StatusManager handles machine status updates and monitoring
 type StatusManager struct {
 	client.Client
+	SecretService *secretservice.SecretService
 }
 
 // NewManager creates a new status manager
-func NewManager(c client.Client) *StatusManager {
+func NewManager(c client.Client, secretService *secretservice.SecretService) *StatusManager {
 	return &StatusManager{
-		Client: c,
+		Client:        c,
+		SecretService: secretService,
 	}
 }
 
 // UpdateMachineStatus updates the machine status with the given state
 func (m *StatusManager) UpdateKubernetesClusterStatus(ctx context.Context, kubernetesCluster *vitistackv1alpha1.KubernetesCluster) error {
 	// Load cluster Secret and derive phase/conditions
-	secretName := viper.GetString(consts.SECRET_PREFIX) + kubernetesCluster.Spec.Cluster.ClusterId
-	secret := &corev1.Secret{}
-	_ = m.Get(ctx, types.NamespacedName{Name: secretName, Namespace: kubernetesCluster.Namespace}, secret)
+	secret, err := m.SecretService.GetTalosSecret(ctx, kubernetesCluster)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// Secret not found, treat as nil
+			secret = nil
+		} else {
+			vlog.Error("Failed to get Talos secret for cluster "+kubernetesCluster.Name, err)
+			return err
+		}
+	}
 
 	phase, conds, kubeconfig := deriveStatusFromSecret(secret)
 	_ = m.SetPhase(ctx, kubernetesCluster, phase)

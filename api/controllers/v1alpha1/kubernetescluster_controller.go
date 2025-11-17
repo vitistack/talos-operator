@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/NorskHelsenett/ror/pkg/kubernetes/providers/providermodels"
@@ -11,6 +12,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
+	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,6 +31,8 @@ type KubernetesClusterReconciler struct {
 	TalosManager   *talos.TalosManager     // Manager for Talos clusters
 	MachineManager *machine.MachineManager // Manager for Machine resources
 	StatusManager  *status.StatusManager   // Manager for status updates
+
+	SecretService *secretservice.SecretService
 }
 
 const (
@@ -77,7 +81,7 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// Reconcile Talos cluster after machines are created
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, kubernetesCluster); err != nil {
-		vlog.Error("Failed to reconcile Talos cluster", err)
+		vlog.Warn("Failed to reconcile Talos cluster ", err)
 		// Requeue for a later retry without surfacing an error
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
@@ -103,55 +107,130 @@ func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *v
 	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
 		return false, nil
 	}
-	controllerutil.AddFinalizer(kc, KubernetesClusterFinalizer)
-	if err := r.Update(ctx, kc); err != nil {
+
+	// Retry logic to handle concurrent modifications
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Get fresh copy if retrying
+		if attempt > 0 {
+			freshKC := &vitistackcrdsv1alpha1.KubernetesCluster{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(kc), freshKC); err != nil {
+				return false, err
+			}
+			kc = freshKC
+			if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
+				return false, nil // Another reconcile added it
+			}
+		}
+
+		controllerutil.AddFinalizer(kc, KubernetesClusterFinalizer)
+		err := r.Update(ctx, kc)
+		if err == nil {
+			return true, nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			vlog.Warn("Conflict adding finalizer, retrying...")
+			continue
+		}
 		return false, err
 	}
-	return true, nil
+	return false, fmt.Errorf("failed to add finalizer after %d retries", maxRetries)
 }
 
 // handleDeletion performs cleanup and removes the finalizer when present
 func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (ctrl.Result, error) {
-	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
-		// Delete consolidated Talos Secret FIRST (before finalizer removal)
-		// This ensures the secret is deleted even if finalizer removal fails
-		// Note: Secret name uses cluster.Spec.Cluster.ClusterId
-		secretName := viper.GetString(consts.SECRET_PREFIX) + kc.Spec.Cluster.ClusterId
-		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: kc.GetNamespace()}}
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			vlog.Error("Failed to delete Talos secret: "+secretName, err)
-			return ctrl.Result{}, err
-		}
-		vlog.Info("Deleted Talos secret: " + secretName)
-
-		// Clean up machines managed by this operator
-		if err := r.MachineManager.CleanupMachines(ctx, kc.Spec.Cluster.ClusterId, kc.GetNamespace()); err != nil {
-			vlog.Error("Failed to cleanup machines during deletion", err)
-			return ctrl.Result{}, err
-		}
-		// Clean up files
-		if err := r.MachineManager.CleanupMachineFiles(kc.Spec.Cluster.ClusterId); err != nil {
-			vlog.Error("Failed to remove cluster directory", err)
-			// don't fail deletion on file errors
-		}
-		// Remove finalizer
-		controllerutil.RemoveFinalizer(kc, KubernetesClusterFinalizer)
-		if err := r.Update(ctx, kc); err != nil {
-			return ctrl.Result{}, err
-		}
-		vlog.Info("Successfully deleted KubernetesCluster: cluster=" + kc.GetName())
+	if !controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
+		return ctrl.Result{}, nil
 	}
-	// If no finalizer, nothing to do for us
-	return ctrl.Result{}, nil
+
+	if err := r.performCleanup(ctx, kc); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return r.removeFinalizer(ctx, kc)
+}
+
+// performCleanup handles secret, machine, and file cleanup
+func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) error {
+	// Delete Talos Secret
+	secretName := viper.GetString(consts.SECRET_PREFIX) + kc.Spec.Cluster.ClusterId
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: kc.GetNamespace()}}
+	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+		vlog.Error("Failed to delete Talos secret: "+secretName, err)
+		return err
+	}
+	vlog.Info("Deleted Talos secret: " + secretName)
+
+	// Clean up machines
+	if err := r.MachineManager.CleanupMachines(ctx, kc.Spec.Cluster.ClusterId, kc.GetNamespace()); err != nil {
+		vlog.Error("Failed to cleanup machines during deletion", err)
+		return err
+	}
+
+	// Clean up files (non-fatal)
+	if err := r.MachineManager.CleanupMachineFiles(kc.Spec.Cluster.ClusterId); err != nil {
+		vlog.Error("Failed to remove cluster directory", err)
+	}
+
+	return nil
+}
+
+// removeFinalizer removes the finalizer with retry logic
+func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (ctrl.Result, error) {
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			freshKC, err := r.getFreshCluster(ctx, kc)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if freshKC == nil {
+				// Already deleted or finalizer removed
+				return ctrl.Result{}, nil
+			}
+			kc = freshKC
+		}
+
+		controllerutil.RemoveFinalizer(kc, KubernetesClusterFinalizer)
+		err := r.Update(ctx, kc)
+		if err == nil {
+			vlog.Info("Successfully deleted KubernetesCluster: cluster=" + kc.GetName())
+			return ctrl.Result{}, nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			vlog.Warn("Conflict removing finalizer, retrying...")
+			continue
+		}
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, fmt.Errorf("failed to remove finalizer after %d retries", maxRetries)
+}
+
+// getFreshCluster retrieves a fresh copy of the cluster resource
+func (r *KubernetesClusterReconciler) getFreshCluster(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (*vitistackcrdsv1alpha1.KubernetesCluster, error) {
+	freshKC := &vitistackcrdsv1alpha1.KubernetesCluster{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(kc), freshKC); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !controllerutil.ContainsFinalizer(freshKC, KubernetesClusterFinalizer) {
+		return nil, nil
+	}
+	return freshKC, nil
 }
 
 // NewKubernetesClusterReconciler creates a new KubernetesClusterReconciler with initialized managers
 func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *KubernetesClusterReconciler {
-	statusManager := status.NewManager(c)
+	secretService := secretservice.NewSecretService(c)
+	statusManager := status.NewManager(c, secretService)
 	return &KubernetesClusterReconciler{
-		Client: c,
-		Scheme: scheme,
-
+		Client:         c,
+		Scheme:         scheme,
+		SecretService:  secretService,
 		TalosManager:   talos.NewTalosManager(c, statusManager),
 		MachineManager: machine.NewMachineManager(c, scheme),
 		StatusManager:  statusManager,
