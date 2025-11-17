@@ -206,6 +206,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			vlog.Error("Failed to set controlplane_applied flag in secret", err)
 			return fmt.Errorf("failed to persist controlplane_applied flag: %w", err)
 		}
+		vlog.Info("Secret status updated: controlplane_applied=true, cluster=" + cluster.Name)
 		_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneConfigApplied", "True", "Applied", "Talos config applied to control planes")
 	} else {
 		vlog.Info("Control-plane config already applied, skipping: cluster=" + cluster.Name)
@@ -220,6 +221,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			vlog.Error("Failed to set worker_applied flag in secret", err)
 			return fmt.Errorf("failed to persist worker_applied flag: %w", err)
 		}
+		vlog.Info("Secret status updated: worker_applied=true, cluster=" + cluster.Name)
 		_ = t.statusManager.SetCondition(ctx, cluster, "WorkerConfigApplied", "True", "Applied", "Talos config applied to workers")
 	} else {
 		vlog.Info("Worker config already applied, skipping: cluster=" + cluster.Name)
@@ -254,6 +256,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			vlog.Error("Failed to set talos_api_ready flag in secret", err)
 			return fmt.Errorf("failed to persist talos_api_ready flag: %w", err)
 		}
+		vlog.Info("Secret status updated: talos_api_ready=true, cluster=" + cluster.Name)
 
 		if err := t.clientService.BootstrapTalosControlPlaneWithRetry(ctx, talosClientSecure, endpointIP, 5*time.Minute, 10*time.Second); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "False", "BootstrapError", err.Error())
@@ -267,6 +270,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			vlog.Error("Failed to set bootstrapped flag in secret", err)
 			return fmt.Errorf("failed to persist bootstrapped flag: %w", err)
 		}
+		vlog.Info("Secret status updated: bootstrapped=true, cluster=" + cluster.Name)
 	} else if clusterState.Bootstrapped {
 		vlog.Info("Cluster already bootstrapped, skipping bootstrap step: cluster=" + cluster.Name)
 	}
@@ -287,12 +291,16 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			vlog.Error("Failed to set cluster_access flag in secret", err)
 			return fmt.Errorf("failed to persist cluster_access flag: %w", err)
 		}
+		vlog.Info("Secret status updated: cluster_access=true, cluster=" + cluster.Name)
 		// Mark cluster as ready with timestamp
 		if err := t.setSecretTimestamp(ctx, cluster, "ready_at"); err != nil {
 			vlog.Error("Failed to set ready_at timestamp in secret", err)
+		} else {
+			vlog.Info("Secret timestamp updated: ready_at, cluster=" + cluster.Name)
 		}
 		_ = t.statusManager.SetPhase(ctx, cluster, "Ready")
 		_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "True", "Persisted", "Kubeconfig stored in Secret")
+		vlog.Info("Cluster status set to Ready: cluster=" + cluster.Name)
 
 		if !hasKubeconfig {
 			vlog.Info("Kubeconfig stored in Secret: secret=" + secretservice.GetSecretName(cluster))
@@ -326,7 +334,11 @@ func (t *TalosManager) ensureTalosSecretExists(ctx context.Context, cluster *vit
 		"cluster_access":            []byte(falseStr),
 		"created_at":                []byte(now),
 	}
-	return t.secretService.CreateTalosSecret(ctx, cluster, data)
+	err = t.secretService.CreateTalosSecret(ctx, cluster, data)
+	if err == nil {
+		vlog.Info("Secret created with initial status flags, cluster=" + cluster.Name)
+	}
+	return err
 }
 
 // getTalosSecretState returns persisted state flags from the cluster's consolidated Secret.
