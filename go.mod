@@ -5,7 +5,7 @@ go 1.25.4
 godebug default=go1.25
 
 require (
-	github.com/NorskHelsenett/ror v1.9.1
+	github.com/NorskHelsenett/ror v1.9.3
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
 	github.com/siderolabs/talos/pkg/machinery v1.11.5
