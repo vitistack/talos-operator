@@ -44,6 +44,8 @@ const (
 // +kubebuilder:rbac:groups=vitistack.io,resources=kubernetesclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=vitistack.io,resources=machines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=vitistack.io,resources=machines/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=vitistack.io,resources=controlplanevirtualsharedips,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=vitistack.io,resources=controlplanevirtualsharedips/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachines/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
@@ -151,8 +153,22 @@ func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vi
 	return r.removeFinalizer(ctx, kc)
 }
 
-// performCleanup handles secret, machine, and file cleanup
+// performCleanup handles secret, machine, VIP, and file cleanup
 func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) error {
+	// Delete ControlPlaneVirtualSharedIP
+	vipName := kc.Spec.Cluster.ClusterId
+	vip := &vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIP{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      vipName,
+			Namespace: kc.GetNamespace(),
+		},
+	}
+	if err := r.Delete(ctx, vip); err != nil && !apierrors.IsNotFound(err) {
+		vlog.Error("Failed to delete ControlPlaneVirtualSharedIP: "+vipName, err)
+		return err
+	}
+	vlog.Info("Deleted ControlPlaneVirtualSharedIP: " + vipName)
+
 	// Delete Talos Secret
 	secretName := viper.GetString(consts.SECRET_PREFIX) + kc.Spec.Cluster.ClusterId
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: kc.GetNamespace()}}

@@ -1,0 +1,65 @@
+apiVersion: vitistack.io/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: t-test-002
+spec:
+  data:
+    clusterUid: "a30fbc8d-596f-48d0-8541-dbc23bca28a1"
+    clusterId: "t-test-002-5tu8"
+    provider: talos
+    environment: dev
+    datacenter: test-south-az1
+    project: simple-project
+    region: south
+    workorder: "simple-workorder"
+    zone: "az1"
+    workspace: "simple-workspace"
+  # Empty spec will use defaults:
+  # - 1 control plane node
+  # - 1 worker nodes
+  topology:
+    version: "1.34"
+    controlplane:
+      # Defaults to 1 replica
+      replicas: 1
+      version: "1.34"
+      machineClass: large
+      provider: kubevirt
+      storage:
+        - class: "standard"
+          path: "/var/lib/vitistack/kubevirt"
+          size: "20Gi"
+      metadata:
+        annotations:
+          environment: development
+          region: west-trondelag
+        labels:
+          environment: development
+          region: west-trondelag
+    workers:
+      nodePools:
+        - name: wp
+          taint: []
+          version: "1.34"
+          # Defaults to 1 replica
+          replicas: 1
+          # Defaults to "standard" machine class
+          machineClass: large
+          autoscaling:
+            enabled: false
+            minReplicas: 1
+            maxReplicas: 5
+            scalingRules:
+              - "cpu"
+          metadata:
+            annotations:
+              environment: development
+              region: west-trondelag
+            labels:
+              environment: development
+              region: west-trondelag
+          provider: kubevirt
+          storage:
+            - class: "standard"
+              path: "/var/lib/vitistack/kubevirt"
+              size: "200Gi"

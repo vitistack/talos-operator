@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
 permissions:
   contents: read
@@ -13,16 +13,9 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    env:
-      GOPRIVATE: github.com/vitistack
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
-
-      - name: Configure Git for private repos
-        run: |
-          git config --global url.https://$GH_TOKEN@github.com/.insteadOf https://github.com/
+        uses: actions/checkout@v6
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -33,9 +26,6 @@ jobs:
       - name: Install dependencies
         run: |
           go mod download
-        env:
-          GOPRIVATE: github.com/vitistack/*
-          GOPROXY: direct
 
       - name: Build
         run: |
@@ -44,9 +34,6 @@ jobs:
           echo "Version $VERSION"
           touch cmd/isbuilt
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-        env:
-          GOPRIVATE: github.com/vitistack/*
-          GOPROXY: direct
 
   create-oci-image:
     name: Create OCI Image
@@ -54,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -96,13 +83,12 @@ jobs:
       version: ${{ steps.extract-version.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
         with:
-          version: "latest"
-          token: ${{ secrets.GITHUB_TOKEN }}
+          version: 'latest'
 
       - name: Extract version
         id: extract-version

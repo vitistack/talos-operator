@@ -26,14 +26,14 @@ func (s *TalosClientService) CreateTalosClient(
 	ctx context.Context,
 	insecure bool,
 	clientConfig *clientconfig.Config,
-	controlPlaneIps []string) (*talosclient.Client, error) {
+	endpointIps []string) (*talosclient.Client, error) {
 	var tClient *talosclient.Client
 	var err error
 
 	if !insecure {
 		tClient, err = talosclient.New(ctx,
 			talosclient.WithConfig(clientConfig),
-			talosclient.WithEndpoints(controlPlaneIps...),
+			talosclient.WithEndpoints(endpointIps...),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create secure Talos client: %w", err)
@@ -44,7 +44,7 @@ func (s *TalosClientService) CreateTalosClient(
 			talosclient.WithTLSConfig(&tls.Config{
 				InsecureSkipVerify: true, // #nosec G402
 			}),
-			talosclient.WithEndpoints(controlPlaneIps...),
+			talosclient.WithEndpoints(endpointIps...),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create insecure Talos client: %w", err)
@@ -157,7 +157,8 @@ func (s *TalosClientService) BootstrapTalosControlPlaneWithRetry(
 func (s *TalosClientService) GetKubeconfigWithRetry(
 	ctx context.Context,
 	clientCfg *clientconfig.Config,
-	endpoint string,
+	nodesIp string,
+	endpointIp string,
 	timeout time.Duration,
 	interval time.Duration) ([]byte, error) {
 	deadline := time.Now().Add(timeout)
@@ -169,12 +170,13 @@ func (s *TalosClientService) GetKubeconfigWithRetry(
 		default:
 		}
 
-		tClient, err := talosclient.New(ctx, talosclient.WithConfig(clientCfg), talosclient.WithEndpoints(endpoint))
+		tClient, err := talosclient.New(ctx, talosclient.WithConfig(clientCfg), talosclient.WithEndpoints(nodesIp))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Talos client for kubeconfig: %w", err)
 		}
 
-		ctxWithNode := talosclient.WithNodes(ctx, endpoint)
+		// Use endpoint IP for node context as well when using VIP/load balancer
+		ctxWithNode := talosclient.WithNodes(ctx, nodesIp)
 
 		kubeconfig, err := tClient.Kubeconfig(ctxWithNode)
 		if err == nil && len(kubeconfig) > 0 {
@@ -188,7 +190,7 @@ func (s *TalosClientService) GetKubeconfigWithRetry(
 			return nil, fmt.Errorf("timeout waiting for kubeconfig: received empty config")
 		}
 
-		vlog.Info("Kubeconfig not ready yet, retrying: endpoint=" + endpoint)
+		vlog.Info("Kubeconfig not ready yet, retrying: endpoint=" + endpointIp + " node=" + nodesIp)
 		time.Sleep(interval)
 	}
 }

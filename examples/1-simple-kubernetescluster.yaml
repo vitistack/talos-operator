@@ -59,7 +59,7 @@ spec:
               environment: development
               region: west-trondelag
           provider: kubevirt
-          # storage:
-          #   - class: "standard"
-          #     path: "/var/lib/vitistack/kubevirt"
-          #     size: "200Gi"
+          storage:
+            - class: "standard"
+              path: "/var/lib/vitistack/kubevirt"
+              size: "200Gi"

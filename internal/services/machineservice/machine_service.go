@@ -3,7 +3,6 @@ package machineservice
 import (
 	"context"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
@@ -117,12 +116,8 @@ func (s *MachineService) IsMachineReady(m *vitistackcrdsv1alpha1.Machine) bool {
 		}
 	}
 
-	for i := range m.Status.NetworkInterfaces {
-		iface := &m.Status.NetworkInterfaces[i]
-		if iface.MACAddress != "" && (len(iface.IPAddresses) > 0 || len(iface.IPv6Addresses) > 0) {
-			hasNetwork = true
-			break
-		}
+	if len(m.Status.PublicIPAddresses) > 0 {
+		hasNetwork = true
 	}
 
 	return hasNetwork && hasDisk
@@ -139,30 +134,4 @@ func (s *MachineService) FilterMachinesByRole(
 		}
 	}
 	return filtered
-}
-
-// GetIPv4Address returns the first IPv4 address from a machine
-func (s *MachineService) GetIPv4Address(m *vitistackcrdsv1alpha1.Machine) string {
-	if len(m.Status.NetworkInterfaces) == 0 {
-		return ""
-	}
-
-	for _, ipAddr := range m.Status.NetworkInterfaces[0].IPAddresses {
-		ip := net.ParseIP(ipAddr)
-		if ip != nil && ip.To4() != nil {
-			return ipAddr
-		}
-	}
-	return ""
-}
-
-// GetControlPlaneIPs collects IPv4 addresses from control plane machines
-func (s *MachineService) GetControlPlaneIPs(machines []*vitistackcrdsv1alpha1.Machine) []string {
-	var ips []string
-	for _, m := range machines {
-		if ip := s.GetIPv4Address(m); ip != "" {
-			ips = append(ips, ip)
-		}
-	}
-	return ips
 }

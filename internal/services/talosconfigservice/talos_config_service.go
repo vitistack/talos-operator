@@ -28,10 +28,10 @@ func NewTalosConfigService() *TalosConfigService {
 func (s *TalosConfigService) GenerateTalosConfig(
 	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
 	machines []*vitistackcrdsv1alpha1.Machine,
-	endpointIP string) (*clientconfig.Config, []byte, []byte, error) {
-	controlPlanes := filterMachinesByRole(machines, "control-plane")
+	endpointIPs []string) (*clientconfig.Config, []byte, []byte, error) {
+	// endpointIPs contains VIP load balancer IPs for the control plane
 	clusterId := cluster.Spec.Cluster.ClusterId
-	controlPlaneEndpoint := fmt.Sprintf("https://%s:6443", endpointIP)
+	controlPlaneEndpoint := fmt.Sprintf("https://%s:6443", endpointIPs[0])
 	kubernetesVersion := constants.DefaultKubernetesVersion
 	versionContract := config.TalosVersionCurrent
 
@@ -40,17 +40,10 @@ func (s *TalosConfigService) GenerateTalosConfig(
 		return nil, nil, nil, fmt.Errorf("failed to generate secrets bundle: %w", err)
 	}
 
-	endpointlist := []string{}
-	for _, cp := range controlPlanes {
-		if len(cp.Status.NetworkInterfaces) > 0 && len(cp.Status.NetworkInterfaces[0].IPAddresses) > 0 {
-			endpointlist = append(endpointlist, cp.Status.NetworkInterfaces[0].IPAddresses[0])
-		}
-	}
-
 	input, err := generate.NewInput(clusterId, controlPlaneEndpoint, kubernetesVersion,
 		generate.WithVersionContract(versionContract),
 		generate.WithSecretsBundle(secretsBundle),
-		generate.WithEndpointList(endpointlist),
+		generate.WithEndpointList(endpointIPs),
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to generate input: %w", err)
@@ -405,16 +398,6 @@ func (s *TalosConfigService) MarshalTalosClientConfig(clientCfg *clientconfig.Co
 		return nil, fmt.Errorf("failed to marshal talos client config: %w", err)
 	}
 	return b, nil
-}
-
-func filterMachinesByRole(machines []*vitistackcrdsv1alpha1.Machine, role string) []*vitistackcrdsv1alpha1.Machine {
-	var filtered []*vitistackcrdsv1alpha1.Machine
-	for _, machine := range machines {
-		if machine.Labels["cluster.vitistack.io/role"] == role {
-			filtered = append(filtered, machine)
-		}
-	}
-	return filtered
 }
 
 func extractDatacenterInfo(datacenter string) (country string, az string) {

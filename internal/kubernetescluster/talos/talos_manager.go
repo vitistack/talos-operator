@@ -13,6 +13,7 @@ import (
 	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -121,8 +122,9 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	var controlPlaneIPs []string
 	for _, m := range controlPlanes {
 		ipv4Found := false
-		if len(m.Status.NetworkInterfaces) > 0 {
-			for _, ipAddr := range m.Status.NetworkInterfaces[0].IPAddresses {
+		if len(m.Status.PublicIPAddresses) > 0 {
+			for i := range m.Status.PublicIPAddresses {
+				ipAddr := m.Status.PublicIPAddresses[i]
 				ip := net.ParseIP(ipAddr)
 				if ip != nil && ip.To4() != nil {
 					controlPlaneIPs = append(controlPlaneIPs, ipAddr)
@@ -139,8 +141,9 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 	for _, m := range workers {
 		ipv4Found := false
-		if len(m.Status.NetworkInterfaces) > 0 {
-			for _, ipAddr := range m.Status.NetworkInterfaces[0].IPAddresses {
+		if len(m.Status.PublicIPAddresses) > 0 {
+			for i := range m.Status.PublicIPAddresses {
+				ipAddr := m.Status.PublicIPAddresses[i]
 				ip := net.ParseIP(ipAddr)
 				if ip != nil && ip.To4() != nil {
 					ipv4Found = true
@@ -154,8 +157,19 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		}
 	}
 
-	endpointIP := controlPlaneIPs[0]
+	networkNamespace, err := t.findNetworkNamespace(ctx, cluster.GetNamespace())
+	if err != nil {
+		return fmt.Errorf("failed to find network namespace: %w", err)
+	}
 
+	_ = t.statusManager.SetPhase(ctx, cluster, "ControlPlaneIPsPending")
+	_ = t.statusManager.SetCondition(ctx, cluster, "", "True", "Generated", "Talos client and role configs generated")
+	// Create or get ControlPlaneVirtualSharedIP for load balancing
+	vipEndpoints, err := t.ensureControlPlaneVIPs(ctx, networkNamespace, cluster, controlPlaneIPs)
+	if err != nil {
+		return fmt.Errorf("failed to ensure control plane VIP: %w", err)
+	}
+	endpointIPs := vipEndpoints
 	tenantOverrides, err := t.loadTenantOverrides(ctx, cluster)
 	if err != nil {
 		return fmt.Errorf("failed to load tenant overrides: %w", err)
@@ -168,7 +182,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	}
 	if !fromSecret {
 		// Generate Talos configuration
-		genClientCfg, cpYAML, wYAML, err := t.configService.GenerateTalosConfig(cluster, readyMachines, endpointIP)
+		genClientCfg, cpYAML, wYAML, err := t.configService.GenerateTalosConfig(cluster, readyMachines, endpointIPs)
 		if err != nil {
 			return fmt.Errorf("failed to generate Talos config: %w", err)
 		}
@@ -244,11 +258,6 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	// todo registert VIP ip addresses to create loadbalancers for talos control planes
 	// write to a crd, so others can handle load balancing of control planes
 
-	talosClientSecure, err := t.clientService.CreateTalosClient(ctx, false, clientConfig, controlPlaneIPs)
-	if err != nil {
-		return fmt.Errorf("failed to create secure Talos client: %w", err)
-	}
-
 	// Bootstrap the cluster (bootstrap exactly one control-plane)
 	clusterState, _ := t.getTalosSecretFlags(ctx, cluster)
 	_, hasKubeconfig, _ := t.getTalosSecretState(ctx, cluster)
@@ -268,7 +277,13 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		}
 		vlog.Info("Secret status updated: talos_api_ready=true, cluster=" + cluster.Name)
 
-		if err := t.clientService.BootstrapTalosControlPlaneWithRetry(ctx, talosClientSecure, endpointIP, 5*time.Minute, 10*time.Second); err != nil {
+		// Bootstrap using first control plane node directly (not VIP)
+		// Create a client with direct control plane IP for bootstrap operation
+		bootstrapClient, err := t.clientService.CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIPs[0]})
+		if err != nil {
+			return fmt.Errorf("failed to create Talos client for bootstrap: %w", err)
+		}
+		if err := t.clientService.BootstrapTalosControlPlaneWithRetry(ctx, bootstrapClient, controlPlaneIPs[0], 5*time.Minute, 10*time.Second); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "False", "BootstrapError", err.Error())
 			return fmt.Errorf("failed to bootstrap Talos cluster: %w", err)
 		}
@@ -287,7 +302,8 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 	// Get Kubernetes access (fetch kubeconfig and store it as a Secret)
 	if len(controlPlaneIPs) > 0 && !clusterState.ClusterAccess {
-		kubeconfigBytes, err := t.clientService.GetKubeconfigWithRetry(ctx, clientConfig, endpointIP, 5*time.Minute, 10*time.Second)
+		// Use VIP endpoint for kubeconfig retrieval: nodesIp = actual node to target, endpointIp = VIP for connection
+		kubeconfigBytes, err := t.clientService.GetKubeconfigWithRetry(ctx, clientConfig, controlPlaneIPs[0], endpointIPs[0], 5*time.Minute, 10*time.Second)
 		if err != nil {
 			return fmt.Errorf("failed to get kubeconfig: %w", err)
 		}
@@ -319,6 +335,27 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		vlog.Info("Cluster access already established (kubeconfig present), skipping fetch: cluster=" + cluster.Name)
 	}
 	return nil
+}
+
+func (m *TalosManager) findNetworkNamespace(ctx context.Context, namespace string) (*vitistackcrdsv1alpha1.NetworkNamespace, error) {
+	networkNamespaceList := &vitistackcrdsv1alpha1.NetworkNamespaceList{}
+	if err := m.List(ctx, networkNamespaceList, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("failed to list NetworkNamespaces from supervisor cluster: %w", err)
+	}
+
+	if len(networkNamespaceList.Items) == 0 {
+		vlog.Info("No NetworkNamespaces found in supervisor cluster",
+			"namespace", namespace)
+		return nil, nil
+	}
+
+	// Use the first NetworkNamespace found
+	networkNamespace := &networkNamespaceList.Items[0]
+	vlog.Info("Using first available NetworkNamespace",
+		"namespace", namespace,
+		"networkNamespaceName", networkNamespace.Name)
+
+	return networkNamespace, nil
 }
 
 // ensureTalosSecretExists creates the consolidated Secret if it does not exist yet with default flags
@@ -668,6 +705,166 @@ func (t *TalosManager) persistTenantRoleTemplates(ctx context.Context, cluster *
 	}
 
 	return fmt.Errorf("failed to persist tenant role templates after %d retries", maxRetries)
+}
+
+// ensureControlPlaneVIPs creates or updates a ControlPlaneVirtualSharedIP resource and waits for LoadBalancerIps
+func (t *TalosManager) ensureControlPlaneVIPs(ctx context.Context, networkNamespace *vitistackcrdsv1alpha1.NetworkNamespace, cluster *vitistackcrdsv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
+	vipName := cluster.Spec.Cluster.ClusterId
+
+	vip := &vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIP{}
+	err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip)
+
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get ControlPlaneVirtualSharedIP: %w", err)
+		}
+
+		// Create new VIP
+		vip = &vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIP{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      vipName,
+				Namespace: cluster.Namespace,
+				Labels: map[string]string{
+					"cluster.vitistack.io/cluster-id": cluster.Spec.Cluster.ClusterId,
+					"cluster.vitistack.io/role":       "control-plane",
+				},
+			},
+			Spec: vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIPSpec{
+				DatacenterIdentifier:       networkNamespace.Spec.DatacenterIdentifier,
+				ClusterIdentifier:          cluster.Spec.Cluster.ClusterId,
+				SupervisorIdentifier:       networkNamespace.Spec.SupervisorIdentifier,
+				Provider:                   cluster.Spec.Cluster.Provider,
+				Method:                     "first-alive",
+				PoolMembers:                controlPlaneIPs,
+				Environment:                cluster.Spec.Cluster.Environment,
+				NetworkNamespaceIdentifier: networkNamespace.Name,
+			},
+		}
+
+		if err := t.Create(ctx, vip); err != nil {
+			return nil, fmt.Errorf("failed to create ControlPlaneVirtualSharedIP: %w", err)
+		}
+		vlog.Info(fmt.Sprintf("Created ControlPlaneVirtualSharedIP: %s/%s", vip.Namespace, vip.Name))
+	} else if !stringSlicesEqual(vip.Spec.PoolMembers, controlPlaneIPs) {
+		// Update existing VIP if pool members changed
+		vip.Spec.PoolMembers = controlPlaneIPs
+		if err := t.Update(ctx, vip); err != nil {
+			return nil, fmt.Errorf("failed to update ControlPlaneVirtualSharedIP: %w", err)
+		}
+		vlog.Info(fmt.Sprintf("Updated ControlPlaneVirtualSharedIP pool members: %s/%s", vip.Namespace, vip.Name))
+	}
+
+	// Wait for LoadBalancerIps to be populated
+	endpoints, err := t.waitForVIPLoadBalancerIP(ctx, cluster, vipName, 15*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed waiting for VIP LoadBalancerIps: %w", err)
+	}
+
+	vlog.Info(fmt.Sprintf("Using VIP endpoint for cluster %s: %v", cluster.Name, endpoints))
+	return endpoints, nil
+}
+
+// waitForVIPLoadBalancerIP waits for the ControlPlaneVirtualSharedIP status to have LoadBalancerIps populated
+// It handles cluster deletion, VIP errors, and provides proper error context
+func (t *TalosManager) waitForVIPLoadBalancerIP(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, vipName string, timeout time.Duration) ([]string, error) {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context cancelled while waiting for VIP LoadBalancerIps: %w", ctx.Err())
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				return nil, fmt.Errorf("timeout waiting for VIP LoadBalancerIps after %v", timeout)
+			}
+
+			// Check if cluster is being deleted
+			if err := t.checkClusterDeletion(ctx, cluster); err != nil {
+				return nil, err
+			}
+
+			// Check VIP status and get LoadBalancerIps
+			loadBalancerIps, shouldContinue, err := t.checkVIPStatus(ctx, cluster.Namespace, vipName)
+			if err != nil {
+				return nil, err
+			}
+			if shouldContinue {
+				continue
+			}
+			if loadBalancerIps != nil {
+				return loadBalancerIps, nil
+			}
+		}
+	}
+}
+
+// checkClusterDeletion checks if the cluster is being deleted or has been removed
+func (t *TalosManager) checkClusterDeletion(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) error {
+	clusterCheck := &vitistackcrdsv1alpha1.KubernetesCluster{}
+	if err := t.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, clusterCheck); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("cluster %s/%s was deleted while waiting for VIP", cluster.Namespace, cluster.Name)
+		}
+		vlog.Warn(fmt.Sprintf("Failed to check cluster status: %v", err))
+		// Don't return error on transient errors, let retry continue
+		return nil
+	}
+	if clusterCheck.GetDeletionTimestamp() != nil {
+		return fmt.Errorf("cluster %s/%s is being deleted, cancelling VIP wait", cluster.Namespace, cluster.Name)
+	}
+	return nil
+}
+
+// checkVIPStatus checks VIP status and returns LoadBalancerIps if ready
+// Returns (loadBalancerIps, shouldContinue, error)
+func (t *TalosManager) checkVIPStatus(ctx context.Context, namespace, vipName string) ([]string, bool, error) {
+	vip := &vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIP{}
+	if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: namespace}, vip); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, false, fmt.Errorf("VIP %s/%s was deleted or not found", namespace, vipName)
+		}
+		vlog.Warn(fmt.Sprintf("Failed to get VIP status: %v", err))
+		// Continue on transient errors
+		return nil, true, nil
+	}
+
+	// Check for VIP error conditions
+	if vip.Status.Phase == "Failed" || vip.Status.Status == "Failed" {
+		msg := vip.Status.Message
+		if msg == "" {
+			msg = "VIP creation failed without details"
+		}
+		return nil, false, fmt.Errorf("VIP %s/%s failed: %s", namespace, vipName, msg)
+	}
+
+	// Check if LoadBalancerIps are populated
+	if len(vip.Status.LoadBalancerIps) > 0 {
+		vlog.Info(fmt.Sprintf("VIP %s/%s ready with LoadBalancerIps: %v", namespace, vipName, vip.Status.LoadBalancerIps))
+		return vip.Status.LoadBalancerIps, false, nil
+	}
+
+	// Log current status for debugging
+	statusInfo := fmt.Sprintf("phase=%s, status=%s", vip.Status.Phase, vip.Status.Status)
+	if vip.Status.Message != "" {
+		statusInfo += fmt.Sprintf(", message=%s", vip.Status.Message)
+	}
+	vlog.Info(fmt.Sprintf("Waiting for VIP %s/%s to have LoadBalancerIps populated... [%s]", namespace, vipName, statusInfo))
+	return nil, true, nil
+}
+
+// stringSlicesEqual checks if two string slices are equal
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // mergeBootstrappedFlag ensures we preserve the bootstrapped flag from an existing Secret,
