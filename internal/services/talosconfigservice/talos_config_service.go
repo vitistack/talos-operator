@@ -329,7 +329,12 @@ func (s *TalosConfigService) PatchVirtualMachineCustomization(in []byte, install
 	if installImage != "" {
 		inst["image"] = installImage
 	}
-	inst["extraKernelArgs"] = []any{} // Disable predictable network interface names, using eth0.
+	extraKernelArgs := []any{}
+	if !viper.GetBool(consts.TALOS_PREDICTABLE_NETWORK_NAMES) {
+		// Disable predictable network interface names, using eth0.
+		extraKernelArgs = append(extraKernelArgs, "net.ifnames=0")
+	}
+	inst["extraKernelArgs"] = extraKernelArgs
 
 	return yaml.Marshal(cfg)
 }

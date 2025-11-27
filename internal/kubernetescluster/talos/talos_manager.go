@@ -272,14 +272,14 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		}
 
 		// Also wait for worker nodes to be ready with their new config (Talos API reachable)
-		if len(workers) > 0 {
-			vlog.Info("Waiting for worker Talos APIs to be reachable: cluster=" + cluster.Name)
-			if err := t.clientService.WaitForTalosAPIs(workers, 10*time.Minute, 10*time.Second); err != nil {
-				vlog.Warn(fmt.Sprintf("Workers not ready yet (non-blocking): cluster=%s error=%v", cluster.Name, err))
-				// Don't block bootstrap on workers, just log a warning
-				// Workers can join later once control plane is ready
-			}
-		}
+		// if len(workers) > 0 {
+		// 	vlog.Info("Waiting for worker Talos APIs to be reachable: cluster=" + cluster.Name)
+		// 	if err := t.clientService.WaitForTalosAPIs(workers, 10*time.Minute, 10*time.Second); err != nil {
+		// 		vlog.Warn(fmt.Sprintf("Workers not ready yet (non-blocking): cluster=%s error=%v", cluster.Name, err))
+		// 		// Don't block bootstrap on workers, just log a warning
+		// 		// Workers can join later once control plane is ready
+		// 	}
+		// }
 
 		_ = t.statusManager.SetPhase(ctx, cluster, "TalosAPIReady")
 		_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "True", "Ready", "Talos API reachable on control planes")
@@ -337,14 +337,14 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		allMachines = append(allMachines, workers...)
 		vlog.Info(fmt.Sprintf("Waiting for all %d nodes to report Ready status: cluster=%s", len(allMachines), cluster.Name))
 		_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "False", "Waiting", "Waiting for all nodes to be ready in Kubernetes")
-		if err := t.clientService.WaitForNodesReady(ctx, clientConfig, allMachines, 10*time.Minute, 15*time.Second); err != nil {
-			vlog.Warn(fmt.Sprintf("Not all nodes ready yet (non-blocking): cluster=%s error=%v", cluster.Name, err))
-			_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "False", "PartiallyReady", err.Error())
-			// Don't fail - the cluster is functional, just not all nodes are Ready yet
-		} else {
-			vlog.Info(fmt.Sprintf("All nodes are Ready: cluster=%s", cluster.Name))
-			_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "True", "Ready", "All nodes are ready in Kubernetes")
-		}
+		// if err := t.clientService.WaitForNodesReady(ctx, clientConfig, allMachines, 10*time.Minute, 15*time.Second); err != nil {
+		// 	vlog.Warn(fmt.Sprintf("Not all nodes ready yet (non-blocking): cluster=%s error=%v", cluster.Name, err))
+		// 	_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "False", "PartiallyReady", err.Error())
+		// 	// Don't fail - the cluster is functional, just not all nodes are Ready yet
+		// } else {
+		// 	vlog.Info(fmt.Sprintf("All nodes are Ready: cluster=%s", cluster.Name))
+		// 	_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "True", "Ready", "All nodes are ready in Kubernetes")
+		// }
 
 		// Mark cluster as ready with timestamp
 		if err := t.setSecretTimestamp(ctx, cluster, "ready_at"); err != nil {

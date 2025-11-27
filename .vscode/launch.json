@@ -12,10 +12,7 @@
       "program": "${workspaceFolder}/cmd/main.go",
       "debugAdapter": "dlv-dap",
       "env": {
-        "MACHINE_MANIFESTS_PATH": "${workspaceFolder}/hack/machine-manifests",
-        "TALOS_CONFIG_BASE_PATH": "${workspaceFolder}/hack/talos-configs",
-        "JSON_LOGGING": "true",
-        "LOG_LEVEL": "debug"
+        "ENV": "" // "" for base for .env, "test" for .env-test, "dev" for .env-dev, "prod" for .env-prod
       }
     }
   ]

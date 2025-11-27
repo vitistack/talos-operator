@@ -1,7 +1,7 @@
 apiVersion: vitistack.io/v1alpha1
 kind: KubernetesCluster
 metadata:
-  name: t-test-003
+  name: t-test-003-6sd9
 spec:
   data:
     clusterUid: "a30fbc8d-596f-48d0-8541-dbc23bca28a1"

@@ -73,12 +73,12 @@ type Flags struct {
 }
 
 func main() {
+	settings.Init()
+	k8sclient.Init()
+
 	// Parse command-line flags
 	flags := parseFlags()
 
-	settings.Init()
-
-	k8sclient.Init()
 	// Initialization checks
 	initializationservice.CheckPrerequisites()
 	// Ensure KubernetesProvider exists for this operator
@@ -161,14 +161,15 @@ func parseFlags() *Flags {
 	flag.Parse()
 
 	// Set up the logger
-	_ = vlog.Setup(vlog.Options{
+	vlogSetup := vlog.Options{
 		Level:             viper.GetString(consts.LOG_LEVEL),
 		ColorizeLine:      viper.GetBool(consts.LOG_COLORIZE_LINE),
 		AddCaller:         viper.GetBool(consts.LOG_ADD_CALLER),
 		DisableStacktrace: viper.GetBool(consts.LOG_DISABLE_STACKTRACE),
 		UnescapeMultiline: viper.GetBool(consts.LOG_UNESCAPED_MULTILINE),
 		JSON:              viper.GetBool(consts.LOG_JSON),
-	})
+	}
+	_ = vlog.Setup(vlogSetup)
 	defer func() {
 		_ = vlog.Sync()
 	}()

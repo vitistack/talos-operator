@@ -1,7 +1,7 @@
 apiVersion: vitistack.io/v1alpha1
 kind: NetworkNamespace
 metadata:
-  name: nn-t-test-001
+  name: t-test01
 spec:
   datacenterIdentifier: test-south-az1
   supervisorIdentifier: test-viti
