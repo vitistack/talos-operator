@@ -209,6 +209,12 @@ func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *v
 			return ctrl.Result{}, nil
 		}
 
+		// Resource was already deleted - this is fine during deletion
+		if apierrors.IsNotFound(err) {
+			vlog.Info("KubernetesCluster already deleted: cluster=" + kc.GetName())
+			return ctrl.Result{}, nil
+		}
+
 		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
 			vlog.Warn("Conflict removing finalizer, retrying...")
 			continue
