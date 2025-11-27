@@ -41,3 +41,5 @@ hack/machine-manifests/**/*
 !hack/talos-configs/.gitkeep
 !hack/machine-manifests/.gitkeep
 hack/talos-manifests
+*.env
+!.env.example

@@ -154,6 +154,9 @@ func (m *StatusManager) SetStateCreated(ctx context.Context, kc *vitistackv1alph
 	}
 
 	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // Resource was deleted, nothing to update
+		}
 		return err
 	}
 	if err := ensureStatusMap(u); err != nil {
@@ -309,6 +312,9 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 	}
 
 	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // Resource was deleted, nothing to update
+		}
 		return err
 	}
 	if err := ensureStatusMap(u); err != nil {
@@ -358,6 +364,9 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 	}
 
 	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // Resource was deleted, nothing to update
+		}
 		return err
 	}
 	if err := ensureStatusMap(u); err != nil {
@@ -453,7 +462,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	ml := &vitistackv1alpha1.MachineList{}
 	if err := m.List(ctx, ml,
 		client.InNamespace(kc.Namespace),
-		client.MatchingLabels{"cluster.vitistack.io/cluster-name": kc.Name},
+		client.MatchingLabels{vitistackv1alpha1.ClusterNameAnnotation: kc.Name},
 	); err != nil {
 		vlog.Debug("failed to list machines for aggregation: cluster=" + kc.Name + " error=" + err.Error())
 		return err
@@ -469,6 +478,9 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	}
 
 	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // Resource was deleted, nothing to update
+		}
 		return err
 	}
 	if err := ensureStatusMap(u); err != nil {
@@ -515,7 +527,7 @@ func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) (totalCPU, tot
 
 // isControlPlaneMachine checks if a machine is a control plane node
 func isControlPlaneMachine(m *vitistackv1alpha1.Machine) bool {
-	role, ok := m.Labels["cluster.vitistack.io/role"]
+	role, ok := m.Labels[vitistackv1alpha1.NodeRoleAnnotation]
 	return ok && role == "control-plane"
 }
 

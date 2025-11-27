@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NorskHelsenett/ror/pkg/kubernetes/providers/providermodels"
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
@@ -51,7 +50,7 @@ const (
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// Fetch the KubernetesCluster
-	kubernetesCluster := &vitistackcrdsv1alpha1.KubernetesCluster{}
+	kubernetesCluster := &vitistackv1alpha1.KubernetesCluster{}
 	if err := r.Get(ctx, req.NamespacedName, kubernetesCluster); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -100,12 +99,12 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 // isTalosProvider returns true if spec.data.provider == "talos"
 // TODO: Fix this - need to determine how to access spec.data.provider from typed struct
-func (r *KubernetesClusterReconciler) isTalosProvider(kc *vitistackcrdsv1alpha1.KubernetesCluster) bool {
-	return kc.Spec.Cluster.Provider == providermodels.ProviderTypeTalos.String()
+func (r *KubernetesClusterReconciler) isTalosProvider(kc *vitistackv1alpha1.KubernetesCluster) bool {
+	return kc.Spec.Cluster.Provider == vitistackv1alpha1.KubernetesProviderTypeTalos
 }
 
 // ensureFinalizer adds the finalizer if not present. Returns requeue=true when an update was made.
-func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (bool, error) {
+func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (bool, error) {
 	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
 		return false, nil
 	}
@@ -115,7 +114,7 @@ func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *v
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Get fresh copy if retrying
 		if attempt > 0 {
-			freshKC := &vitistackcrdsv1alpha1.KubernetesCluster{}
+			freshKC := &vitistackv1alpha1.KubernetesCluster{}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(kc), freshKC); err != nil {
 				return false, err
 			}
@@ -141,7 +140,7 @@ func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *v
 }
 
 // handleDeletion performs cleanup and removes the finalizer when present
-func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (ctrl.Result, error) {
+func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
 		return ctrl.Result{}, nil
 	}
@@ -154,10 +153,10 @@ func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vi
 }
 
 // performCleanup handles secret, machine, VIP, and file cleanup
-func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) error {
+func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) error {
 	// Delete ControlPlaneVirtualSharedIP
 	vipName := kc.Spec.Cluster.ClusterId
-	vip := &vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIP{
+	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      vipName,
 			Namespace: kc.GetNamespace(),
@@ -184,16 +183,11 @@ func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vi
 		return err
 	}
 
-	// Clean up files (non-fatal)
-	if err := r.MachineManager.CleanupMachineFiles(kc.Spec.Cluster.ClusterId); err != nil {
-		vlog.Error("Failed to remove cluster directory", err)
-	}
-
 	return nil
 }
 
 // removeFinalizer removes the finalizer with retry logic
-func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (ctrl.Result, error) {
+func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, error) {
 	maxRetries := 3
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
@@ -225,8 +219,8 @@ func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *v
 }
 
 // getFreshCluster retrieves a fresh copy of the cluster resource
-func (r *KubernetesClusterReconciler) getFreshCluster(ctx context.Context, kc *vitistackcrdsv1alpha1.KubernetesCluster) (*vitistackcrdsv1alpha1.KubernetesCluster, error) {
-	freshKC := &vitistackcrdsv1alpha1.KubernetesCluster{}
+func (r *KubernetesClusterReconciler) getFreshCluster(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (*vitistackv1alpha1.KubernetesCluster, error) {
+	freshKC := &vitistackv1alpha1.KubernetesCluster{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(kc), freshKC); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
@@ -255,7 +249,7 @@ func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *Ku
 
 func (r *KubernetesClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&vitistackcrdsv1alpha1.KubernetesCluster{}).
-		Owns(&vitistackcrdsv1alpha1.Machine{}).
+		For(&vitistackv1alpha1.KubernetesCluster{}).
+		Owns(&vitistackv1alpha1.Machine{}).
 		Complete(r)
 }

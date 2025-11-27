@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/viper"
-	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,12 +26,12 @@ func NewSecretService(c client.Client) *SecretService {
 }
 
 // GetSecretName returns the standardized secret name for a cluster
-func GetSecretName(cluster *vitistackcrdsv1alpha1.KubernetesCluster) string {
+func GetSecretName(cluster *vitistackv1alpha1.KubernetesCluster) string {
 	return fmt.Sprintf("%s%s", viper.GetString(consts.SECRET_PREFIX), cluster.Spec.Cluster.ClusterId)
 }
 
 // GetTalosSecret retrieves the Talos secret for a cluster
-func (s *SecretService) GetTalosSecret(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (*corev1.Secret, error) {
+func (s *SecretService) GetTalosSecret(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*corev1.Secret, error) {
 	secretName := GetSecretName(cluster)
 	secret := &corev1.Secret{}
 	err := s.Get(ctx, types.NamespacedName{Name: secretName, Namespace: cluster.Namespace}, secret)
@@ -39,14 +39,14 @@ func (s *SecretService) GetTalosSecret(ctx context.Context, cluster *vitistackcr
 }
 
 // CreateTalosSecret creates a new Talos secret for a cluster
-func (s *SecretService) CreateTalosSecret(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, data map[string][]byte) error {
+func (s *SecretService) CreateTalosSecret(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, data map[string][]byte) error {
 	secretName := GetSecretName(cluster)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: cluster.Namespace,
 			Labels: map[string]string{
-				"cluster.vitistack.io/cluster-id": cluster.Spec.Cluster.ClusterId,
+				vitistackv1alpha1.ClusterIdAnnotation: cluster.Spec.Cluster.ClusterId,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,

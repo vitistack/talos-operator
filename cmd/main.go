@@ -28,7 +28,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/clients/k8sclient"
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/api/controllers/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/initializationservice"
 	"github.com/vitistack/talos-operator/internal/settings"
@@ -53,7 +53,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	utilruntime.Must(vitistackcrdsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(vitistackv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -81,6 +81,8 @@ func main() {
 	k8sclient.Init()
 	// Initialization checks
 	initializationservice.CheckPrerequisites()
+	// Ensure KubernetesProvider exists for this operator
+	initializationservice.EnsureKubernetesProvider()
 
 	// Configure TLS options
 	tlsOpts := configureTLS(flags.EnableHTTP2)
@@ -159,8 +161,14 @@ func parseFlags() *Flags {
 	flag.Parse()
 
 	// Set up the logger
-	// ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-	_ = vlog.Setup(vlog.Options{Level: viper.GetString(consts.LOG_LEVEL), ColorizeLine: true, AddCaller: true})
+	_ = vlog.Setup(vlog.Options{
+		Level:             viper.GetString(consts.LOG_LEVEL),
+		ColorizeLine:      viper.GetBool(consts.LOG_COLORIZE_LINE),
+		AddCaller:         viper.GetBool(consts.LOG_ADD_CALLER),
+		DisableStacktrace: viper.GetBool(consts.LOG_DISABLE_STACKTRACE),
+		UnescapeMultiline: viper.GetBool(consts.LOG_UNESCAPED_MULTILINE),
+		JSON:              viper.GetBool(consts.LOG_JSON),
+	})
 	defer func() {
 		_ = vlog.Sync()
 	}()

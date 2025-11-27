@@ -1,6 +1,7 @@
 package talosconfigservice
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -14,7 +15,9 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/services/networknamespaceservice"
+	"github.com/vitistack/talos-operator/internal/services/vitistackservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -26,8 +29,8 @@ func NewTalosConfigService() *TalosConfigService {
 }
 
 func (s *TalosConfigService) GenerateTalosConfig(
-	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
-	machines []*vitistackcrdsv1alpha1.Machine,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	machines []*vitistackv1alpha1.Machine,
 	endpointIPs []string) (*clientconfig.Config, []byte, []byte, error) {
 	// endpointIPs contains VIP load balancer IPs for the control plane
 	clusterId := cluster.Spec.Cluster.ClusterId
@@ -81,10 +84,10 @@ func (s *TalosConfigService) GenerateTalosConfig(
 }
 
 func (s *TalosConfigService) PrepareNodeConfig(
-	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
+	cluster *vitistackv1alpha1.KubernetesCluster,
 	roleYAML []byte,
 	installDisk string,
-	m *vitistackcrdsv1alpha1.Machine,
+	m *vitistackv1alpha1.Machine,
 	tenantOverrides map[string]any) ([]byte, error) {
 	patched, err := s.PatchInstallDiskYAML(roleYAML, installDisk)
 	if err != nil {
@@ -101,7 +104,7 @@ func (s *TalosConfigService) PrepareNodeConfig(
 		return nil, fmt.Errorf("failed to patch hostname: %w", err)
 	}
 
-	if m.Status.Provider != "" && s.IsVirtualMachineProvider(m.Status.Provider) {
+	if m.Status.Provider != "" && s.IsVirtualMachineProvider(m.Status.Provider.String()) {
 		installImage := s.GetVMInstallImage(m.Status.Provider)
 		if installImage != "" {
 			vlog.Info(fmt.Sprintf("Detected virtual machine provider %s for node %s, applying VM customizations with install image: %s",
@@ -293,24 +296,11 @@ func (s *TalosConfigService) IsVirtualMachineProvider(provider string) bool {
 	return false
 }
 
-func (s *TalosConfigService) GetVMInstallImage(provider string) string {
-	provider = strings.ToLower(provider)
+func (s *TalosConfigService) GetVMInstallImage(machineProvider vitistackv1alpha1.MachineProviderType) string {
 	var configKey string
-	switch {
-	case strings.Contains(provider, "proxmox"):
-		configKey = consts.TALOS_VM_INSTALL_IMAGE_PROXMOX
-	case strings.Contains(provider, "kubevirt"):
+	switch machineProvider {
+	case vitistackv1alpha1.MachineProviderTypeKubevirt:
 		configKey = consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT
-	case strings.Contains(provider, "libvirt"):
-		configKey = consts.TALOS_VM_INSTALL_IMAGE_LIBVIRT
-	case strings.Contains(provider, "kvm"):
-		configKey = consts.TALOS_VM_INSTALL_IMAGE_KVM
-	case strings.Contains(provider, "vmware"):
-		configKey = consts.TALOS_VM_INSTALL_IMAGE_VMWARE
-	case strings.Contains(provider, "virtualbox"):
-		configKey = consts.TALOS_VM_INSTALL_IMAGE_VIRTUALBOX
-	case strings.Contains(provider, "hyper-v"):
-		configKey = consts.TALOS_VM_INSTALL_IMAGE_HYPERV
 	default:
 		configKey = consts.TALOS_VM_INSTALL_IMAGE_DEFAULT
 	}
@@ -339,18 +329,73 @@ func (s *TalosConfigService) PatchVirtualMachineCustomization(in []byte, install
 	if installImage != "" {
 		inst["image"] = installImage
 	}
-	inst["extraKernelArgs"] = []any{"console=ttyS0,115200"}
+	inst["extraKernelArgs"] = []any{} // Disable predictable network interface names, using eth0.
+
 	return yaml.Marshal(cfg)
 }
 
 func (s *TalosConfigService) PatchNodeAnnotations(
-	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
+	cluster *vitistackv1alpha1.KubernetesCluster,
 	in []byte,
-	m *vitistackcrdsv1alpha1.Machine) ([]byte, error) {
-	var cfg map[string]any
-	if err := yaml.Unmarshal(in, &cfg); err != nil {
+	m *vitistackv1alpha1.Machine) ([]byte, error) {
+	cfg, nodeAnnotations, err := extractNodeAnnotations(in)
+	if err != nil {
 		return nil, err
 	}
+	country, az := extractDatacenterInfo(cluster.Spec.Cluster.Datacenter)
+
+	nodeAnnotations[vitistackv1alpha1.ClusterNameAnnotation] = cluster.Name
+	nodeAnnotations[vitistackv1alpha1.ClusterIdAnnotation] = cluster.Spec.Cluster.ClusterId
+	nodeAnnotations[vitistackv1alpha1.CountryAnnotation] = country
+	nodeAnnotations[vitistackv1alpha1.AzAnnotation] = az
+	nodeAnnotations[vitistackv1alpha1.RegionAnnotation] = cluster.Spec.Cluster.Region
+	nodeAnnotations[vitistackv1alpha1.VMProviderAnnotation] = string(m.Status.Provider)
+	nodeAnnotations[vitistackv1alpha1.KubernetesProviderAnnotation] = string(cluster.Spec.Cluster.Provider)
+
+	networkNamespaceName := ""
+	infrastructure := ""
+	networknamespace, err := networknamespaceservice.FetchFirstNetworkNamespaceByNamespace(context.TODO(), cluster.GetNamespace())
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("failed to fetch NetworkNamespaces for namespace %q: %v", cluster.GetNamespace(), err))
+	}
+
+	if networknamespace != nil {
+		// For now, just take the first NetworkNamespace in the list
+		networkNamespaceName = networknamespace.Name
+	}
+
+	vitistack, err := vitistackservice.FetchVitistackByName(context.TODO(), viper.GetString(consts.VITISTACK_NAME))
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("failed to fetch Vitistack %q: %v", viper.GetString(consts.VITISTACK_NAME), err))
+	}
+
+	if vitistack != nil && vitistack.Spec.Infrastructure != "" {
+		infrastructure = vitistack.Spec.Infrastructure
+	}
+
+	nodeAnnotations[vitistackv1alpha1.ClusterWorkspaceAnnotation] = networkNamespaceName
+	nodeAnnotations[vitistackv1alpha1.InfrastructureAnnotation] = infrastructure
+
+	return yaml.Marshal(cfg)
+}
+
+func (s *TalosConfigService) PatchNodeConfigWithEndpointIPs(nodeConfig []byte, endpointIP string) ([]byte, error) {
+	cfg, nodeAnnotations, err := extractNodeAnnotations(nodeConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	nodeAnnotations[vitistackv1alpha1.K8sEndpointAnnotation] = fmt.Sprintf("https://%s:6443", endpointIP)
+
+	return yaml.Marshal(cfg)
+}
+
+func extractNodeAnnotations(nodeConfig []byte) (map[string]any, map[string]any, error) {
+	var cfg map[string]any
+	if err := yaml.Unmarshal(nodeConfig, &cfg); err != nil {
+		return nil, nil, err
+	}
+
 	machineSection, _ := cfg["machine"].(map[string]any)
 	if machineSection == nil {
 		machineSection = map[string]any{}
@@ -361,20 +406,10 @@ func (s *TalosConfigService) PatchNodeAnnotations(
 		nodeAnnotations = map[string]any{}
 		machineSection["nodeAnnotations"] = nodeAnnotations
 	}
-	country, az := extractDatacenterInfo(cluster.Spec.Cluster.Datacenter)
-	nodeAnnotations["vitistack.io/workspace"] = "TODO-workspace-not-yet-available"
-	nodeAnnotations["vitistack.io/clustername"] = cluster.Name
-	nodeAnnotations["vitistack.io/clusterid"] = cluster.Spec.Cluster.ClusterId
-	nodeAnnotations["vitistack.io/country"] = country
-	nodeAnnotations["vitistack.io/az"] = az
-	nodeAnnotations["vitistack.io/region"] = cluster.Spec.Cluster.Region
-	nodeAnnotations["vitistack.io/vmprovider"] = m.Status.Provider
-	nodeAnnotations["vitistack.io/kubernetesprovider"] = cluster.Spec.Cluster.Provider
-	nodeAnnotations["vitistack.io/kubernetes-endpoint-addr"] = "TODO-endpoint-not-yet-available"
-	return yaml.Marshal(cfg)
+	return cfg, nodeAnnotations, nil
 }
 
-func (s *TalosConfigService) SelectInstallDisk(m *vitistackcrdsv1alpha1.Machine) string {
+func (s *TalosConfigService) SelectInstallDisk(m *vitistackv1alpha1.Machine) string {
 	for i := range m.Status.Disks {
 		d := m.Status.Disks[i]
 		if d.Device != "" {

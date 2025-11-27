@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -34,18 +34,18 @@ func NewMachineService(c client.Client) *MachineService {
 
 // GetClusterMachines retrieves all machines associated with the cluster
 func (s *MachineService) GetClusterMachines(ctx context.Context,
-	cluster *vitistackcrdsv1alpha1.KubernetesCluster) ([]*vitistackcrdsv1alpha1.Machine, error) {
-	machineList := &vitistackcrdsv1alpha1.MachineList{}
+	cluster *vitistackv1alpha1.KubernetesCluster) ([]*vitistackv1alpha1.Machine, error) {
+	machineList := &vitistackv1alpha1.MachineList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(cluster.Namespace),
-		client.MatchingLabels{"cluster.vitistack.io/cluster-id": cluster.Spec.Cluster.ClusterId},
+		client.MatchingLabels{vitistackv1alpha1.ClusterIdAnnotation: cluster.Spec.Cluster.ClusterId},
 	}
 
 	if err := s.List(ctx, machineList, listOpts...); err != nil {
 		return nil, fmt.Errorf("failed to list machines: %w", err)
 	}
 
-	machines := make([]*vitistackcrdsv1alpha1.Machine, len(machineList.Items))
+	machines := make([]*vitistackv1alpha1.Machine, len(machineList.Items))
 	for i := range machineList.Items {
 		machines[i] = &machineList.Items[i]
 	}
@@ -55,7 +55,7 @@ func (s *MachineService) GetClusterMachines(ctx context.Context,
 
 // WaitForMachinesReady waits for all machines to be in running state with IP addresses
 func (s *MachineService) WaitForMachinesReady(ctx context.Context,
-	machines []*vitistackcrdsv1alpha1.Machine) ([]*vitistackcrdsv1alpha1.Machine, error) {
+	machines []*vitistackv1alpha1.Machine) ([]*vitistackv1alpha1.Machine, error) {
 	timeout := time.After(DefaultMachineTimeout)
 	ticker := time.NewTicker(DefaultMachineCheckInterval)
 	defer ticker.Stop()
@@ -79,11 +79,11 @@ func (s *MachineService) WaitForMachinesReady(ctx context.Context,
 
 // checkMachinesReady checks if all machines are in running state with IP addresses
 func (s *MachineService) checkMachinesReady(ctx context.Context,
-	machines []*vitistackcrdsv1alpha1.Machine) ([]*vitistackcrdsv1alpha1.Machine, bool) {
-	var readyMachines []*vitistackcrdsv1alpha1.Machine
+	machines []*vitistackv1alpha1.Machine) ([]*vitistackv1alpha1.Machine, bool) {
+	var readyMachines []*vitistackv1alpha1.Machine
 
 	for _, machine := range machines {
-		updatedMachine := &vitistackcrdsv1alpha1.Machine{}
+		updatedMachine := &vitistackv1alpha1.Machine{}
 		if err := s.Get(ctx, types.NamespacedName{
 			Name:      machine.Name,
 			Namespace: machine.Namespace,
@@ -100,7 +100,7 @@ func (s *MachineService) checkMachinesReady(ctx context.Context,
 }
 
 // IsMachineReady checks if a machine is ready for Talos cluster creation
-func (s *MachineService) IsMachineReady(m *vitistackcrdsv1alpha1.Machine) bool {
+func (s *MachineService) IsMachineReady(m *vitistackv1alpha1.Machine) bool {
 	if m.Status.Phase != MachinePhaseRunning {
 		return false
 	}
@@ -125,11 +125,11 @@ func (s *MachineService) IsMachineReady(m *vitistackcrdsv1alpha1.Machine) bool {
 
 // FilterMachinesByRole filters machines by their role
 func (s *MachineService) FilterMachinesByRole(
-	machines []*vitistackcrdsv1alpha1.Machine,
-	role string) []*vitistackcrdsv1alpha1.Machine {
-	var filtered []*vitistackcrdsv1alpha1.Machine
+	machines []*vitistackv1alpha1.Machine,
+	role string) []*vitistackv1alpha1.Machine {
+	var filtered []*vitistackv1alpha1.Machine
 	for _, machine := range machines {
-		if machine.Labels["cluster.vitistack.io/role"] == role {
+		if machine.Labels[vitistackv1alpha1.NodeRoleAnnotation] == role {
 			filtered = append(filtered, machine)
 		}
 	}

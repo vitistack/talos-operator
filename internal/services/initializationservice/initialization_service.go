@@ -2,9 +2,11 @@ package initializationservice
 
 import (
 	"context"
+	"os"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	"github.com/vitistack/common/pkg/operator/crdcheck"
+	"github.com/vitistack/talos-operator/internal/services/kubernetesproviderservice"
 )
 
 // CheckPrerequisites verifies that required CRDs are installed before starting.
@@ -24,4 +26,19 @@ func CheckPrerequisites() {
 	)
 
 	vlog.Info("✅ Prerequisite checks passed")
+}
+
+// EnsureKubernetesProvider ensures that a KubernetesProvider resource exists for this operator.
+// This should be called after CheckPrerequisites to ensure the CRD is available.
+// The function is idempotent and will not create duplicate resources.
+func EnsureKubernetesProvider() {
+	vlog.Info("Ensuring KubernetesProvider exists...")
+
+	ctx := context.TODO()
+	if err := kubernetesproviderservice.EnsureKubernetesProviderExists(ctx); err != nil {
+		vlog.Error("Failed to ensure KubernetesProvider exists", err)
+		os.Exit(1)
+	}
+
+	vlog.Info("✅ KubernetesProvider check completed")
 }

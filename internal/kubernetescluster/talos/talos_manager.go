@@ -10,7 +10,6 @@ import (
 	"net"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
-	vitistackcrdsv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +18,8 @@ import (
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/spf13/viper"
+
+	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/services/machineservice"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
@@ -57,12 +58,12 @@ type MachineInfo struct {
 	Name    string
 	Role    string // "control-plane" or "worker"
 	IP      string
-	Machine *vitistackcrdsv1alpha1.Machine
+	Machine *vitistackv1alpha1.Machine
 }
 
 // ReconcileTalosCluster waits for machines to be ready and creates a Talos cluster
 // nolint:gocyclo // Reconcile flow is linear; refactor will be done separately.
-func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) error {
+func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
 	err := initializeTalosCluster(ctx, t, cluster)
 	// Always update status based on current persisted flags/conditions
 	if sErr := t.statusManager.UpdateKubernetesClusterStatus(ctx, cluster); sErr != nil {
@@ -72,7 +73,7 @@ func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitis
 }
 
 // nolint:gocognit,gocyclo,funlen // flow is linear and will be refactored later
-func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitistackcrdsv1alpha1.KubernetesCluster) error {
+func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitistackv1alpha1.KubernetesCluster) error {
 	// Ensure the consolidated Secret exists very early - right after validation
 	// This provides state persistence from the very beginning of the lifecycle
 	if err := t.ensureTalosSecretExists(ctx, cluster); err != nil {
@@ -111,9 +112,9 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	controlPlanes := t.machineService.FilterMachinesByRole(readyMachines, "control-plane")
 
 	// get other nodes except control plane
-	workers := []*vitistackcrdsv1alpha1.Machine{}
+	workers := []*vitistackv1alpha1.Machine{}
 	for _, machine := range readyMachines {
-		role := machine.Labels["cluster.vitistack.io/role"]
+		role := machine.Labels[vitistackv1alpha1.NodeRoleAnnotation]
 		if role != "control-plane" {
 			workers = append(workers, machine)
 		}
@@ -222,7 +223,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			return fmt.Errorf("role templates not present in secret yet, cannot apply config (this should not happen)")
 		}
 
-		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, controlPlanes, insecure, tenantOverrides); err != nil {
+		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, controlPlanes, insecure, tenantOverrides, endpointIPs[0]); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneConfigApplied", "False", "ApplyError", err.Error())
 			return err
 		}
@@ -237,7 +238,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	}
 
 	if !flags.WorkerApplied {
-		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, workers, insecure, tenantOverrides); err != nil {
+		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, workers, insecure, tenantOverrides, endpointIPs[0]); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "WorkerConfigApplied", "False", "ApplyError", err.Error())
 			return err
 		}
@@ -264,11 +265,22 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	if len(controlPlaneIPs) > 0 && !clusterState.Bootstrapped {
 		// Wait for control-plane nodes to be ready with their new config (Talos API reachable securely)
 		_ = t.statusManager.SetPhase(ctx, cluster, "WaitingForTalosAPI")
-		_ = t.statusManager.SetCondition(ctx, cluster, "WaitingForTalosAPI", "True", "Waiting", "Waiting for Talos API on control planes")
+		_ = t.statusManager.SetCondition(ctx, cluster, "WaitingForTalosAPI", "True", "Waiting", "Waiting for Talos API on control planes and workers")
 		if err := t.clientService.WaitForTalosAPIs(controlPlanes, 10*time.Minute, 10*time.Second); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "False", "NotReady", err.Error())
 			return fmt.Errorf("control planes not ready for bootstrap: %w", err)
 		}
+
+		// Also wait for worker nodes to be ready with their new config (Talos API reachable)
+		if len(workers) > 0 {
+			vlog.Info("Waiting for worker Talos APIs to be reachable: cluster=" + cluster.Name)
+			if err := t.clientService.WaitForTalosAPIs(workers, 10*time.Minute, 10*time.Second); err != nil {
+				vlog.Warn(fmt.Sprintf("Workers not ready yet (non-blocking): cluster=%s error=%v", cluster.Name, err))
+				// Don't block bootstrap on workers, just log a warning
+				// Workers can join later once control plane is ready
+			}
+		}
+
 		_ = t.statusManager.SetPhase(ctx, cluster, "TalosAPIReady")
 		_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "True", "Ready", "Talos API reachable on control planes")
 		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"talos_api_ready": true}); err != nil {
@@ -318,6 +330,22 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			return fmt.Errorf("failed to persist cluster_access flag: %w", err)
 		}
 		vlog.Info("Secret status updated: cluster_access=true, cluster=" + cluster.Name)
+
+		// Wait for all nodes to be Ready in Kubernetes (using Talos NodeStatus)
+		allMachines := make([]*vitistackv1alpha1.Machine, 0, len(controlPlanes)+len(workers))
+		allMachines = append(allMachines, controlPlanes...)
+		allMachines = append(allMachines, workers...)
+		vlog.Info(fmt.Sprintf("Waiting for all %d nodes to report Ready status: cluster=%s", len(allMachines), cluster.Name))
+		_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "False", "Waiting", "Waiting for all nodes to be ready in Kubernetes")
+		if err := t.clientService.WaitForNodesReady(ctx, clientConfig, allMachines, 10*time.Minute, 15*time.Second); err != nil {
+			vlog.Warn(fmt.Sprintf("Not all nodes ready yet (non-blocking): cluster=%s error=%v", cluster.Name, err))
+			_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "False", "PartiallyReady", err.Error())
+			// Don't fail - the cluster is functional, just not all nodes are Ready yet
+		} else {
+			vlog.Info(fmt.Sprintf("All nodes are Ready: cluster=%s", cluster.Name))
+			_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "True", "Ready", "All nodes are ready in Kubernetes")
+		}
+
 		// Mark cluster as ready with timestamp
 		if err := t.setSecretTimestamp(ctx, cluster, "ready_at"); err != nil {
 			vlog.Error("Failed to set ready_at timestamp in secret", err)
@@ -337,8 +365,8 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	return nil
 }
 
-func (m *TalosManager) findNetworkNamespace(ctx context.Context, namespace string) (*vitistackcrdsv1alpha1.NetworkNamespace, error) {
-	networkNamespaceList := &vitistackcrdsv1alpha1.NetworkNamespaceList{}
+func (m *TalosManager) findNetworkNamespace(ctx context.Context, namespace string) (*vitistackv1alpha1.NetworkNamespace, error) {
+	networkNamespaceList := &vitistackv1alpha1.NetworkNamespaceList{}
 	if err := m.List(ctx, networkNamespaceList, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("failed to list NetworkNamespaces from supervisor cluster: %w", err)
 	}
@@ -359,7 +387,7 @@ func (m *TalosManager) findNetworkNamespace(ctx context.Context, namespace strin
 }
 
 // ensureTalosSecretExists creates the consolidated Secret if it does not exist yet with default flags
-func (t *TalosManager) ensureTalosSecretExists(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) error {
+func (t *TalosManager) ensureTalosSecretExists(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
 	_, err := t.secretService.GetTalosSecret(ctx, cluster)
 	if err == nil {
 		return nil
@@ -389,7 +417,7 @@ func (t *TalosManager) ensureTalosSecretExists(ctx context.Context, cluster *vit
 }
 
 // getTalosSecretState returns persisted state flags from the cluster's consolidated Secret.
-func (t *TalosManager) getTalosSecretState(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (bootstrapped bool, hasKubeconfig bool, err error) {
+func (t *TalosManager) getTalosSecretState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (bootstrapped bool, hasKubeconfig bool, err error) {
 	secret, e := t.secretService.GetTalosSecret(ctx, cluster)
 	if e != nil {
 		return false, false, e
@@ -408,7 +436,7 @@ func (t *TalosManager) getTalosSecretState(ctx context.Context, cluster *vitista
 
 // loadTalosArtifacts attempts to read talosconfig (and ensures role templates exist) from the consolidated Secret.
 // Returns fromSecret=true when talosconfig and both role templates are present.
-func (t *TalosManager) loadTalosArtifacts(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (*clientconfig.Config, bool, error) {
+func (t *TalosManager) loadTalosArtifacts(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*clientconfig.Config, bool, error) {
 	secret, err := t.secretService.GetTalosSecret(ctx, cluster)
 	if err != nil {
 		return nil, false, nil
@@ -444,7 +472,7 @@ type talosSecretFlags struct {
 }
 
 // getTalosSecretFlags reads boolean flags from the consolidated Secret
-func (t *TalosManager) getTalosSecretFlags(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (talosSecretFlags, error) {
+func (t *TalosManager) getTalosSecretFlags(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (talosSecretFlags, error) {
 	secret, err := t.secretService.GetTalosSecret(ctx, cluster)
 	if err != nil {
 		return talosSecretFlags{}, err
@@ -489,7 +517,7 @@ func parseClusterAccessFlag(data map[string][]byte) bool {
 	}
 	return false
 } // setSecretTimestamp sets a timestamp field in the consolidated Secret
-func (t *TalosManager) setSecretTimestamp(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, key string) error {
+func (t *TalosManager) setSecretTimestamp(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, key string) error {
 	// Retry logic to handle concurrent modifications
 	maxRetries := 3
 	for attempt := range maxRetries {
@@ -520,7 +548,7 @@ func (t *TalosManager) setSecretTimestamp(ctx context.Context, cluster *vitistac
 }
 
 // setTalosSecretFlags sets provided boolean flags in the consolidated Secret
-func (t *TalosManager) setTalosSecretFlags(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, updates map[string]bool) error {
+func (t *TalosManager) setTalosSecretFlags(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, updates map[string]bool) error {
 	// Retry logic to handle concurrent modifications
 	maxRetries := 3
 	for attempt := range maxRetries {
@@ -558,11 +586,12 @@ func (t *TalosManager) setTalosSecretFlags(ctx context.Context, cluster *vitista
 }
 
 func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
-	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
+	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientConfig *clientconfig.Config,
-	machines []*vitistackcrdsv1alpha1.Machine,
+	machines []*vitistackv1alpha1.Machine,
 	insecure bool,
-	tenantOverrides map[string]any) error {
+	tenantOverrides map[string]any,
+	endpointIP string) error {
 	// Load role templates from persistent Secret
 	secret, err := t.secretService.GetTalosSecret(ctx, cluster)
 	if err != nil {
@@ -572,13 +601,13 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 	wTemplate := secret.Data["worker.yaml"]
 
 	for _, m := range machines {
-		if len(m.Status.NetworkInterfaces) == 0 || len(m.Status.NetworkInterfaces[0].IPAddresses) == 0 {
+		if len(m.Status.NetworkInterfaces) == 0 || len(m.Status.PublicIPAddresses) == 0 {
 			continue
 		}
 
 		// Find first IPv4 address
 		var ip string
-		for _, ipAddr := range m.Status.NetworkInterfaces[0].IPAddresses {
+		for _, ipAddr := range m.Status.PublicIPAddresses {
 			parsedIP := net.ParseIP(ipAddr)
 			if parsedIP != nil && parsedIP.To4() != nil {
 				ip = ipAddr
@@ -591,31 +620,38 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 
 		// Choose role template
 		var roleYAML []byte
-		if m.Labels["cluster.vitistack.io/role"] == "control-plane" {
+		if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == "control-plane" {
 			roleYAML = cpTemplate
 		} else {
 			roleYAML = wTemplate
 		}
 		if len(roleYAML) == 0 {
-			return fmt.Errorf("missing role template for node %s (role=%s) in secret %s", m.Name, m.Labels["cluster.vitistack.io/role"], secretservice.GetSecretName(cluster))
+			return fmt.Errorf("missing role template for node %s (role=%s) in secret %s", m.Name, m.Labels[vitistackv1alpha1.NodeRoleAnnotation], secretservice.GetSecretName(cluster))
 		}
 
 		// Select install disk and prepare configuration
 		installDisk := t.configService.SelectInstallDisk(m)
-		patched, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides)
+		nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides)
 		if err != nil {
 			return fmt.Errorf("failed to prepare config for node %s: %w", m.Name, err)
 		}
 
+		// add endpoint IPs to node config
+		patched, err := t.configService.PatchNodeConfigWithEndpointIPs(nodeConfig, endpointIP)
+		if err != nil {
+			return fmt.Errorf("failed to patch config for node %s with endpoint IPs: %w", m.Name, err)
+		}
+		nodeConfig = patched
+
 		// Apply configuration to node
-		if err := t.clientService.ApplyConfigToNode(ctx, insecure, clientConfig, ip, patched); err != nil {
+		if err := t.clientService.ApplyConfigToNode(ctx, insecure, clientConfig, ip, nodeConfig); err != nil {
 			return fmt.Errorf("failed to apply config to node %s: %w", ip, err)
 		}
 	}
 	return nil
 }
 
-func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) (map[string]any, error) {
+func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (map[string]any, error) {
 	name := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAME))
 	if name == "" {
 		return nil, nil
@@ -655,7 +691,7 @@ func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitista
 	return overrides, nil
 }
 
-func (t *TalosManager) persistTenantRoleTemplates(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, tenantOverrides map[string]any) error {
+func (t *TalosManager) persistTenantRoleTemplates(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, tenantOverrides map[string]any) error {
 	if len(tenantOverrides) == 0 {
 		return nil
 	}
@@ -708,10 +744,10 @@ func (t *TalosManager) persistTenantRoleTemplates(ctx context.Context, cluster *
 }
 
 // ensureControlPlaneVIPs creates or updates a ControlPlaneVirtualSharedIP resource and waits for LoadBalancerIps
-func (t *TalosManager) ensureControlPlaneVIPs(ctx context.Context, networkNamespace *vitistackcrdsv1alpha1.NetworkNamespace, cluster *vitistackcrdsv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
+func (t *TalosManager) ensureControlPlaneVIPs(ctx context.Context, networkNamespace *vitistackv1alpha1.NetworkNamespace, cluster *vitistackv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
 	vipName := cluster.Spec.Cluster.ClusterId
 
-	vip := &vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIP{}
+	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
 	err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip)
 
 	if err != nil {
@@ -720,20 +756,20 @@ func (t *TalosManager) ensureControlPlaneVIPs(ctx context.Context, networkNamesp
 		}
 
 		// Create new VIP
-		vip = &vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIP{
+		vip = &vitistackv1alpha1.ControlPlaneVirtualSharedIP{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      vipName,
 				Namespace: cluster.Namespace,
 				Labels: map[string]string{
-					"cluster.vitistack.io/cluster-id": cluster.Spec.Cluster.ClusterId,
-					"cluster.vitistack.io/role":       "control-plane",
+					vitistackv1alpha1.ClusterIdAnnotation: cluster.Spec.Cluster.ClusterId,
+					vitistackv1alpha1.NodeRoleAnnotation:  "control-plane",
 				},
 			},
-			Spec: vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIPSpec{
+			Spec: vitistackv1alpha1.ControlPlaneVirtualSharedIPSpec{
 				DatacenterIdentifier:       networkNamespace.Spec.DatacenterIdentifier,
 				ClusterIdentifier:          cluster.Spec.Cluster.ClusterId,
 				SupervisorIdentifier:       networkNamespace.Spec.SupervisorIdentifier,
-				Provider:                   cluster.Spec.Cluster.Provider,
+				Provider:                   cluster.Spec.Cluster.Provider.String(),
 				Method:                     "first-alive",
 				PoolMembers:                controlPlaneIPs,
 				Environment:                cluster.Spec.Cluster.Environment,
@@ -766,7 +802,7 @@ func (t *TalosManager) ensureControlPlaneVIPs(ctx context.Context, networkNamesp
 
 // waitForVIPLoadBalancerIP waits for the ControlPlaneVirtualSharedIP status to have LoadBalancerIps populated
 // It handles cluster deletion, VIP errors, and provides proper error context
-func (t *TalosManager) waitForVIPLoadBalancerIP(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster, vipName string, timeout time.Duration) ([]string, error) {
+func (t *TalosManager) waitForVIPLoadBalancerIP(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, vipName string, timeout time.Duration) ([]string, error) {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -801,8 +837,8 @@ func (t *TalosManager) waitForVIPLoadBalancerIP(ctx context.Context, cluster *vi
 }
 
 // checkClusterDeletion checks if the cluster is being deleted or has been removed
-func (t *TalosManager) checkClusterDeletion(ctx context.Context, cluster *vitistackcrdsv1alpha1.KubernetesCluster) error {
-	clusterCheck := &vitistackcrdsv1alpha1.KubernetesCluster{}
+func (t *TalosManager) checkClusterDeletion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	clusterCheck := &vitistackv1alpha1.KubernetesCluster{}
 	if err := t.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, clusterCheck); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("cluster %s/%s was deleted while waiting for VIP", cluster.Namespace, cluster.Name)
@@ -820,7 +856,7 @@ func (t *TalosManager) checkClusterDeletion(ctx context.Context, cluster *vitist
 // checkVIPStatus checks VIP status and returns LoadBalancerIps if ready
 // Returns (loadBalancerIps, shouldContinue, error)
 func (t *TalosManager) checkVIPStatus(ctx context.Context, namespace, vipName string) ([]string, bool, error) {
-	vip := &vitistackcrdsv1alpha1.ControlPlaneVirtualSharedIP{}
+	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
 	if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: namespace}, vip); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, false, fmt.Errorf("VIP %s/%s was deleted or not found", namespace, vipName)
@@ -927,7 +963,7 @@ func applyDataToSecret(secret *corev1.Secret, data map[string][]byte) {
 // upsertTalosClusterConfigSecretWithRoleYAML creates/updates the consolidated Secret with talosconfig and role templates.
 func (t *TalosManager) upsertTalosClusterConfigSecretWithRoleYAML(
 	ctx context.Context,
-	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
+	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientCfg *clientconfig.Config,
 	controlPlaneYAML []byte,
 	workerYAML []byte,
@@ -974,7 +1010,7 @@ func (t *TalosManager) upsertTalosClusterConfigSecretWithRoleYAML(
 // Secret name: <cluster id>
 func (t *TalosManager) upsertTalosClusterConfigSecret(
 	ctx context.Context,
-	cluster *vitistackcrdsv1alpha1.KubernetesCluster,
+	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientCfg *clientconfig.Config,
 	kubeconfig []byte,
 ) error {
