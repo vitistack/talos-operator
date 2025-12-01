@@ -47,6 +47,10 @@ func (s *TalosConfigService) GenerateTalosConfig(
 		generate.WithVersionContract(versionContract),
 		generate.WithSecretsBundle(secretsBundle),
 		generate.WithEndpointList(endpointIPs),
+		// generate.WithAllowSchedulingOnControlPlanes(true),
+		// Include VIP/LoadBalancer IPs as additional SANs in the API server certificate
+		// This allows workers to connect to the control plane via the VIP
+		generate.WithAdditionalSubjectAltNames(endpointIPs),
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to generate input: %w", err)

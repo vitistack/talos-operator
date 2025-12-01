@@ -118,6 +118,34 @@ func (s *TalosClientService) WaitForTalosAPIs(
 	}
 }
 
+// WaitForKubernetesAPIReady waits for the Kubernetes API server to be accessible on the given endpoint.
+// This should be called after bootstrap to ensure the API server is fully ready before configuring workers.
+func (s *TalosClientService) WaitForKubernetesAPIReady(
+	endpointIP string,
+	timeout time.Duration,
+	interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	addr := net.JoinHostPort(endpointIP, "6443")
+
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for Kubernetes API server to be reachable on %s", addr)
+		}
+
+		// Try to establish a TCP connection to port 6443
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			vlog.Info("Kubernetes API not reachable yet: endpoint=" + addr + " error=" + err.Error())
+			time.Sleep(interval)
+			continue
+		}
+		_ = conn.Close()
+
+		vlog.Info("Kubernetes API server is reachable: endpoint=" + addr)
+		return nil
+	}
+}
+
 func (s *TalosClientService) BootstrapTalosControlPlane(
 	ctx context.Context,
 	tClient *talosclient.Client,

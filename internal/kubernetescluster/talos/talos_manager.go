@@ -31,6 +31,7 @@ import (
 
 const trueStr = "true"
 const falseStr = "false"
+const controlPlaneRole = "control-plane"
 
 type TalosManager struct {
 	client.Client
@@ -83,7 +84,8 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	// Short-circuit: if the cluster is already initialized per persisted secret flags, skip init
 	if flags, err := t.getTalosSecretFlags(ctx, cluster); err == nil {
 		if flags.ControlPlaneApplied && flags.WorkerApplied && flags.Bootstrapped && flags.ClusterAccess {
-			return nil
+			// Check for new machines that need to be configured
+			return t.reconcileNewNodes(ctx, cluster)
 		}
 	}
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
@@ -109,16 +111,10 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	_ = t.statusManager.SetCondition(ctx, cluster, "MachinesReady", "True", "Ready", "All machines are running and have IP addresses")
 
 	// collect control plane and worker IPs from ready machines
-	controlPlanes := t.machineService.FilterMachinesByRole(readyMachines, "control-plane")
+	controlPlanes := t.machineService.FilterMachinesByRole(readyMachines, controlPlaneRole)
 
 	// get other nodes except control plane
-	workers := []*vitistackv1alpha1.Machine{}
-	for _, machine := range readyMachines {
-		role := machine.Labels[vitistackv1alpha1.NodeRoleAnnotation]
-		if role != "control-plane" {
-			workers = append(workers, machine)
-		}
-	}
+	workers := filterNonControlPlanes(readyMachines)
 
 	var controlPlaneIPs []string
 	for _, m := range controlPlanes {
@@ -165,8 +161,11 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 	_ = t.statusManager.SetPhase(ctx, cluster, "ControlPlaneIPsPending")
 	_ = t.statusManager.SetCondition(ctx, cluster, "", "True", "Generated", "Talos client and role configs generated")
+
 	// Create or get ControlPlaneVirtualSharedIP for load balancing
-	vipEndpoints, err := t.ensureControlPlaneVIPs(ctx, networkNamespace, cluster, controlPlaneIPs)
+	// Initially only use the first control plane IP - more will be added after they're configured
+	firstControlPlaneIP := []string{controlPlaneIPs[0]}
+	vipEndpoints, err := t.ensureControlPlaneVIPs(ctx, networkNamespace, cluster, firstControlPlaneIP)
 	if err != nil {
 		return fmt.Errorf("failed to ensure control plane VIP: %w", err)
 	}
@@ -208,119 +207,139 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	flags, _ := t.getTalosSecretFlags(ctx, cluster)
 	insecure := !flags.TalosAPIReady // Use secure connections once API is ready with certs
 
-	// We'll create a secure Talos client later after nodes come back with generated certs
-	// talosClientSecure will be established after readiness wait.
-
-	// using per-node application for initial config; central apply path kept for potential future use
-	// Only proceed with config application if we have the role templates (generated above if needed)
-	if !flags.ControlPlaneApplied {
-		// Verify role templates exist before attempting to apply
-		secretCheck, errCheck := t.secretService.GetTalosSecret(ctx, cluster)
-		if errCheck != nil {
-			return fmt.Errorf("failed to verify secret before config application: %w", errCheck)
-		}
-		if len(secretCheck.Data["controlplane.yaml"]) == 0 || len(secretCheck.Data["worker.yaml"]) == 0 {
-			return fmt.Errorf("role templates not present in secret yet, cannot apply config (this should not happen)")
-		}
-
-		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, controlPlanes, insecure, tenantOverrides, endpointIPs[0]); err != nil {
-			_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneConfigApplied", "False", "ApplyError", err.Error())
-			return err
-		}
-		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"controlplane_applied": true}); err != nil {
-			vlog.Error("Failed to set controlplane_applied flag in secret", err)
-			return fmt.Errorf("failed to persist controlplane_applied flag: %w", err)
-		}
-		vlog.Info("Secret status updated: controlplane_applied=true, cluster=" + cluster.Name)
-		_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneConfigApplied", "True", "Applied", "Talos config applied to control planes")
-	} else {
-		vlog.Info("Control-plane config already applied, skipping: cluster=" + cluster.Name)
+	// Verify role templates exist before attempting to apply
+	secretCheck, errCheck := t.secretService.GetTalosSecret(ctx, cluster)
+	if errCheck != nil {
+		return fmt.Errorf("failed to verify secret before config application: %w", errCheck)
+	}
+	if len(secretCheck.Data["controlplane.yaml"]) == 0 || len(secretCheck.Data["worker.yaml"]) == 0 {
+		return fmt.Errorf("role templates not present in secret yet, cannot apply config (this should not happen)")
 	}
 
-	if !flags.WorkerApplied {
-		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, workers, insecure, tenantOverrides, endpointIPs[0]); err != nil {
-			_ = t.statusManager.SetCondition(ctx, cluster, "WorkerConfigApplied", "False", "ApplyError", err.Error())
-			return err
-		}
-		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"worker_applied": true}); err != nil {
-			vlog.Error("Failed to set worker_applied flag in secret", err)
-			return fmt.Errorf("failed to persist worker_applied flag: %w", err)
-		}
-		vlog.Info("Secret status updated: worker_applied=true, cluster=" + cluster.Name)
-		_ = t.statusManager.SetCondition(ctx, cluster, "WorkerConfigApplied", "True", "Applied", "Talos config applied to workers")
-	} else {
-		vlog.Info("Worker config already applied, skipping: cluster=" + cluster.Name)
+	// ==========================================
+	// STAGED CONFIGURATION APPROACH
+	// ==========================================
+	// Stage 1: Apply config to first control plane only
+	// Stage 2: Wait for first control plane API and bootstrap
+	// Stage 3: Apply config to remaining control planes
+	// Stage 4: Apply config to workers
+	// ==========================================
+
+	if len(controlPlanes) == 0 {
+		return fmt.Errorf("no control planes found, cannot proceed with cluster initialization")
 	}
 
-	// Update status phase: configs applied
-	_ = t.statusManager.SetPhase(ctx, cluster, "ConfigApplied")
-	_ = t.statusManager.SetCondition(ctx, cluster, "ConfigApplied", "True", "Applied", "Talos configs applied to all nodes")
+	firstControlPlane := controlPlanes[0]
+	remainingControlPlanes := controlPlanes[1:]
 
-	// todo registert VIP ip addresses to create loadbalancers for talos control planes
-	// write to a crd, so others can handle load balancing of control planes
+	// Stage 1: Apply config to first control plane
+	if !flags.FirstControlPlaneApplied {
+		vlog.Info(fmt.Sprintf("Stage 1: Applying config to first control plane: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+		_ = t.statusManager.SetPhase(ctx, cluster, "ConfiguringFirstControlPlane")
+		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "Applying", "Applying config to first control plane")
 
-	// Bootstrap the cluster (bootstrap exactly one control-plane)
-	clusterState, _ := t.getTalosSecretFlags(ctx, cluster)
-	_, hasKubeconfig, _ := t.getTalosSecretState(ctx, cluster)
-	if len(controlPlaneIPs) > 0 && !clusterState.Bootstrapped {
-		// Wait for control-plane nodes to be ready with their new config (Talos API reachable securely)
-		_ = t.statusManager.SetPhase(ctx, cluster, "WaitingForTalosAPI")
-		_ = t.statusManager.SetCondition(ctx, cluster, "WaitingForTalosAPI", "True", "Waiting", "Waiting for Talos API on control planes and workers")
-		if err := t.clientService.WaitForTalosAPIs(controlPlanes, 10*time.Minute, 10*time.Second); err != nil {
-			_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "False", "NotReady", err.Error())
-			return fmt.Errorf("control planes not ready for bootstrap: %w", err)
+		if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{firstControlPlane}, insecure, tenantOverrides, endpointIPs[0]); err != nil {
+			_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "ApplyError", err.Error())
+			return fmt.Errorf("failed to apply config to first control plane: %w", err)
 		}
 
-		// Also wait for worker nodes to be ready with their new config (Talos API reachable)
-		// if len(workers) > 0 {
-		// 	vlog.Info("Waiting for worker Talos APIs to be reachable: cluster=" + cluster.Name)
-		// 	if err := t.clientService.WaitForTalosAPIs(workers, 10*time.Minute, 10*time.Second); err != nil {
-		// 		vlog.Warn(fmt.Sprintf("Workers not ready yet (non-blocking): cluster=%s error=%v", cluster.Name, err))
-		// 		// Don't block bootstrap on workers, just log a warning
-		// 		// Workers can join later once control plane is ready
-		// 	}
-		// }
-
-		_ = t.statusManager.SetPhase(ctx, cluster, "TalosAPIReady")
-		_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "True", "Ready", "Talos API reachable on control planes")
-		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"talos_api_ready": true}); err != nil {
-			vlog.Error("Failed to set talos_api_ready flag in secret", err)
-			return fmt.Errorf("failed to persist talos_api_ready flag: %w", err)
+		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"first_controlplane_applied": true}); err != nil {
+			vlog.Error("Failed to set first_controlplane_applied flag in secret", err)
+			return fmt.Errorf("failed to persist first_controlplane_applied flag: %w", err)
 		}
-		vlog.Info("Secret status updated: talos_api_ready=true, cluster=" + cluster.Name)
+		if err := t.addConfiguredNode(ctx, cluster, firstControlPlane.Name); err != nil {
+			vlog.Error("Failed to add first control plane to configured nodes", err)
+		}
 
-		// Bootstrap using first control plane node directly (not VIP)
-		// Create a client with direct control plane IP for bootstrap operation
-		bootstrapClient, err := t.clientService.CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIPs[0]})
+		vlog.Info("Stage 1 complete: First control plane config applied: node=" + firstControlPlane.Name)
+		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "True", "Applied", "Config applied to first control plane")
+	} else {
+		vlog.Info("Stage 1 already complete: First control plane config already applied, skipping: cluster=" + cluster.Name)
+	}
+
+	// Stage 2: Wait for first control plane API and bootstrap
+	// Re-fetch flags after potential update
+	flags, _ = t.getTalosSecretFlags(ctx, cluster)
+
+	if !flags.FirstControlPlaneReady {
+		vlog.Info(fmt.Sprintf("Stage 2a: Waiting for first control plane Talos API: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+		_ = t.statusManager.SetPhase(ctx, cluster, "WaitingForFirstControlPlaneAPI")
+		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneTalosAPIReady", "False", "Waiting", "Waiting for Talos API on first control plane")
+
+		if err := t.clientService.WaitForTalosAPIs([]*vitistackv1alpha1.Machine{firstControlPlane}, 10*time.Minute, 10*time.Second); err != nil {
+			_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneTalosAPIReady", "False", "NotReady", err.Error())
+			return fmt.Errorf("first control plane not ready: %w", err)
+		}
+
+		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"first_controlplane_ready": true}); err != nil {
+			vlog.Error("Failed to set first_controlplane_ready flag in secret", err)
+			return fmt.Errorf("failed to persist first_controlplane_ready flag: %w", err)
+		}
+
+		vlog.Info("Stage 2a complete: First control plane Talos API is ready: node=" + firstControlPlane.Name)
+		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneTalosAPIReady", "True", "Ready", "First control plane Talos API is ready")
+	} else {
+		vlog.Info("Stage 2a already complete: First control plane already ready, skipping: cluster=" + cluster.Name)
+	}
+
+	// Stage 2b: Bootstrap the first control plane
+	// Re-fetch flags after potential update
+	flags, _ = t.getTalosSecretFlags(ctx, cluster)
+
+	if !flags.Bootstrapped {
+		vlog.Info(fmt.Sprintf("Stage 2b: Bootstrapping cluster via first control plane: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+		_ = t.statusManager.SetPhase(ctx, cluster, "Bootstrapping")
+		_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "False", "Bootstrapping", "Bootstrapping Talos cluster")
+
+		// Get first control plane IP
+		var firstCPIP string
+		for _, ipAddr := range firstControlPlane.Status.PublicIPAddresses {
+			ip := net.ParseIP(ipAddr)
+			if ip != nil && ip.To4() != nil {
+				firstCPIP = ipAddr
+				break
+			}
+		}
+
+		bootstrapClient, err := t.clientService.CreateTalosClient(ctx, false, clientConfig, []string{firstCPIP})
 		if err != nil {
 			return fmt.Errorf("failed to create Talos client for bootstrap: %w", err)
 		}
-		if err := t.clientService.BootstrapTalosControlPlaneWithRetry(ctx, bootstrapClient, controlPlaneIPs[0], 5*time.Minute, 10*time.Second); err != nil {
+		if err := t.clientService.BootstrapTalosControlPlaneWithRetry(ctx, bootstrapClient, firstCPIP, 5*time.Minute, 10*time.Second); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "False", "BootstrapError", err.Error())
 			return fmt.Errorf("failed to bootstrap Talos cluster: %w", err)
 		}
-		_ = t.statusManager.SetPhase(ctx, cluster, "Bootstrapped")
-		_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "True", "Done", "Talos cluster bootstrapped")
 
-		// mark bootstrapped in the persistent Secret
 		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"bootstrapped": true}); err != nil {
 			vlog.Error("Failed to set bootstrapped flag in secret", err)
 			return fmt.Errorf("failed to persist bootstrapped flag: %w", err)
 		}
-		vlog.Info("Secret status updated: bootstrapped=true, cluster=" + cluster.Name)
-	} else if clusterState.Bootstrapped {
-		vlog.Info("Cluster already bootstrapped, skipping bootstrap step: cluster=" + cluster.Name)
+
+		vlog.Info("Stage 2b complete: Cluster bootstrapped via first control plane: node=" + firstControlPlane.Name)
+		_ = t.statusManager.SetPhase(ctx, cluster, "Bootstrapped")
+		_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "True", "Done", "Talos cluster bootstrapped")
+	} else {
+		vlog.Info("Stage 2b already complete: Cluster already bootstrapped, skipping: cluster=" + cluster.Name)
 	}
 
-	// Get Kubernetes access (fetch kubeconfig and store it as a Secret)
-	if len(controlPlaneIPs) > 0 && !clusterState.ClusterAccess {
-		// Use VIP endpoint for kubeconfig retrieval: nodesIp = actual node to target, endpointIp = VIP for connection
+	// Stage 2c: Get kubeconfig right after bootstrap (makes cluster accessible early)
+	// Re-fetch flags after potential update
+	flags, _ = t.getTalosSecretFlags(ctx, cluster)
+	_, hasKubeconfig, _ := t.getTalosSecretState(ctx, cluster)
+
+	if !flags.ClusterAccess && len(controlPlaneIPs) > 0 {
+		vlog.Info(fmt.Sprintf("Stage 2c: Retrieving kubeconfig after bootstrap: cluster=%s", cluster.Name))
+		_ = t.statusManager.SetPhase(ctx, cluster, "RetrievingKubeconfig")
+		_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "False", "Retrieving", "Retrieving kubeconfig from bootstrapped cluster")
+
+		// Use first control plane IP for kubeconfig retrieval
 		kubeconfigBytes, err := t.clientService.GetKubeconfigWithRetry(ctx, clientConfig, controlPlaneIPs[0], endpointIPs[0], 5*time.Minute, 10*time.Second)
 		if err != nil {
+			_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "False", "RetrieveError", err.Error())
 			return fmt.Errorf("failed to get kubeconfig: %w", err)
 		}
 
-		// Update consolidated Talos secret with kubeconfig and bootstrapped flag
+		// Update consolidated Talos secret with kubeconfig
 		if err := t.upsertTalosClusterConfigSecret(ctx, cluster, clientConfig, kubeconfigBytes); err != nil {
 			_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "False", "PersistError", err.Error())
 			return fmt.Errorf("failed to update Talos config secret with kubeconfig: %w", err)
@@ -329,31 +348,106 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			vlog.Error("Failed to set cluster_access flag in secret", err)
 			return fmt.Errorf("failed to persist cluster_access flag: %w", err)
 		}
-		vlog.Info("Secret status updated: cluster_access=true, cluster=" + cluster.Name)
 
-		// Wait for all nodes to be Ready in Kubernetes (using Talos NodeStatus)
-		allMachines := make([]*vitistackv1alpha1.Machine, 0, len(controlPlanes)+len(workers))
-		allMachines = append(allMachines, controlPlanes...)
-		allMachines = append(allMachines, workers...)
-		vlog.Info(fmt.Sprintf("Waiting for all %d nodes to report Ready status: cluster=%s", len(allMachines), cluster.Name))
-		_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "False", "Waiting", "Waiting for all nodes to be ready in Kubernetes")
-
-		// Mark cluster as ready with timestamp
-		if err := t.setSecretTimestamp(ctx, cluster, "ready_at"); err != nil {
-			vlog.Error("Failed to set ready_at timestamp in secret", err)
-		} else {
-			vlog.Info("Secret timestamp updated: ready_at, cluster=" + cluster.Name)
-		}
-		_ = t.statusManager.SetPhase(ctx, cluster, "Ready")
+		vlog.Info("Stage 2c complete: Kubeconfig retrieved and stored: cluster=" + cluster.Name)
 		_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "True", "Persisted", "Kubeconfig stored in Secret")
-		vlog.Info("Cluster status set to Ready: cluster=" + cluster.Name)
 
 		if !hasKubeconfig {
 			vlog.Info("Kubeconfig stored in Secret: secret=" + secretservice.GetSecretName(cluster))
 		}
-	} else if clusterState.ClusterAccess {
-		vlog.Info("Cluster access already established (kubeconfig present), skipping fetch: cluster=" + cluster.Name)
+	} else if flags.ClusterAccess {
+		vlog.Info("Stage 2c already complete: Kubeconfig already available, skipping: cluster=" + cluster.Name)
 	}
+
+	// Stage 3: Apply config to remaining control planes (after bootstrap)
+	// Re-fetch flags after potential update
+	flags, _ = t.getTalosSecretFlags(ctx, cluster)
+
+	if !flags.ControlPlaneApplied {
+		if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, remainingControlPlanes, insecure, tenantOverrides, endpointIPs[0], &nodeGroupConfig{
+			stageNum:      3,
+			nodeType:      "control plane",
+			phase:         "ConfiguringRemainingControlPlanes",
+			conditionName: "ControlPlaneConfigApplied",
+			flagName:      "controlplane_applied",
+			stopOnError:   true,
+		}); err != nil {
+			return err
+		}
+
+		// Update VIP pool members after adding new control planes
+		if len(remainingControlPlanes) > 0 {
+			if err := t.updateVIPPoolMembers(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to update VIP pool members after adding control planes: %v", err))
+			}
+		}
+	} else {
+		vlog.Info("Stage 3 already complete: All control plane configs already applied, skipping: cluster=" + cluster.Name)
+	}
+
+	// Wait for all control planes to be ready before configuring workers
+	vlog.Info(fmt.Sprintf("Waiting for all control plane Talos APIs: count=%d cluster=%s", len(controlPlanes), cluster.Name))
+	if err := t.clientService.WaitForTalosAPIs(controlPlanes, 10*time.Minute, 10*time.Second); err != nil {
+		_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "False", "NotReady", err.Error())
+		return fmt.Errorf("control planes not ready: %w", err)
+	}
+	_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "True", "Ready", "Talos API reachable on all control planes")
+
+	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"talos_api_ready": true}); err != nil {
+		vlog.Error("Failed to set talos_api_ready flag in secret", err)
+	}
+
+	// Wait for Kubernetes API server to be ready before configuring workers
+	// This ensures workers can successfully connect to the control plane
+	vlog.Info(fmt.Sprintf("Waiting for Kubernetes API server to be ready: endpoint=%s cluster=%s", endpointIPs[0], cluster.Name))
+	_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "False", "Waiting", "Waiting for Kubernetes API server to be ready")
+	if err := t.clientService.WaitForKubernetesAPIReady(endpointIPs[0], 5*time.Minute, 10*time.Second); err != nil {
+		_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "False", "NotReady", err.Error())
+		return fmt.Errorf("kubernetes API server not ready: %w", err)
+	}
+	_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "True", "Ready", "Kubernetes API server is ready")
+
+	// Stage 4: Apply config to workers (after control planes are ready)
+	// Re-fetch flags after potential update
+	flags, _ = t.getTalosSecretFlags(ctx, cluster)
+
+	if !flags.WorkerApplied {
+		if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, workers, insecure, tenantOverrides, endpointIPs[0], &nodeGroupConfig{
+			stageNum:      4,
+			nodeType:      "worker",
+			phase:         "ConfiguringWorkers",
+			conditionName: "WorkerConfigApplied",
+			flagName:      "worker_applied",
+			stopOnError:   true,
+		}); err != nil {
+			return err
+		}
+	} else {
+		vlog.Info("Stage 4 already complete: Worker configs already applied, skipping: cluster=" + cluster.Name)
+	}
+
+	// Update status phase: configs applied
+	_ = t.statusManager.SetPhase(ctx, cluster, "ConfigApplied")
+	_ = t.statusManager.SetCondition(ctx, cluster, "ConfigApplied", "True", "Applied", "Talos configs applied to all nodes")
+
+	// Stage 5: Mark cluster as ready
+	// All nodes are configured, kubeconfig was already retrieved after bootstrap (Stage 2c)
+	allMachines := make([]*vitistackv1alpha1.Machine, 0, len(controlPlanes)+len(workers))
+	allMachines = append(allMachines, controlPlanes...)
+	allMachines = append(allMachines, workers...)
+	vlog.Info(fmt.Sprintf("Stage 5: All %d nodes configured, marking cluster as ready: cluster=%s", len(allMachines), cluster.Name))
+
+	// Mark cluster as ready with timestamp
+	if err := t.setSecretTimestamp(ctx, cluster, "ready_at"); err != nil {
+		vlog.Error("Failed to set ready_at timestamp in secret", err)
+	} else {
+		vlog.Info("Secret timestamp updated: ready_at, cluster=" + cluster.Name)
+	}
+
+	_ = t.statusManager.SetPhase(ctx, cluster, "Ready")
+	_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "True", "Ready", fmt.Sprintf("All %d nodes are configured and ready", len(allMachines)))
+	vlog.Info("Stage 5 complete: Cluster is ready: cluster=" + cluster.Name)
+
 	return nil
 }
 
@@ -390,16 +484,19 @@ func (t *TalosManager) ensureTalosSecretExists(ctx context.Context, cluster *vit
 	// create minimal secret with default flags and lifecycle timestamps
 	now := time.Now().UTC().Format(time.RFC3339)
 	data := map[string][]byte{
-		"bootstrapped":              []byte(falseStr),
-		"talosconfig_present":       []byte(falseStr),
-		"controlplane_yaml_present": []byte(falseStr),
-		"worker_yaml_present":       []byte(falseStr),
-		"kubeconfig_present":        []byte(falseStr),
-		"talos_api_ready":           []byte(falseStr),
-		"controlplane_applied":      []byte(falseStr),
-		"worker_applied":            []byte(falseStr),
-		"cluster_access":            []byte(falseStr),
-		"created_at":                []byte(now),
+		"bootstrapped":               []byte(falseStr),
+		"talosconfig_present":        []byte(falseStr),
+		"controlplane_yaml_present":  []byte(falseStr),
+		"worker_yaml_present":        []byte(falseStr),
+		"kubeconfig_present":         []byte(falseStr),
+		"talos_api_ready":            []byte(falseStr),
+		"controlplane_applied":       []byte(falseStr),
+		"worker_applied":             []byte(falseStr),
+		"cluster_access":             []byte(falseStr),
+		"first_controlplane_applied": []byte(falseStr),
+		"first_controlplane_ready":   []byte(falseStr),
+		"configured_nodes":           []byte(""), // comma-separated list of node names that have been configured
+		"created_at":                 []byte(now),
 	}
 	err = t.secretService.CreateTalosSecret(ctx, cluster, data)
 	if err == nil {
@@ -456,11 +553,13 @@ func (t *TalosManager) loadTalosArtifacts(ctx context.Context, cluster *vitistac
 
 // talosSecretFlags captures persisted boolean flags stored in the consolidated Secret
 type talosSecretFlags struct {
-	ControlPlaneApplied bool
-	WorkerApplied       bool
-	Bootstrapped        bool
-	ClusterAccess       bool
-	TalosAPIReady       bool // tracks when Talos API accepts secure (non-insecure) connections
+	ControlPlaneApplied      bool
+	WorkerApplied            bool
+	Bootstrapped             bool
+	ClusterAccess            bool
+	TalosAPIReady            bool // tracks when Talos API accepts secure (non-insecure) connections
+	FirstControlPlaneApplied bool // tracks if the first control plane has config applied
+	FirstControlPlaneReady   bool // tracks if the first control plane is ready (API reachable)
 }
 
 // getTalosSecretFlags reads boolean flags from the consolidated Secret
@@ -484,6 +583,8 @@ func parseSecretFlags(data map[string][]byte) talosSecretFlags {
 	flags.Bootstrapped = isFlagTrue(data, "bootstrapped")
 	flags.ClusterAccess = parseClusterAccessFlag(data)
 	flags.TalosAPIReady = isFlagTrue(data, "talos_api_ready")
+	flags.FirstControlPlaneApplied = isFlagTrue(data, "first_controlplane_applied")
+	flags.FirstControlPlaneReady = isFlagTrue(data, "first_controlplane_ready")
 
 	return flags
 }
@@ -893,6 +994,375 @@ func stringSlicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// getConfiguredNodes returns the list of node names that have been configured
+func (t *TalosManager) getConfiguredNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) ([]string, error) {
+	secret, err := t.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if secret.Data == nil {
+		return nil, nil
+	}
+	nodesStr := string(secret.Data["configured_nodes"])
+	if nodesStr == "" {
+		return nil, nil
+	}
+	return strings.Split(nodesStr, ","), nil
+}
+
+// isNodeConfigured checks if a node has already been configured
+func (t *TalosManager) isNodeConfigured(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) bool {
+	nodes, err := t.getConfiguredNodes(ctx, cluster)
+	if err != nil {
+		return false
+	}
+	for _, n := range nodes {
+		if n == nodeName {
+			return true
+		}
+	}
+	return false
+}
+
+// addConfiguredNode adds a node name to the list of configured nodes in the secret
+func (t *TalosManager) addConfiguredNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := t.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		existingNodes := string(secret.Data["configured_nodes"])
+		var nodes []string
+		if existingNodes != "" {
+			nodes = strings.Split(existingNodes, ",")
+		}
+
+		// Check if already exists
+		for _, n := range nodes {
+			if n == nodeName {
+				return nil // Already configured
+			}
+		}
+
+		nodes = append(nodes, nodeName)
+		secret.Data["configured_nodes"] = []byte(strings.Join(nodes, ","))
+
+		err = t.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to add configured node after %d retries", maxRetries)
+}
+
+// reconcileNewNodes handles adding new nodes to an existing cluster
+// This is called when the cluster is already initialized but new machines have been added
+func (t *TalosManager) reconcileNewNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	newMachines, err := t.findUnconfiguredMachines(ctx, cluster)
+	if err != nil {
+		return err
+	}
+	if len(newMachines) == 0 {
+		return nil
+	}
+
+	vlog.Info(fmt.Sprintf("Found %d new machines to configure for cluster %s", len(newMachines), cluster.Name))
+
+	// Wait for new machines to be ready
+	readyMachines, err := t.machineService.WaitForMachinesReady(ctx, newMachines)
+	if err != nil {
+		return fmt.Errorf("failed waiting for new machines to be ready: %w", err)
+	}
+
+	// Load configuration context
+	configCtx, err := t.loadNewNodeConfigContext(ctx, cluster)
+	if err != nil {
+		return err
+	}
+
+	// Separate and configure new control planes and workers
+	newControlPlanes := t.machineService.FilterMachinesByRole(readyMachines, controlPlaneRole)
+	newWorkers := filterNonControlPlanes(readyMachines)
+
+	// Configure new control planes first
+	if err := t.configureNewControlPlanes(ctx, cluster, configCtx, newControlPlanes); err != nil {
+		return err
+	}
+
+	// Configure new workers
+	return t.configureNewWorkers(ctx, cluster, configCtx, newWorkers)
+}
+
+// updateVIPPoolMembers updates the VIP with current control plane IPs
+func (t *TalosManager) updateVIPPoolMembers(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
+	if err != nil {
+		return err
+	}
+
+	controlPlanes := t.machineService.FilterMachinesByRole(machines, controlPlaneRole)
+	controlPlaneIPs := extractIPv4Addresses(controlPlanes)
+
+	vipName := cluster.Spec.Cluster.ClusterId
+	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
+	if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip); err != nil {
+		return err
+	}
+
+	if !stringSlicesEqual(vip.Spec.PoolMembers, controlPlaneIPs) {
+		vip.Spec.PoolMembers = controlPlaneIPs
+		if err := t.Update(ctx, vip); err != nil {
+			return fmt.Errorf("failed to update VIP pool members: %w", err)
+		}
+		vlog.Info(fmt.Sprintf("Updated VIP pool members: vip=%s members=%v", vipName, controlPlaneIPs))
+	}
+
+	return nil
+}
+
+// nodeGroupConfig holds configuration for applying configs to a group of machines
+type nodeGroupConfig struct {
+	stageNum      int
+	nodeType      string
+	phase         string
+	conditionName string
+	flagName      string
+	stopOnError   bool
+}
+
+// applyConfigToMachineGroup applies configuration to a group of machines (control planes or workers)
+func (t *TalosManager) applyConfigToMachineGroup(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	machines []*vitistackv1alpha1.Machine,
+	insecure bool,
+	tenantOverrides map[string]any,
+	endpointIP string,
+	cfg *nodeGroupConfig,
+) error {
+	if len(machines) > 0 {
+		vlog.Info(fmt.Sprintf("Stage %d: Applying config to %ss: count=%d cluster=%s", cfg.stageNum, cfg.nodeType, len(machines), cluster.Name))
+		_ = t.statusManager.SetPhase(ctx, cluster, cfg.phase)
+		_ = t.statusManager.SetCondition(ctx, cluster, cfg.conditionName, "False", "Applying", fmt.Sprintf("Applying config to %ss", cfg.nodeType))
+
+		for _, m := range machines {
+			if t.isNodeConfigured(ctx, cluster, m.Name) {
+				vlog.Info(fmt.Sprintf("%s already configured, skipping: node=%s", capitalizeFirst(cfg.nodeType), m.Name))
+				continue
+			}
+
+			vlog.Info(fmt.Sprintf("Applying config to %s: node=%s", cfg.nodeType, m.Name))
+			if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{m}, insecure, tenantOverrides, endpointIP); err != nil {
+				_ = t.statusManager.SetCondition(ctx, cluster, cfg.conditionName, "False", "ApplyError", fmt.Sprintf("Failed on node %s: %s", m.Name, err.Error()))
+				if cfg.stopOnError {
+					return fmt.Errorf("failed to apply config to %s %s: %w", cfg.nodeType, m.Name, err)
+				}
+				vlog.Error(fmt.Sprintf("Failed to apply config to %s %s", cfg.nodeType, m.Name), err)
+				continue
+			}
+			if err := t.addConfiguredNode(ctx, cluster, m.Name); err != nil {
+				vlog.Error(fmt.Sprintf("Failed to add %s %s to configured nodes", cfg.nodeType, m.Name), err)
+			}
+		}
+		vlog.Info(fmt.Sprintf("Stage %d complete: Config applied to all %ss", cfg.stageNum, cfg.nodeType))
+	} else {
+		vlog.Info(fmt.Sprintf("Stage %d: No %ss to configure", cfg.stageNum, cfg.nodeType))
+	}
+
+	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{cfg.flagName: true}); err != nil {
+		vlog.Error(fmt.Sprintf("Failed to set %s flag in secret", cfg.flagName), err)
+		return fmt.Errorf("failed to persist %s flag: %w", cfg.flagName, err)
+	}
+	_ = t.statusManager.SetCondition(ctx, cluster, cfg.conditionName, "True", "Applied", fmt.Sprintf("Talos config applied to all %ss", cfg.nodeType))
+	return nil
+}
+
+// filterNonControlPlanes returns machines that are not control planes
+func filterNonControlPlanes(machines []*vitistackv1alpha1.Machine) []*vitistackv1alpha1.Machine {
+	var result []*vitistackv1alpha1.Machine
+	for _, m := range machines {
+		role := m.Labels[vitistackv1alpha1.NodeRoleAnnotation]
+		if role != controlPlaneRole {
+			result = append(result, m)
+		}
+	}
+	return result
+}
+
+// capitalizeFirst capitalizes the first letter of a string
+func capitalizeFirst(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// extractIPv4Addresses extracts the first IPv4 address from each machine
+func extractIPv4Addresses(machines []*vitistackv1alpha1.Machine) []string {
+	var ips []string
+	for _, m := range machines {
+		for _, ipAddr := range m.Status.PublicIPAddresses {
+			ip := net.ParseIP(ipAddr)
+			if ip != nil && ip.To4() != nil {
+				ips = append(ips, ipAddr)
+				break
+			}
+		}
+	}
+	return ips
+}
+
+// getFirstIPv4 returns the first IPv4 address from a machine's public IPs
+func getFirstIPv4(m *vitistackv1alpha1.Machine) string {
+	for _, ipAddr := range m.Status.PublicIPAddresses {
+		parsedIP := net.ParseIP(ipAddr)
+		if parsedIP != nil && parsedIP.To4() != nil {
+			return ipAddr
+		}
+	}
+	return ""
+}
+
+// newNodeConfigContext holds configuration context for adding new nodes
+type newNodeConfigContext struct {
+	clientConfig    *clientconfig.Config
+	tenantOverrides map[string]any
+	endpointIP      string
+}
+
+// findUnconfiguredMachines finds machines that haven't been configured yet
+func (t *TalosManager) findUnconfiguredMachines(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) ([]*vitistackv1alpha1.Machine, error) {
+	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cluster machines: %w", err)
+	}
+
+	if len(machines) == 0 {
+		return nil, nil
+	}
+
+	configuredNodes, err := t.getConfiguredNodes(ctx, cluster)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to get configured nodes: %v", err))
+		configuredNodes = []string{}
+	}
+	configuredSet := make(map[string]bool)
+	for _, n := range configuredNodes {
+		configuredSet[n] = true
+	}
+
+	var newMachines []*vitistackv1alpha1.Machine
+	for _, m := range machines {
+		if !configuredSet[m.Name] {
+			newMachines = append(newMachines, m)
+		}
+	}
+	return newMachines, nil
+}
+
+// loadNewNodeConfigContext loads configuration context needed for adding new nodes
+func (t *TalosManager) loadNewNodeConfigContext(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*newNodeConfigContext, error) {
+	clientConfig, _, err := t.loadTalosArtifacts(ctx, cluster)
+	if err != nil || clientConfig == nil {
+		return nil, fmt.Errorf("failed to load talos artifacts for new node configuration: %w", err)
+	}
+
+	tenantOverrides, err := t.loadTenantOverrides(ctx, cluster)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load tenant overrides: %w", err)
+	}
+
+	vipName := cluster.Spec.Cluster.ClusterId
+	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
+	if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip); err != nil {
+		return nil, fmt.Errorf("failed to get VIP for new node configuration: %w", err)
+	}
+	if len(vip.Status.LoadBalancerIps) == 0 {
+		return nil, fmt.Errorf("VIP has no LoadBalancerIps, cannot configure new nodes")
+	}
+
+	return &newNodeConfigContext{
+		clientConfig:    clientConfig,
+		tenantOverrides: tenantOverrides,
+		endpointIP:      vip.Status.LoadBalancerIps[0],
+	}, nil
+}
+
+// configureNewControlPlanes configures new control plane nodes
+func (t *TalosManager) configureNewControlPlanes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, configCtx *newNodeConfigContext, nodes []*vitistackv1alpha1.Machine) error {
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	vlog.Info(fmt.Sprintf("Configuring %d new control planes for cluster %s", len(nodes), cluster.Name))
+	_ = t.statusManager.SetCondition(ctx, cluster, "NewControlPlanesConfiguring", "True", "Configuring", fmt.Sprintf("Configuring %d new control planes", len(nodes)))
+
+	for _, node := range nodes {
+		if err := t.configureNewNode(ctx, cluster, configCtx, node, "control plane"); err != nil {
+			vlog.Error(fmt.Sprintf("Failed to configure new control plane %s", node.Name), err)
+			continue
+		}
+	}
+
+	if err := t.updateVIPPoolMembers(ctx, cluster); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to update VIP pool members: %v", err))
+	}
+
+	_ = t.statusManager.SetCondition(ctx, cluster, "NewControlPlanesConfiguring", "False", "Configured", "New control planes configured")
+	return nil
+}
+
+// configureNewWorkers configures new worker nodes
+func (t *TalosManager) configureNewWorkers(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, configCtx *newNodeConfigContext, nodes []*vitistackv1alpha1.Machine) error {
+	if len(nodes) == 0 {
+		return nil
+	}
+
+	vlog.Info(fmt.Sprintf("Configuring %d new workers for cluster %s", len(nodes), cluster.Name))
+	_ = t.statusManager.SetCondition(ctx, cluster, "NewWorkersConfiguring", "True", "Configuring", fmt.Sprintf("Configuring %d new workers", len(nodes)))
+
+	for _, node := range nodes {
+		if err := t.configureNewNode(ctx, cluster, configCtx, node, "worker"); err != nil {
+			vlog.Error(fmt.Sprintf("Failed to configure new worker %s", node.Name), err)
+			continue
+		}
+	}
+
+	_ = t.statusManager.SetCondition(ctx, cluster, "NewWorkersConfiguring", "False", "Configured", "New workers configured")
+	return nil
+}
+
+// configureNewNode configures a single new node
+func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, configCtx *newNodeConfigContext, node *vitistackv1alpha1.Machine, nodeType string) error {
+	ip := getFirstIPv4(node)
+	if ip == "" {
+		vlog.Warn(fmt.Sprintf("New %s %s missing IPv4 address, skipping", nodeType, node.Name))
+		return nil
+	}
+
+	vlog.Info(fmt.Sprintf("Applying config to new %s: node=%s ip=%s", nodeType, node.Name, ip))
+	if err := t.applyPerNodeConfiguration(ctx, cluster, configCtx.clientConfig, []*vitistackv1alpha1.Machine{node}, false, configCtx.tenantOverrides, configCtx.endpointIP); err != nil {
+		return fmt.Errorf("failed to apply config: %w", err)
+	}
+	if err := t.addConfiguredNode(ctx, cluster, node.Name); err != nil {
+		vlog.Error(fmt.Sprintf("Failed to add new %s %s to configured nodes", nodeType, node.Name), err)
+	}
+	vlog.Info(fmt.Sprintf("New %s configured successfully: node=%s", nodeType, node.Name))
+	return nil
 }
 
 // mergeBootstrappedFlag ensures we preserve the bootstrapped flag from an existing Secret,
