@@ -181,7 +181,23 @@ func TestApplyTenantOverridesPreservesAdmissionControlConfig(t *testing.T) {
 	}
 	exemptions := config["exemptions"].(map[string]any)
 	namespaces := exemptions["namespaces"].([]any)
-	if len(namespaces) != 1 || namespaces[0] != "falco" {
-		t.Fatalf("expected namespaces to be overridden, got %v", namespaces)
+	// configpatcher uses strategic merge which appends to arrays rather than replacing
+	// So [kube-system] + [falco] = [kube-system, falco]
+	if len(namespaces) != 2 {
+		t.Fatalf("expected namespaces to be merged (appended), got %v", namespaces)
+	}
+	// Verify both original and override values are present
+	foundKubeSystem := false
+	foundFalco := false
+	for _, ns := range namespaces {
+		if ns == "kube-system" {
+			foundKubeSystem = true
+		}
+		if ns == "falco" {
+			foundFalco = true
+		}
+	}
+	if !foundKubeSystem || !foundFalco {
+		t.Fatalf("expected both kube-system and falco in merged namespaces, got %v", namespaces)
 	}
 }

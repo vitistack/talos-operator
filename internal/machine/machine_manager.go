@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
@@ -53,10 +54,34 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackv1alpha1.
 	clusterId := cluster.Spec.Cluster.ClusterId
 	namespace := cluster.Namespace
 
+	// Create control plane machines
+	controlPlaneMachines := m.generateControlPlaneMachines(cluster, clusterId, namespace)
+	machines = append(machines, controlPlaneMachines...)
+
+	// Create worker machines
+	workerMachines := m.generateWorkerMachines(cluster, clusterId, namespace)
+	machines = append(machines, workerMachines...)
+
+	return machines, nil
+}
+
+// generateControlPlaneMachines creates control plane Machine objects from cluster spec
+func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string) []*vitistackv1alpha1.Machine {
+	var machines []*vitistackv1alpha1.Machine
+
 	// Create control plane nodes (assuming at least 1)
 	controlPlaneReplicas := 1
 	if cluster.Spec.Topology.ControlPlane.Replicas > 0 {
 		controlPlaneReplicas = cluster.Spec.Topology.ControlPlane.Replicas
+	}
+
+	// Convert control plane storage to machine disks
+	controlPlaneDisks := convertStorageToDisks(cluster.Spec.Topology.ControlPlane.Storage)
+
+	// Get control plane machine class (default to "large" if not specified)
+	controlPlaneMachineClass := cluster.Spec.Topology.ControlPlane.MachineClass
+	if controlPlaneMachineClass == "" {
+		controlPlaneMachineClass = "large"
 	}
 
 	for i := 0; i < controlPlaneReplicas; i++ {
@@ -70,10 +95,10 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackv1alpha1.
 				},
 			},
 			Spec: vitistackv1alpha1.MachineSpec{
-				Name: fmt.Sprintf("%s-ctp%d", clusterId, i),
-				// We'll set basic required fields from the machine CRD spec
-				InstanceType: "large", // Default value, can be overridden from cluster spec
+				Name:         fmt.Sprintf("%s-ctp%d", clusterId, i),
+				InstanceType: controlPlaneMachineClass,
 				Provider:     vitistackv1alpha1.MachineProviderType(cluster.Spec.Topology.ControlPlane.Provider.String()),
+				Disks:        controlPlaneDisks,
 				Tags: map[string]string{
 					"cluster": clusterId,
 					"role":    "control-plane",
@@ -83,13 +108,26 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackv1alpha1.
 		machines = append(machines, machine)
 	}
 
+	return machines
+}
+
+// generateWorkerMachines creates worker Machine objects from cluster spec
+func (m *MachineManager) generateWorkerMachines(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string) []*vitistackv1alpha1.Machine {
+	var machines []*vitistackv1alpha1.Machine
+
 	// Create worker nodes based on node pools if available
 	if len(cluster.Spec.Topology.Workers.NodePools) > 0 {
 		workerIndex := 0
 		for idx := range cluster.Spec.Topology.Workers.NodePools {
 			nodePool := cluster.Spec.Topology.Workers.NodePools[idx]
+			workerDisks := convertStorageToDisks(nodePool.Storage)
+			machineClass := nodePool.MachineClass
+			if machineClass == "" {
+				machineClass = "medium"
+			}
+
 			for i := 0; i < nodePool.Replicas; i++ {
-				virtualMachine := &vitistackv1alpha1.Machine{
+				machine := &vitistackv1alpha1.Machine{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      fmt.Sprintf("%s-wrk%d", clusterId, workerIndex),
 						Namespace: namespace,
@@ -103,8 +141,9 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackv1alpha1.
 					},
 					Spec: vitistackv1alpha1.MachineSpec{
 						Name:         fmt.Sprintf("%s-wrk%d", clusterId, workerIndex),
-						InstanceType: nodePool.MachineClass,
+						InstanceType: machineClass,
 						Provider:     vitistackv1alpha1.MachineProviderType(nodePool.Provider.String()),
+						Disks:        workerDisks,
 						Tags: map[string]string{
 							"cluster":  clusterId,
 							"role":     "worker",
@@ -112,36 +151,99 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackv1alpha1.
 						},
 					},
 				}
-				machines = append(machines, virtualMachine)
+				machines = append(machines, machine)
 				workerIndex++
 			}
 		}
 	} else {
-		// Create default worker nodes if no node pools are specified
-		for i := 0; i < 1; i++ {
-			machine := &vitistackv1alpha1.Machine{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("%s-wrk%d", clusterId, i),
-					Namespace: namespace,
-					Labels: map[string]string{
-						vitistackv1alpha1.ClusterIdAnnotation: clusterId,
-						vitistackv1alpha1.NodeRoleAnnotation:  "worker",
-					},
+		// Create default worker node if no node pools are specified
+		machine := &vitistackv1alpha1.Machine{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("%s-wrk0", clusterId),
+				Namespace: namespace,
+				Labels: map[string]string{
+					vitistackv1alpha1.ClusterIdAnnotation: clusterId,
+					vitistackv1alpha1.NodeRoleAnnotation:  "worker",
 				},
-				Spec: vitistackv1alpha1.MachineSpec{
-					Name:         fmt.Sprintf("%s-wrk%d", clusterId, i),
-					InstanceType: "medium",
-					Tags: map[string]string{
-						"cluster": clusterId,
-						"role":    "worker",
-					},
+			},
+			Spec: vitistackv1alpha1.MachineSpec{
+				Name:         fmt.Sprintf("%s-wrk0", clusterId),
+				InstanceType: "medium",
+				Tags: map[string]string{
+					"cluster": clusterId,
+					"role":    "worker",
 				},
+			},
+		}
+		machines = append(machines, machine)
+	}
+
+	return machines
+}
+
+// convertStorageToDisks converts KubernetesClusterStorage to MachineSpecDisk
+func convertStorageToDisks(storage []vitistackv1alpha1.KubernetesClusterStorage) []vitistackv1alpha1.MachineSpecDisk {
+	if len(storage) == 0 {
+		return nil
+	}
+
+	disks := make([]vitistackv1alpha1.MachineSpecDisk, 0, len(storage))
+	for i, s := range storage {
+		disk := vitistackv1alpha1.MachineSpecDisk{
+			Name: fmt.Sprintf("disk-%d", i),
+			Type: s.Class,
+		}
+
+		// Parse size string (e.g., "20Gi") to GB
+		if s.Size != "" {
+			disk.SizeGB = parseSizeToGB(s.Size)
+		}
+
+		// First disk is the boot disk
+		if i == 0 {
+			disk.Boot = true
+		}
+
+		disks = append(disks, disk)
+	}
+
+	return disks
+}
+
+// sizeMultiplier defines the conversion multiplier to GB for each size suffix
+var sizeMultipliers = map[string]int64{
+	"Gi": 1,    // GiB to GB (approximate)
+	"G":  1,    // GB
+	"Mi": 0,    // MiB to GB (divide by 1024, handled specially)
+	"M":  0,    // MB to GB (divide by 1024, handled specially)
+	"Ti": 1024, // TiB to GB
+	"T":  1024, // TB to GB
+}
+
+// parseSizeToGB converts a size string (e.g., "20Gi", "100G", "50") to GB as int64
+func parseSizeToGB(size string) int64 {
+	if size == "" {
+		return 0
+	}
+	size = strings.TrimSpace(size)
+
+	// Try known suffixes
+	for suffix, multiplier := range sizeMultipliers {
+		var value int64
+		if n, err := fmt.Sscanf(size, "%d"+suffix, &value); err == nil && n == 1 {
+			if multiplier == 0 {
+				return value / 1024 // For Mi and M suffixes
 			}
-			machines = append(machines, machine)
+			return value * multiplier
 		}
 	}
 
-	return machines, nil
+	// Fallback: try to parse as plain integer (assume GB)
+	var value int64
+	if _, err := fmt.Sscanf(size, "%d", &value); err == nil {
+		return value
+	}
+	return 0
 }
 
 // applyMachine creates or updates a Machine resource in Kubernetes

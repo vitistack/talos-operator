@@ -154,25 +154,28 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		}
 	}
 
-	networkNamespace, err := t.findNetworkNamespace(ctx, cluster.GetNamespace())
+	// Determine endpoint mode and get control plane endpoints accordingly
+	endpointIPs, err := t.determineControlPlaneEndpoints(ctx, cluster, controlPlaneIPs)
 	if err != nil {
-		return fmt.Errorf("failed to find network namespace: %w", err)
+		return fmt.Errorf("failed to determine control plane endpoints: %w", err)
 	}
 
 	_ = t.statusManager.SetPhase(ctx, cluster, "ControlPlaneIPsPending")
 	_ = t.statusManager.SetCondition(ctx, cluster, "", "True", "Generated", "Talos client and role configs generated")
 
-	// Create or get ControlPlaneVirtualSharedIP for load balancing
-	// Initially only use the first control plane IP - more will be added after they're configured
-	firstControlPlaneIP := []string{controlPlaneIPs[0]}
-	vipEndpoints, err := t.ensureControlPlaneVIPs(ctx, networkNamespace, cluster, firstControlPlaneIP)
-	if err != nil {
-		return fmt.Errorf("failed to ensure control plane VIP: %w", err)
-	}
-	endpointIPs := vipEndpoints
 	tenantOverrides, err := t.loadTenantOverrides(ctx, cluster)
 	if err != nil {
 		return fmt.Errorf("failed to load tenant overrides: %w", err)
+	}
+
+	// Convert tenant overrides to YAML patches for the new bundle approach
+	var tenantPatches []string
+	if len(tenantOverrides) > 0 {
+		tenantYAML, err := yaml.Marshal(tenantOverrides)
+		if err != nil {
+			return fmt.Errorf("failed to marshal tenant overrides: %w", err)
+		}
+		tenantPatches = []string{string(tenantYAML)}
 	}
 
 	// Prefer existing artifacts from Secret; generate only if missing
@@ -181,26 +184,39 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		return fmt.Errorf("failed to load talos artifacts: %w", err)
 	}
 	if !fromSecret {
-		// Generate Talos configuration
-		genClientCfg, cpYAML, wYAML, err := t.configService.GenerateTalosConfig(cluster, readyMachines, endpointIPs)
+		// Generate Talos configuration using the new bundle approach (like talosctl)
+		configBundle, err := t.configService.GenerateTalosConfigBundle(cluster, endpointIPs, tenantPatches, nil, nil)
 		if err != nil {
-			return fmt.Errorf("failed to generate Talos config: %w", err)
+			return fmt.Errorf("failed to generate Talos config bundle: %w", err)
 		}
-		vlog.Info(fmt.Sprintf("Generated Talos client config: cluster=%s hasConfig=%t", cluster.Name, genClientCfg != nil))
+
+		cpYAML, err := t.configService.SerializeControlPlaneConfig(configBundle.Bundle)
+		if err != nil {
+			return fmt.Errorf("failed to serialize control plane config: %w", err)
+		}
+
+		wYAML, err := t.configService.SerializeWorkerConfig(configBundle.Bundle)
+		if err != nil {
+			return fmt.Errorf("failed to serialize worker config: %w", err)
+		}
+
+		// Serialize the secrets bundle for persistence
+		secretsBundleYAML, err := t.configService.SerializeSecretsBundle(configBundle.SecretsBundle)
+		if err != nil {
+			return fmt.Errorf("failed to serialize secrets bundle: %w", err)
+		}
+
+		vlog.Info(fmt.Sprintf("Generated Talos config bundle: cluster=%s hasConfig=%t", cluster.Name, configBundle.ClientConfig != nil))
 		// Update status phase: config generated
 		_ = t.statusManager.SetPhase(ctx, cluster, "ConfigGenerated")
 		_ = t.statusManager.SetCondition(ctx, cluster, "ConfigGenerated", "True", "Generated", "Talos client and role configs generated")
-		// Persist initial Talos configs into a Secret (without kubeconfig yet)
-		if err := t.upsertTalosClusterConfigSecretWithRoleYAML(ctx, cluster, genClientCfg, cpYAML, wYAML, nil /* kubeconfig */); err != nil {
+		// Persist initial Talos configs into a Secret (with secrets bundle, without kubeconfig yet)
+		if err := t.upsertTalosClusterConfigSecretWithRoleYAML(ctx, cluster, configBundle.ClientConfig, cpYAML, wYAML, secretsBundleYAML, nil /* kubeconfig */); err != nil {
 			return fmt.Errorf("failed to persist Talos config secret: %w", err)
 		}
-		clientConfig = genClientCfg
+		clientConfig = configBundle.ClientConfig
 	} else {
 		vlog.Info("Loaded Talos artifacts from Secret: cluster=" + cluster.Name)
-	}
-
-	if err := t.persistTenantRoleTemplates(ctx, cluster, tenantOverrides); err != nil {
-		return fmt.Errorf("failed to persist tenant role templates: %w", err)
 	}
 
 	// Use insecure connections only until Talos API is confirmed ready with certificates
@@ -262,13 +278,13 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	flags, _ = t.getTalosSecretFlags(ctx, cluster)
 
 	if !flags.FirstControlPlaneReady {
-		vlog.Info(fmt.Sprintf("Stage 2a: Waiting for first control plane Talos API: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+		vlog.Info(fmt.Sprintf("Stage 2a: Checking if first control plane Talos API is ready: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
 		_ = t.statusManager.SetPhase(ctx, cluster, "WaitingForFirstControlPlaneAPI")
 		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneTalosAPIReady", "False", "Waiting", "Waiting for Talos API on first control plane")
 
-		if err := t.clientService.WaitForTalosAPIs([]*vitistackv1alpha1.Machine{firstControlPlane}, 10*time.Minute, 10*time.Second); err != nil {
-			_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneTalosAPIReady", "False", "NotReady", err.Error())
-			return fmt.Errorf("first control plane not ready: %w", err)
+		// Non-blocking check - if not ready, return RequeueError to let controller retry later
+		if !t.clientService.AreTalosAPIsReady([]*vitistackv1alpha1.Machine{firstControlPlane}) {
+			return talosclientservice.NewRequeueError("first control plane Talos API not ready yet", 10*time.Second)
 		}
 
 		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"first_controlplane_ready": true}); err != nil {
@@ -364,13 +380,15 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	flags, _ = t.getTalosSecretFlags(ctx, cluster)
 
 	if !flags.ControlPlaneApplied {
-		if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, remainingControlPlanes, insecure, tenantOverrides, endpointIPs[0], &nodeGroupConfig{
+		// Remaining control planes need insecure mode for initial configuration since they don't have the cluster CA yet
+		if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, remainingControlPlanes, true, tenantOverrides, endpointIPs[0], &nodeGroupConfig{
 			stageNum:      3,
 			nodeType:      "control plane",
 			phase:         "ConfiguringRemainingControlPlanes",
 			conditionName: "ControlPlaneConfigApplied",
 			flagName:      "controlplane_applied",
 			stopOnError:   true,
+			waitForReboot: true, // Wait for each control plane to reboot before continuing
 		}); err != nil {
 			return err
 		}
@@ -385,40 +403,59 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 		vlog.Info("Stage 3 already complete: All control plane configs already applied, skipping: cluster=" + cluster.Name)
 	}
 
-	// Wait for all control planes to be ready before configuring workers
-	vlog.Info(fmt.Sprintf("Waiting for all control plane Talos APIs: count=%d cluster=%s", len(controlPlanes), cluster.Name))
-	if err := t.clientService.WaitForTalosAPIs(controlPlanes, 10*time.Minute, 10*time.Second); err != nil {
-		_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "False", "NotReady", err.Error())
-		return fmt.Errorf("control planes not ready: %w", err)
-	}
-	_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "True", "Ready", "Talos API reachable on all control planes")
+	// Re-fetch flags after potential update
+	flags, _ = t.getTalosSecretFlags(ctx, cluster)
 
-	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"talos_api_ready": true}); err != nil {
-		vlog.Error("Failed to set talos_api_ready flag in secret", err)
+	// Check if all control planes Talos APIs are ready before configuring workers
+	if !flags.TalosAPIReady {
+		vlog.Info(fmt.Sprintf("Checking if all control plane Talos APIs are ready: count=%d cluster=%s", len(controlPlanes), cluster.Name))
+		_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "False", "Waiting", "Waiting for Talos API on all control planes")
+
+		// Non-blocking check - if not ready, return RequeueError to let controller retry later
+		if !t.clientService.AreTalosAPIsReady(controlPlanes) {
+			return talosclientservice.NewRequeueError("control planes Talos APIs not all ready yet", 10*time.Second)
+		}
+
+		_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "True", "Ready", "Talos API reachable on all control planes")
+		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"talos_api_ready": true}); err != nil {
+			vlog.Error("Failed to set talos_api_ready flag in secret", err)
+		}
 	}
 
-	// Wait for Kubernetes API server to be ready before configuring workers
+	// Re-fetch flags after potential update
+	flags, _ = t.getTalosSecretFlags(ctx, cluster)
+
+	// Check if Kubernetes API server is ready before configuring workers
 	// This ensures workers can successfully connect to the control plane
-	vlog.Info(fmt.Sprintf("Waiting for Kubernetes API server to be ready: endpoint=%s cluster=%s", endpointIPs[0], cluster.Name))
-	_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "False", "Waiting", "Waiting for Kubernetes API server to be ready")
-	if err := t.clientService.WaitForKubernetesAPIReady(endpointIPs[0], 5*time.Minute, 10*time.Second); err != nil {
-		_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "False", "NotReady", err.Error())
-		return fmt.Errorf("kubernetes API server not ready: %w", err)
+	if !flags.KubernetesAPIReady {
+		vlog.Info(fmt.Sprintf("Checking if Kubernetes API server is ready: endpoint=%s cluster=%s", endpointIPs[0], cluster.Name))
+		_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "False", "Waiting", "Waiting for Kubernetes API server to be ready")
+
+		// Non-blocking check - if not ready, return RequeueError to let controller retry later
+		if !t.clientService.IsKubernetesAPIReady(endpointIPs[0]) {
+			return talosclientservice.NewRequeueError("kubernetes API server not ready yet", 5*time.Second)
+		}
+
+		_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "True", "Ready", "Kubernetes API server is ready")
+		if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"kubernetes_api_ready": true}); err != nil {
+			vlog.Error("Failed to set kubernetes_api_ready flag in secret", err)
+		}
 	}
-	_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "True", "Ready", "Kubernetes API server is ready")
 
 	// Stage 4: Apply config to workers (after control planes are ready)
 	// Re-fetch flags after potential update
 	flags, _ = t.getTalosSecretFlags(ctx, cluster)
 
 	if !flags.WorkerApplied {
-		if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, workers, insecure, tenantOverrides, endpointIPs[0], &nodeGroupConfig{
+		// Workers always need insecure mode for initial configuration since they don't have the cluster CA yet
+		if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, workers, true, tenantOverrides, endpointIPs[0], &nodeGroupConfig{
 			stageNum:      4,
 			nodeType:      "worker",
 			phase:         "ConfiguringWorkers",
 			conditionName: "WorkerConfigApplied",
 			flagName:      "worker_applied",
 			stopOnError:   true,
+			waitForReboot: true, // Wait for each worker to reboot before continuing
 		}); err != nil {
 			return err
 		}
@@ -543,6 +580,7 @@ func (t *TalosManager) loadTalosArtifacts(ctx context.Context, cluster *vitistac
 			return nil, false, fmt.Errorf("failed to unmarshal talosconfig from secret: %w", err)
 		}
 	}
+
 	cp := secret.Data["controlplane.yaml"]
 	w := secret.Data["worker.yaml"]
 	if cfg != nil && len(cp) > 0 && len(w) > 0 {
@@ -558,6 +596,7 @@ type talosSecretFlags struct {
 	Bootstrapped             bool
 	ClusterAccess            bool
 	TalosAPIReady            bool // tracks when Talos API accepts secure (non-insecure) connections
+	KubernetesAPIReady       bool // tracks when Kubernetes API server is reachable
 	FirstControlPlaneApplied bool // tracks if the first control plane has config applied
 	FirstControlPlaneReady   bool // tracks if the first control plane is ready (API reachable)
 }
@@ -583,6 +622,7 @@ func parseSecretFlags(data map[string][]byte) talosSecretFlags {
 	flags.Bootstrapped = isFlagTrue(data, "bootstrapped")
 	flags.ClusterAccess = parseClusterAccessFlag(data)
 	flags.TalosAPIReady = isFlagTrue(data, "talos_api_ready")
+	flags.KubernetesAPIReady = isFlagTrue(data, "kubernetes_api_ready")
 	flags.FirstControlPlaneApplied = isFlagTrue(data, "first_controlplane_applied")
 	flags.FirstControlPlaneReady = isFlagTrue(data, "first_controlplane_ready")
 
@@ -784,56 +824,122 @@ func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitista
 	return overrides, nil
 }
 
-func (t *TalosManager) persistTenantRoleTemplates(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, tenantOverrides map[string]any) error {
-	if len(tenantOverrides) == 0 {
-		return nil
+// determineControlPlaneEndpoints determines the control plane endpoints based on the configured endpoint mode.
+// Supported modes:
+// - "none": Use control plane IPs directly (no load balancing)
+// - "networkconfiguration": Use ControlPlaneVirtualSharedIP from NetworkNamespace (default)
+// - "talosvip": Use Talos built-in VIP (requires additional Talos configuration)
+// - "custom": Use user-provided endpoint addresses from CUSTOM_ENDPOINT environment variable
+func (t *TalosManager) determineControlPlaneEndpoints(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
+	endpointMode := consts.EndpointMode(viper.GetString(consts.ENDPOINT_MODE))
+
+	// Validate endpoint mode
+	if !consts.IsValidEndpointMode(string(endpointMode)) {
+		vlog.Warn(fmt.Sprintf("Invalid endpoint mode '%s', falling back to default '%s'", endpointMode, consts.DefaultEndpointMode))
+		endpointMode = consts.DefaultEndpointMode
 	}
 
-	maxRetries := 3
-	for attempt := range maxRetries {
-		secret, err := t.secretService.GetTalosSecret(ctx, cluster)
-		if err != nil {
-			return err
-		}
-		if secret.Data == nil {
-			secret.Data = map[string][]byte{}
-		}
+	vlog.Info(fmt.Sprintf("Using endpoint mode: %s for cluster %s", endpointMode, cluster.Name))
 
-		cp := secret.Data["controlplane.yaml"]
-		w := secret.Data["worker.yaml"]
-		if len(cp) == 0 && len(w) == 0 {
-			return nil
-		}
+	switch endpointMode {
+	case consts.EndpointModeNone:
+		return t.getEndpointsNone(controlPlaneIPs)
 
-		updated := false
-		if mergedCP, err := t.configService.MergeRoleTemplateWithOverrides(cp, tenantOverrides); err != nil {
-			return err
-		} else if len(mergedCP) > 0 {
-			secret.Data["controlplane-tenant.yaml"] = mergedCP
-			updated = true
-		}
-		if mergedWorker, err := t.configService.MergeRoleTemplateWithOverrides(w, tenantOverrides); err != nil {
-			return err
-		} else if len(mergedWorker) > 0 {
-			secret.Data["worker-tenant.yaml"] = mergedWorker
-			updated = true
-		}
+	case consts.EndpointModeNetworkConfiguration:
+		return t.getEndpointsNetworkConfiguration(ctx, cluster, controlPlaneIPs)
 
-		if !updated {
-			return nil
-		}
+	case consts.EndpointModeTalosVIP:
+		return t.getEndpointsTalosVIP(ctx, cluster, controlPlaneIPs)
 
-		if err := t.secretService.UpdateTalosSecret(ctx, secret); err != nil {
-			if apierrors.IsConflict(err) && attempt < maxRetries-1 {
-				time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
-				continue
-			}
-			return err
-		}
-		return nil
+	case consts.EndpointModeCustom:
+		return t.getEndpointsCustom()
+
+	default:
+		// This shouldn't happen due to validation above, but handle it gracefully
+		return t.getEndpointsNetworkConfiguration(ctx, cluster, controlPlaneIPs)
+	}
+}
+
+// getEndpointsNone returns control plane IPs directly without any load balancing.
+// This is the simplest mode but provides no HA for the control plane endpoint.
+func (t *TalosManager) getEndpointsNone(controlPlaneIPs []string) ([]string, error) {
+	if len(controlPlaneIPs) == 0 {
+		return nil, fmt.Errorf("no control plane IPs available for endpoint mode 'none'")
+	}
+	vlog.Info(fmt.Sprintf("Endpoint mode 'none': using control plane IP directly: %s", controlPlaneIPs[0]))
+	// Return first control plane IP as endpoint
+	return []string{controlPlaneIPs[0]}, nil
+}
+
+// getEndpointsNetworkConfiguration uses the NetworkNamespace's ControlPlaneVirtualSharedIP
+// to obtain load balancer IPs. This is the default and recommended mode.
+func (t *TalosManager) getEndpointsNetworkConfiguration(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
+	networkNamespace, err := t.findNetworkNamespace(ctx, cluster.GetNamespace())
+	if err != nil {
+		return nil, fmt.Errorf("failed to find network namespace: %w", err)
 	}
 
-	return fmt.Errorf("failed to persist tenant role templates after %d retries", maxRetries)
+	if networkNamespace == nil {
+		vlog.Warn("No NetworkNamespace found, falling back to direct control plane IPs")
+		return []string{controlPlaneIPs[0]}, nil
+	}
+
+	// Create or get ControlPlaneVirtualSharedIP for load balancing
+	// Initially only use the first control plane IP - more will be added after they're configured
+	firstControlPlaneIP := []string{controlPlaneIPs[0]}
+	vipEndpoints, err := t.ensureControlPlaneVIPs(ctx, networkNamespace, cluster, firstControlPlaneIP)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure control plane VIP: %w", err)
+	}
+
+	vlog.Info(fmt.Sprintf("Endpoint mode 'networkconfiguration': using VIP endpoints: %v", vipEndpoints))
+	return vipEndpoints, nil
+}
+
+// getEndpointsTalosVIP returns endpoints for Talos built-in VIP mode.
+// In this mode, the operator uses the control plane IPs directly, but Talos
+// handles VIP failover internally through its machine config.
+// Note: The actual VIP configuration should be added to tenant config overrides.
+func (t *TalosManager) getEndpointsTalosVIP(_ context.Context, _ *vitistackv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
+	if len(controlPlaneIPs) == 0 {
+		return nil, fmt.Errorf("no control plane IPs available for endpoint mode 'talosvip'")
+	}
+
+	// For Talos VIP mode, we need to check if a custom VIP is configured in tenant overrides
+	// The VIP address should be configured in the Talos machine config via tenant overrides
+	// For now, use the first control plane IP as the endpoint
+	// The actual VIP will be handled by Talos' internal VIP mechanism
+	vlog.Info(fmt.Sprintf("Endpoint mode 'talosvip': using first control plane IP: %s (Talos VIP should be configured in machine config)", controlPlaneIPs[0]))
+	vlog.Warn("Talos VIP mode requires additional configuration in tenant overrides to set the VIP address")
+
+	// Return first control plane IP - the actual VIP address should be in the Talos config
+	return []string{controlPlaneIPs[0]}, nil
+}
+
+// getEndpointsCustom returns user-provided endpoint addresses from the CUSTOM_ENDPOINT environment variable.
+// This allows users to specify their own load balancer or VIP addresses.
+func (t *TalosManager) getEndpointsCustom() ([]string, error) {
+	customEndpoint := strings.TrimSpace(viper.GetString(consts.CUSTOM_ENDPOINT))
+	if customEndpoint == "" {
+		return nil, fmt.Errorf("endpoint mode 'custom' requires CUSTOM_ENDPOINT environment variable to be set")
+	}
+
+	// Parse comma-separated endpoints
+	endpoints := strings.Split(customEndpoint, ",")
+	var validEndpoints []string
+	for _, ep := range endpoints {
+		ep = strings.TrimSpace(ep)
+		if ep != "" {
+			validEndpoints = append(validEndpoints, ep)
+		}
+	}
+
+	if len(validEndpoints) == 0 {
+		return nil, fmt.Errorf("no valid endpoints found in CUSTOM_ENDPOINT: %s", customEndpoint)
+	}
+
+	vlog.Info(fmt.Sprintf("Endpoint mode 'custom': using custom endpoints: %v", validEndpoints))
+	return validEndpoints, nil
 }
 
 // ensureControlPlaneVIPs creates or updates a ControlPlaneVirtualSharedIP resource and waits for LoadBalancerIps
@@ -1108,6 +1214,13 @@ func (t *TalosManager) reconcileNewNodes(ctx context.Context, cluster *vitistack
 
 // updateVIPPoolMembers updates the VIP with current control plane IPs
 func (t *TalosManager) updateVIPPoolMembers(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	// Only update VIP pool members if using networkconfiguration endpoint mode
+	endpointMode := consts.EndpointMode(viper.GetString(consts.ENDPOINT_MODE))
+	if endpointMode != consts.EndpointModeNetworkConfiguration {
+		vlog.Info(fmt.Sprintf("Skipping VIP pool member update: endpoint mode is '%s', not 'networkconfiguration'", endpointMode))
+		return nil
+	}
+
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
 	if err != nil {
 		return err
@@ -1119,6 +1232,10 @@ func (t *TalosManager) updateVIPPoolMembers(ctx context.Context, cluster *vitist
 	vipName := cluster.Spec.Cluster.ClusterId
 	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
 	if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip); err != nil {
+		if apierrors.IsNotFound(err) {
+			vlog.Warn(fmt.Sprintf("VIP %s not found, skipping pool member update", vipName))
+			return nil
+		}
 		return err
 	}
 
@@ -1141,6 +1258,7 @@ type nodeGroupConfig struct {
 	conditionName string
 	flagName      string
 	stopOnError   bool
+	waitForReboot bool // whether to wait for node to reboot after applying config
 }
 
 // applyConfigToMachineGroup applies configuration to a group of machines (control planes or workers)
@@ -1165,7 +1283,14 @@ func (t *TalosManager) applyConfigToMachineGroup(
 				continue
 			}
 
-			vlog.Info(fmt.Sprintf("Applying config to %s: node=%s", cfg.nodeType, m.Name))
+			// Get node IP for logging and waiting
+			nodeIP := getFirstIPv4(m)
+			if nodeIP == "" {
+				vlog.Warn(fmt.Sprintf("No IPv4 address found for %s %s, skipping", cfg.nodeType, m.Name))
+				continue
+			}
+
+			vlog.Info(fmt.Sprintf("Applying config to %s: node=%s ip=%s", cfg.nodeType, m.Name, nodeIP))
 			if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{m}, insecure, tenantOverrides, endpointIP); err != nil {
 				_ = t.statusManager.SetCondition(ctx, cluster, cfg.conditionName, "False", "ApplyError", fmt.Sprintf("Failed on node %s: %s", m.Name, err.Error()))
 				if cfg.stopOnError {
@@ -1174,6 +1299,17 @@ func (t *TalosManager) applyConfigToMachineGroup(
 				vlog.Error(fmt.Sprintf("Failed to apply config to %s %s", cfg.nodeType, m.Name), err)
 				continue
 			}
+
+			// Wait for node to reboot and come back up if configured
+			// This is important for maintenance mode nodes that install and reboot after receiving config
+			if cfg.waitForReboot && insecure {
+				vlog.Info(fmt.Sprintf("Waiting for %s to reboot after config apply: node=%s ip=%s", cfg.nodeType, m.Name, nodeIP))
+				if err := t.clientService.WaitForNodeRebootAfterApply(nodeIP, 10*time.Second, 5*time.Minute, 10*time.Second); err != nil {
+					vlog.Warn(fmt.Sprintf("Warning: timeout waiting for %s %s to reboot, continuing anyway: %v", cfg.nodeType, m.Name, err))
+					// Don't fail here - the node might still come up, and the controller will handle it
+				}
+			}
+
 			if err := t.addConfiguredNode(ctx, cluster, m.Name); err != nil {
 				vlog.Error(fmt.Sprintf("Failed to add %s %s to configured nodes", cfg.nodeType, m.Name), err)
 			}
@@ -1286,20 +1422,62 @@ func (t *TalosManager) loadNewNodeConfigContext(ctx context.Context, cluster *vi
 		return nil, fmt.Errorf("failed to load tenant overrides: %w", err)
 	}
 
-	vipName := cluster.Spec.Cluster.ClusterId
-	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
-	if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip); err != nil {
-		return nil, fmt.Errorf("failed to get VIP for new node configuration: %w", err)
-	}
-	if len(vip.Status.LoadBalancerIps) == 0 {
-		return nil, fmt.Errorf("VIP has no LoadBalancerIps, cannot configure new nodes")
+	// Determine endpoint IP based on endpoint mode
+	endpointIP, err := t.getEndpointIPForNewNodes(ctx, cluster)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get endpoint IP for new nodes: %w", err)
 	}
 
 	return &newNodeConfigContext{
 		clientConfig:    clientConfig,
 		tenantOverrides: tenantOverrides,
-		endpointIP:      vip.Status.LoadBalancerIps[0],
+		endpointIP:      endpointIP,
 	}, nil
+}
+
+// getEndpointIPForNewNodes returns the endpoint IP to use when configuring new nodes.
+// It respects the configured endpoint mode.
+func (t *TalosManager) getEndpointIPForNewNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (string, error) {
+	endpointMode := consts.EndpointMode(viper.GetString(consts.ENDPOINT_MODE))
+
+	switch endpointMode {
+	case consts.EndpointModeNone, consts.EndpointModeTalosVIP:
+		// For 'none' and 'talosvip' modes, get the first control plane IP
+		machines, err := t.machineService.GetClusterMachines(ctx, cluster)
+		if err != nil {
+			return "", fmt.Errorf("failed to get cluster machines: %w", err)
+		}
+		controlPlanes := t.machineService.FilterMachinesByRole(machines, controlPlaneRole)
+		controlPlaneIPs := extractIPv4Addresses(controlPlanes)
+		if len(controlPlaneIPs) == 0 {
+			return "", fmt.Errorf("no control plane IPs found")
+		}
+		return controlPlaneIPs[0], nil
+
+	case consts.EndpointModeCustom:
+		// For 'custom' mode, use the configured custom endpoint
+		customEndpoint := strings.TrimSpace(viper.GetString(consts.CUSTOM_ENDPOINT))
+		if customEndpoint == "" {
+			return "", fmt.Errorf("CUSTOM_ENDPOINT not set for endpoint mode 'custom'")
+		}
+		// Return first endpoint if comma-separated
+		endpoints := strings.Split(customEndpoint, ",")
+		return strings.TrimSpace(endpoints[0]), nil
+
+	case consts.EndpointModeNetworkConfiguration:
+		fallthrough
+	default:
+		// For 'networkconfiguration' mode, get from VIP
+		vipName := cluster.Spec.Cluster.ClusterId
+		vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
+		if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip); err != nil {
+			return "", fmt.Errorf("failed to get VIP for new node configuration: %w", err)
+		}
+		if len(vip.Status.LoadBalancerIps) == 0 {
+			return "", fmt.Errorf("VIP has no LoadBalancerIps, cannot configure new nodes")
+		}
+		return vip.Status.LoadBalancerIps[0], nil
+	}
 }
 
 // configureNewControlPlanes configures new control plane nodes
@@ -1355,7 +1533,8 @@ func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv
 	}
 
 	vlog.Info(fmt.Sprintf("Applying config to new %s: node=%s ip=%s", nodeType, node.Name, ip))
-	if err := t.applyPerNodeConfiguration(ctx, cluster, configCtx.clientConfig, []*vitistackv1alpha1.Machine{node}, false, configCtx.tenantOverrides, configCtx.endpointIP); err != nil {
+	// Use insecure mode for new nodes - they don't have the cluster CA yet
+	if err := t.applyPerNodeConfiguration(ctx, cluster, configCtx.clientConfig, []*vitistackv1alpha1.Machine{node}, true, configCtx.tenantOverrides, configCtx.endpointIP); err != nil {
 		return fmt.Errorf("failed to apply config: %w", err)
 	}
 	if err := t.addConfiguredNode(ctx, cluster, node.Name); err != nil {
@@ -1422,13 +1601,14 @@ func applyDataToSecret(secret *corev1.Secret, data map[string][]byte) {
 	}
 }
 
-// upsertTalosClusterConfigSecretWithRoleYAML creates/updates the consolidated Secret with talosconfig and role templates.
+// upsertTalosClusterConfigSecretWithRoleYAML creates/updates the consolidated Secret with talosconfig, secrets bundle, and role templates.
 func (t *TalosManager) upsertTalosClusterConfigSecretWithRoleYAML(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientCfg *clientconfig.Config,
 	controlPlaneYAML []byte,
 	workerYAML []byte,
+	secretsBundleYAML []byte,
 	kubeconfig []byte,
 ) error {
 	secret, err := t.secretService.GetTalosSecret(ctx, cluster)
@@ -1444,6 +1624,10 @@ func (t *TalosManager) upsertTalosClusterConfigSecretWithRoleYAML(
 	}
 	if len(workerYAML) > 0 {
 		data["worker.yaml"] = workerYAML
+	}
+	// Store the secrets bundle for future regeneration of configs
+	if len(secretsBundleYAML) > 0 {
+		data["secrets.bundle"] = secretsBundleYAML
 	}
 	if len(kubeconfig) > 0 {
 		data["kube.config"] = kubeconfig

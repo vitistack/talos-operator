@@ -3,6 +3,7 @@ package talosclientservice
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -15,10 +16,34 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/resources/k8s"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
-	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 type TalosClientService struct{}
+
+// RequeueError signals that the reconciler should requeue without treating it as a failure.
+// This allows non-blocking waits by returning early and letting the controller retry.
+type RequeueError struct {
+	Reason   string
+	Duration time.Duration
+}
+
+func (e *RequeueError) Error() string {
+	return fmt.Sprintf("requeue needed: %s (after %v)", e.Reason, e.Duration)
+}
+
+// NewRequeueError creates a new RequeueError with the specified reason and duration.
+func NewRequeueError(reason string, duration time.Duration) *RequeueError {
+	return &RequeueError{Reason: reason, Duration: duration}
+}
+
+// IsRequeueError checks if the error is a RequeueError and returns it if so.
+func IsRequeueError(err error) (*RequeueError, bool) {
+	var requeueErr *RequeueError
+	if errors.As(err, &requeueErr) {
+		return requeueErr, true
+	}
+	return nil, false
+}
 
 func NewTalosClientService() *TalosClientService {
 	return &TalosClientService{}
@@ -41,8 +66,9 @@ func (s *TalosClientService) CreateTalosClient(
 			return nil, fmt.Errorf("failed to create secure Talos client: %w", err)
 		}
 	} else {
+		// For insecure mode (maintenance/unconfigured nodes), do NOT use WithConfig
+		// as the node doesn't have the cluster CA yet and doesn't require client auth
 		tClient, err = talosclient.New(ctx,
-			talosclient.WithConfig(clientConfig),
 			talosclient.WithTLSConfig(&tls.Config{
 				InsecureSkipVerify: true, // #nosec G402
 			}),
@@ -65,20 +91,110 @@ func (s *TalosClientService) ApplyConfigToNode(
 	if err != nil {
 		return fmt.Errorf("failed to create Talos client: %w", err)
 	}
+	defer func() { _ = nodeClient.Close() }()
 
+	// For nodes in maintenance mode (insecure=true), the maintenance server only
+	// accepts AUTO, TRY, or REBOOT modes. TryModeTimeout is only relevant for TRY mode.
+	// When applying to a maintenance node, the node will install and reboot automatically.
+	//
+	// This matches the behavior of `talosctl apply-config --insecure`:
+	// - The maintenance server receives the config
+	// - Validates it
+	// - Applies it (which triggers install and reboot)
+	//
+	// See: https://github.com/siderolabs/talos/blob/main/internal/app/maintenance/server.go
 	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
 	resp, err := nodeClient.ApplyConfiguration(nodeCtx, &machineapi.ApplyConfigurationRequest{
-		Data:           configData,
-		Mode:           machineapi.ApplyConfigurationRequest_AUTO,
-		DryRun:         false,
-		TryModeTimeout: durationpb.New(2 * time.Minute),
+		Data:   configData,
+		Mode:   machineapi.ApplyConfigurationRequest_AUTO,
+		DryRun: false,
+		// Note: TryModeTimeout is not set as it's only applicable for TRY mode
+		// and maintenance mode doesn't support NO_REBOOT or STAGED modes
 	})
 	if err != nil {
-		return fmt.Errorf("error applying configuration: %w", err)
+		return fmt.Errorf("error applying configuration to node %s: %w", nodeIP, err)
 	}
 
-	vlog.Info(fmt.Sprintf("Talos apply configuration response: node=%s messages=%v", nodeIP, resp.Messages))
+	// Log response details for debugging
+	for _, msg := range resp.Messages {
+		details := ""
+		if msg.ModeDetails != "" {
+			details = fmt.Sprintf(" details=%s", msg.ModeDetails)
+		}
+		warnings := ""
+		if len(msg.Warnings) > 0 {
+			warnings = fmt.Sprintf(" warnings=%v", msg.Warnings)
+		}
+		vlog.Info(fmt.Sprintf("Talos apply configuration response: node=%s mode=%s%s%s",
+			nodeIP, msg.Mode.String(), details, warnings))
+	}
 	return nil
+}
+
+// WaitForNodeRebootAfterApply waits for a node to go down and come back up after applying configuration.
+// This is important for maintenance mode nodes that will install and reboot after receiving config.
+// The function first waits for the API to become unreachable (node rebooting), then waits for it to become reachable again.
+//
+// Parameters:
+//   - nodeIP: The IP address of the node
+//   - initialWait: Time to wait before starting to check (allows reboot to begin)
+//   - timeout: Maximum time to wait for the node to come back up
+//   - interval: Time between reachability checks
+//
+// Returns nil if the node comes back up, or an error if timeout is exceeded.
+func (s *TalosClientService) WaitForNodeRebootAfterApply(
+	nodeIP string,
+	initialWait time.Duration,
+	timeout time.Duration,
+	interval time.Duration) error {
+	addr := net.JoinHostPort(nodeIP, "50000")
+
+	// Wait for initial period to allow the node to start rebooting
+	vlog.Info(fmt.Sprintf("Waiting %v for node to begin reboot: node=%s", initialWait, nodeIP))
+	time.Sleep(initialWait)
+
+	// First, optionally wait for the node to go down (become unreachable)
+	// This is a quick check - we don't wait long because some nodes might already be rebooting
+	downCheckDeadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(downCheckDeadline) {
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			vlog.Info(fmt.Sprintf("Node is rebooting (API unreachable): node=%s", nodeIP))
+			break
+		}
+		_ = conn.Close()
+		time.Sleep(2 * time.Second)
+	}
+
+	// Now wait for the node to come back up
+	deadline := time.Now().Add(timeout)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for node %s to come back up after reboot", nodeIP)
+		}
+
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			vlog.Info(fmt.Sprintf("Node still rebooting: node=%s error=%s", nodeIP, err.Error()))
+			time.Sleep(interval)
+			continue
+		}
+		_ = conn.Close()
+
+		vlog.Info(fmt.Sprintf("Node is back up after reboot: node=%s", nodeIP))
+		return nil
+	}
+}
+
+// IsTalosAPIReachable performs a single non-blocking check to see if a Talos API is reachable on a specific IP.
+func (s *TalosClientService) IsTalosAPIReachable(nodeIP string) bool {
+	addr := net.JoinHostPort(nodeIP, "50000")
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func (s *TalosClientService) WaitForTalosAPIs(
@@ -144,6 +260,40 @@ func (s *TalosClientService) WaitForKubernetesAPIReady(
 		vlog.Info("Kubernetes API server is reachable: endpoint=" + addr)
 		return nil
 	}
+}
+
+// IsKubernetesAPIReady performs a single non-blocking check to see if the Kubernetes API server is reachable.
+// Returns true if reachable, false otherwise. This is the non-blocking alternative to WaitForKubernetesAPIReady.
+func (s *TalosClientService) IsKubernetesAPIReady(endpointIP string) bool {
+	addr := net.JoinHostPort(endpointIP, "6443")
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		vlog.Info("Kubernetes API not reachable: endpoint=" + addr + " error=" + err.Error())
+		return false
+	}
+	_ = conn.Close()
+	vlog.Info("Kubernetes API server is reachable: endpoint=" + addr)
+	return true
+}
+
+// AreTalosAPIsReady performs a single non-blocking check to see if all Talos APIs are reachable.
+// Returns true if all are reachable, false otherwise. This is the non-blocking alternative to WaitForTalosAPIs.
+func (s *TalosClientService) AreTalosAPIsReady(machines []*vitistackv1alpha1.Machine) bool {
+	for _, m := range machines {
+		if m == nil || len(m.Status.PublicIPAddresses) == 0 {
+			return false
+		}
+		ip := m.Status.PublicIPAddresses[0]
+		addr := net.JoinHostPort(ip, "50000")
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			vlog.Info("Talos API not reachable: node=" + m.Name + " addr=" + addr + " error=" + err.Error())
+			return false
+		}
+		_ = conn.Close()
+	}
+	vlog.Info(fmt.Sprintf("All %d Talos APIs are reachable", len(machines)))
+	return true
 }
 
 func (s *TalosClientService) BootstrapTalosControlPlane(

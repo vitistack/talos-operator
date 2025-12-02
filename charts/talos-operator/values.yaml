@@ -19,6 +19,48 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Talos Operator Configuration
+config:
+  # Endpoint mode determines how the operator configures control plane endpoints.
+  # Valid values:
+  # - "none": Use control plane IPs directly (no load balancing)
+  # - "networkconfiguration": Use ControlPlaneVirtualSharedIP from NetworkNamespace (default)
+  # - "talosvip": Use Talos built-in VIP (requires additional Talos configuration)
+  # - "custom": Use user-provided endpoint addresses
+  endpointMode: "networkconfiguration"
+
+  # Custom endpoint addresses (only used when endpointMode is "custom")
+  # Can be a single IP/hostname or comma-separated list
+  customEndpoint: ""
+
+  # Log configuration
+  logLevel: "info"
+  logJson: true
+
+  # Secret prefix for cluster secrets
+  secretPrefix: ""
+
+  # Vitistack name
+  vitistackName: "vitistack"
+
+  # Kubernetes provider name
+  kubernetesProviderName: "talos-provider"
+
+  # Tenant configuration
+  tenant:
+    configMapName: "talos-tenant-config"
+    configMapNamespace: "default"
+    configMapDataKey: "config.yaml"
+
+  # Talos configuration
+  talos:
+    version: "v1.11.5"
+    defaultKubernetesVersion: "1.34.1"
+    predictableNetworkNames: true
+    vmInstallImage:
+      kubevirt: "factory.talos.dev/metal-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.11.5"
+      default: "factory.talos.dev/metal-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.11.5"
+
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
   # Specifies whether a service account should be created

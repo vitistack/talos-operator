@@ -12,6 +12,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
+	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,7 +36,8 @@ type KubernetesClusterReconciler struct {
 }
 
 const (
-	KubernetesClusterFinalizer = "kubernetescluster.vitistack.io/finalizer"
+	KubernetesClusterFinalizer               = "kubernetescluster.vitistack.io/finalizer"
+	ControllerRequeueDelay     time.Duration = 5 * time.Second
 )
 
 // +kubebuilder:rbac:groups=vitistack.io,resources=kubernetesclusters,verbs=get;list;watch;create;update;patch;delete
@@ -77,14 +79,19 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Reconcile machines based on cluster spec
 	if err := r.MachineManager.ReconcileMachines(ctx, kubernetesCluster); err != nil {
 		vlog.Error("Failed to reconcile machines", err)
-		return ctrl.Result{}, err
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
 	// Reconcile Talos cluster after machines are created
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, kubernetesCluster); err != nil {
+		// Check if this is a RequeueError (non-blocking wait signal)
+		if requeueErr, ok := talosclientservice.IsRequeueError(err); ok {
+			vlog.Info("Talos cluster reconcile needs requeue: " + requeueErr.Reason)
+			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
+		}
 		vlog.Warn("Failed to reconcile Talos cluster ", err)
 		// Requeue for a later retry without surfacing an error
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
 	// Update KubernetesCluster status (skip if being deleted)
@@ -94,7 +101,7 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 }
 
 // isTalosProvider returns true if spec.data.provider == "talos"
@@ -146,7 +153,8 @@ func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vi
 	}
 
 	if err := r.performCleanup(ctx, kc); err != nil {
-		return ctrl.Result{}, err
+		vlog.Error("Failed to perform cleanup, will retry", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
 	return r.removeFinalizer(ctx, kc)
@@ -219,9 +227,11 @@ func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *v
 			vlog.Warn("Conflict removing finalizer, retrying...")
 			continue
 		}
-		return ctrl.Result{}, err
+		vlog.Error("Failed to remove finalizer, will retry", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
-	return ctrl.Result{}, fmt.Errorf("failed to remove finalizer after %d retries", maxRetries)
+	vlog.Warn(fmt.Sprintf("Failed to remove finalizer after %d retries, will retry later", maxRetries))
+	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 }
 
 // getFreshCluster retrieves a fresh copy of the cluster resource
