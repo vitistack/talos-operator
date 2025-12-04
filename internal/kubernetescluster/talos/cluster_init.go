@@ -34,6 +34,18 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	// Short-circuit: if the cluster is already initialized per persisted secret flags, skip init
 	if flags, err := t.getTalosSecretFlags(ctx, cluster); err == nil {
 		if flags.ControlPlaneApplied && flags.WorkerApplied && flags.Bootstrapped && flags.ClusterAccess {
+			// Reconcile removed nodes first (scale-down), then new nodes (scale-up)
+			if err := t.reconcileRemovedNodes(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Error during node removal reconciliation: %v", err))
+				// Continue with new node reconciliation even if removal has issues
+			}
+
+			// Cleanup orphaned K8s nodes (NotReady + SchedulingDisabled with no Machine CRD)
+			if err := t.CleanupOrphanedK8sNodes(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Error during orphaned node cleanup: %v", err))
+				// Continue even if cleanup has issues
+			}
+
 			return t.reconcileNewNodes(ctx, cluster)
 		}
 	}

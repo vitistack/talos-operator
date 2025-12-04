@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
@@ -19,12 +20,13 @@ import (
 )
 
 const (
-	phasePending       = "Pending"
-	phaseConfigGen     = "ConfigGenerated"
-	phaseConfigApplied = "ConfigApplied"
-	phaseBootstrapped  = "Bootstrapped"
-	phaseReady         = "Ready"
-	phaseRunning       = "Running"
+	PhasePending         = "Pending"
+	phaseConfigGen       = "ConfigGenerated"
+	phaseConfigApplied   = "ConfigApplied"
+	phaseBootstrapped    = "Bootstrapped"
+	phaseReady           = "Ready"
+	phaseRunning         = "Running"
+	PhaseValidationError = "ValidationError"
 )
 
 // StatusManager handles machine status updates and monitoring
@@ -87,7 +89,7 @@ type condSpec struct {
 // deriveStatusFromSecret returns phase, list of conditions to set, and kubeconfig bytes if found.
 func deriveStatusFromSecret(secret *corev1.Secret) (string, []condSpec, []byte) {
 	if secret == nil || secret.Data == nil {
-		return phasePending, []condSpec{{Type: "TalosSecretReady", Status: "False", Reason: "NotFound", Message: "Talos secret not created yet"}}, nil
+		return PhasePending, []condSpec{{Type: "TalosSecretReady", Status: "False", Reason: "NotFound", Message: "Talos secret not created yet"}}, nil
 	}
 	cfgPresent := getSecretFlag(secret, "talosconfig_present") && getSecretFlag(secret, "controlplane_yaml_present") && getSecretFlag(secret, "worker_yaml_present")
 	applied := getSecretFlag(secret, "controlplane_applied") && getSecretFlag(secret, "worker_applied")
@@ -122,7 +124,7 @@ func phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) strin
 	if cfgPresent {
 		return phaseConfigGen
 	}
-	return phasePending
+	return PhasePending
 }
 
 func condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) []condSpec {
@@ -387,6 +389,43 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 	return m.updateStatusWithConflictHandling(ctx, u, kc.Name, condType)
 }
 
+// ClearValidationError resets the phase from ValidationError to Pending if needed.
+// This allows the reconciliation to proceed normally after a validation error is fixed.
+func (m *StatusManager) ClearValidationError(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) error {
+	// Convert typed KubernetesCluster to unstructured for status manipulation
+	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
+	if err != nil {
+		return err
+	}
+
+	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // Resource was deleted, nothing to update
+		}
+		return err
+	}
+
+	// Check current phase
+	currentPhase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
+	if currentPhase != PhaseValidationError {
+		return nil // Not in ValidationError state, nothing to do
+	}
+
+	// Reset phase to Pending so normal reconciliation can determine the correct phase
+	if err := unstructured.SetNestedField(u.Object, PhasePending, "status", "phase"); err != nil {
+		vlog.Error("Failed to reset phase from ValidationError: cluster="+kc.Name, err)
+		return err
+	}
+
+	// Touch state.lastUpdated and lastUpdatedBy
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
+	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+
+	vlog.Info("Cleared ValidationError phase, resetting to Pending: cluster=" + kc.Name)
+	return m.updateStatusWithConflictHandling(ctx, u, kc.Name, "phase-reset")
+}
+
 // updateConditionInStatus updates the condition in the status.conditions slice
 func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, condType, status, reason, message, clusterName string) error {
 	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
@@ -405,6 +444,9 @@ func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, co
 
 	// Replace existing condition of same type or append
 	conds = replaceOrAppendCondition(conds, newCond, condType)
+
+	// Sort conditions by lastTransitionTime (newest first)
+	conds = sortConditionsByTime(conds)
 
 	if err := unstructured.SetNestedSlice(u.Object, conds, "status", "conditions"); err != nil {
 		vlog.Error("Failed to set nested slice for conditions: cluster="+clusterName+" condition="+condType, err)
@@ -431,6 +473,28 @@ func replaceOrAppendCondition(conds []any, newCond map[string]any, condType stri
 		}
 	}
 	return append(conds, newCond)
+}
+
+// sortConditionsByTime sorts conditions by lastTransitionTime (newest first)
+func sortConditionsByTime(conds []any) []any {
+	sort.SliceStable(conds, func(i, j int) bool {
+		ci, okI := conds[i].(map[string]any)
+		cj, okJ := conds[j].(map[string]any)
+		if !okI || !okJ {
+			return false
+		}
+		timeI, _ := ci["lastTransitionTime"].(string)
+		timeJ, _ := cj["lastTransitionTime"].(string)
+		// Parse times - if parse fails, treat as zero time
+		parsedI, errI := time.Parse(time.RFC3339Nano, timeI)
+		parsedJ, errJ := time.Parse(time.RFC3339Nano, timeJ)
+		if errI != nil || errJ != nil {
+			return false
+		}
+		// Sort newest first (descending)
+		return parsedI.After(parsedJ)
+	})
+	return conds
 }
 
 // updateStatusWithConflictHandling handles status update with conflict error handling

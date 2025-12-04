@@ -18,6 +18,7 @@ import (
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/services/endpointservice"
+	"github.com/vitistack/talos-operator/internal/services/etcdservice"
 	"github.com/vitistack/talos-operator/internal/services/machineservice"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
@@ -39,20 +40,23 @@ type TalosManager struct {
 	machineService  *machineservice.MachineService
 	endpointService *endpointservice.EndpointService
 	stateService    *talosstateservice.TalosStateService
+	etcdService     *etcdservice.EtcdService
 }
 
 // NewTalosManager creates a new instance of TalosManager
 func NewTalosManager(c client.Client, statusManager *status.StatusManager) *TalosManager {
 	secretSvc := secretservice.NewSecretService(c)
+	clientSvc := talosclientservice.NewTalosClientService()
 	return &TalosManager{
 		Client:          c,
 		statusManager:   statusManager,
 		secretService:   secretSvc,
 		configService:   talosconfigservice.NewTalosConfigService(),
-		clientService:   talosclientservice.NewTalosClientService(),
+		clientService:   clientSvc,
 		machineService:  machineservice.NewMachineService(c),
 		endpointService: endpointservice.NewEndpointService(c),
 		stateService:    talosstateservice.NewTalosStateService(secretSvc),
+		etcdService:     etcdservice.NewEtcdService(clientSvc),
 	}
 }
 

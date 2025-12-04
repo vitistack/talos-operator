@@ -29,21 +29,121 @@ func NewMachineManager(c client.Client, scheme *runtime.Scheme) *MachineManager 
 	}
 }
 
-// ReconcileMachines creates or updates machine manifests based on the KubernetesCluster spec
+// ReconcileMachines creates or updates machine manifests based on the KubernetesCluster spec.
+// Returns a list of excess machines that should be deleted (scale-down scenario).
 func (m *MachineManager) ReconcileMachines(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
 	// Extract node information from cluster spec
-	machines, err := m.GenerateMachinesFromCluster(cluster)
+	desiredMachines, err := m.GenerateMachinesFromCluster(cluster)
 	if err != nil {
 		return fmt.Errorf("failed to generate machines from cluster spec: %w", err)
 	}
 
-	// Apply machines to Kubernetes
-	for _, machine := range machines {
+	// Build a set of desired machine names
+	desiredNames := make(map[string]bool)
+	for _, machine := range desiredMachines {
+		desiredNames[machine.Name] = true
+	}
+
+	// Apply desired machines to Kubernetes
+	for _, machine := range desiredMachines {
 		if err := m.applyMachine(ctx, machine, cluster); err != nil {
 			return fmt.Errorf("failed to apply machine %s: %w", machine.Name, err)
 		}
 	}
 
+	return nil
+}
+
+// GetExcessMachines returns machines that exist but are not in the desired state (for scale-down).
+// Separates control planes and workers for proper deletion ordering.
+// Also detects workers belonging to nodepools that no longer exist.
+func (m *MachineManager) GetExcessMachines(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (
+	excessControlPlanes []*vitistackv1alpha1.Machine,
+	excessWorkers []*vitistackv1alpha1.Machine,
+	err error,
+) {
+	// Generate desired machines from cluster spec
+	desiredMachines, err := m.GenerateMachinesFromCluster(cluster)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate machines from cluster spec: %w", err)
+	}
+
+	// Build a set of desired machine names
+	desiredNames := make(map[string]bool)
+	for _, machine := range desiredMachines {
+		desiredNames[machine.Name] = true
+	}
+
+	// Build a set of desired nodepool names
+	desiredNodePools := make(map[string]bool)
+	for i := range cluster.Spec.Topology.Workers.NodePools {
+		desiredNodePools[cluster.Spec.Topology.Workers.NodePools[i].Name] = true
+	}
+
+	// List all current machines for this cluster
+	currentMachines, err := m.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list cluster machines: %w", err)
+	}
+
+	// Find excess machines (exist but not desired, or belong to deleted nodepools)
+	for i := range currentMachines {
+		machine := &currentMachines[i]
+		role := machine.Labels[vitistackv1alpha1.NodeRoleAnnotation]
+
+		if role == "control-plane" {
+			// Control plane: check by name
+			if !desiredNames[machine.Name] {
+				excessControlPlanes = append(excessControlPlanes, machine)
+			}
+		} else {
+			// Worker: check by name OR by nodepool existence
+			isExcess := false
+
+			// Check if the machine name is not in desired list
+			if !desiredNames[machine.Name] {
+				isExcess = true
+			}
+
+			// Check if the worker belongs to a nodepool that no longer exists
+			if nodepool, ok := machine.Annotations[vitistackv1alpha1.NodePoolAnnotation]; ok && nodepool != "" {
+				if !desiredNodePools[nodepool] {
+					isExcess = true
+				}
+			}
+
+			if isExcess {
+				excessWorkers = append(excessWorkers, machine)
+			}
+		}
+	}
+
+	return excessControlPlanes, excessWorkers, nil
+}
+
+// ListClusterMachines returns all machines belonging to a cluster
+func (m *MachineManager) ListClusterMachines(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) ([]vitistackv1alpha1.Machine, error) {
+	machineList := &vitistackv1alpha1.MachineList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels{vitistackv1alpha1.ClusterIdAnnotation: cluster.Spec.Cluster.ClusterId},
+	}
+
+	if err := m.List(ctx, machineList, listOpts...); err != nil {
+		return nil, fmt.Errorf("failed to list machines: %w", err)
+	}
+
+	return machineList.Items, nil
+}
+
+// DeleteMachine deletes a single machine resource
+func (m *MachineManager) DeleteMachine(ctx context.Context, machine *vitistackv1alpha1.Machine) error {
+	vlog.Info("Deleting machine resource: " + machine.Name)
+	if err := m.Delete(ctx, machine); err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete machine %s: %w", machine.Name, err)
+		}
+	}
 	return nil
 }
 

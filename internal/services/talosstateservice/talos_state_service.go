@@ -315,6 +315,55 @@ func (s *TalosStateService) AddConfiguredNode(ctx context.Context, cluster *viti
 	return fmt.Errorf("failed to add configured node after %d retries", maxRetries)
 }
 
+// RemoveConfiguredNode removes a node name from the list of configured nodes in the secret
+func (s *TalosStateService) RemoveConfiguredNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			return nil // No nodes configured
+		}
+
+		existingNodes := string(secret.Data["configured_nodes"])
+		if existingNodes == "" {
+			return nil // No nodes to remove
+		}
+
+		nodes := strings.Split(existingNodes, ",")
+		var newNodes []string
+		found := false
+		for _, n := range nodes {
+			if n != nodeName {
+				newNodes = append(newNodes, n)
+			} else {
+				found = true
+			}
+		}
+
+		if !found {
+			return nil // Node was not in the list
+		}
+
+		secret.Data["configured_nodes"] = []byte(strings.Join(newNodes, ","))
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Removed node from configured nodes: node=%s cluster=%s", nodeName, cluster.Name))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to remove configured node after %d retries", maxRetries)
+}
+
 // UpsertConfigWithRoleYAML stores config artifacts (talosconfig, role templates) in the secret
 func (s *TalosStateService) UpsertConfigWithRoleYAML(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster,
 	talosconfigYAML, controlPlaneYAML, workerYAML []byte) error {

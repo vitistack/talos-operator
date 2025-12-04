@@ -13,6 +13,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/machine"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
+	"github.com/vitistack/talos-operator/internal/services/validationservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,9 +29,10 @@ type KubernetesClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	TalosManager   *talos.TalosManager     // Manager for Talos clusters
-	MachineManager *machine.MachineManager // Manager for Machine resources
-	StatusManager  *status.StatusManager   // Manager for status updates
+	TalosManager     *talos.TalosManager                  // Manager for Talos clusters
+	MachineManager   *machine.MachineManager              // Manager for Machine resources
+	StatusManager    *status.StatusManager                // Manager for status updates
+	ValidatorService *validationservice.ValidationService // Service for validating resources
 
 	SecretService *secretservice.SecretService
 }
@@ -68,6 +70,18 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
+	// Validate the cluster spec (especially control plane replicas for etcd quorum)
+	if err := r.ValidatorService.ValidateKubernetesCluster(kubernetesCluster); err != nil {
+		vlog.Error("KubernetesCluster validation failed", err)
+		_ = r.StatusManager.SetPhase(ctx, kubernetesCluster, status.PhaseValidationError)
+		_ = r.StatusManager.SetCondition(ctx, kubernetesCluster, "Valid", "False", "ValidationFailed", err.Error())
+		// Don't requeue - user needs to fix the spec
+		return ctrl.Result{}, nil
+	}
+	// Clear validation error - reset phase if it was ValidationError, and set Valid condition
+	_ = r.StatusManager.ClearValidationError(ctx, kubernetesCluster)
+	_ = r.StatusManager.SetCondition(ctx, kubernetesCluster, "Valid", "True", "ValidationPassed", "Cluster spec is valid")
+
 	// Add finalizer if not present (only for talos-managed clusters)
 	if requeue, err := r.ensureFinalizer(ctx, kubernetesCluster); err != nil {
 		vlog.Error("Failed to add finalizer", err)
@@ -76,7 +90,13 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Reconcile machines based on cluster spec
+	// Handle scale-down before machine reconciliation
+	// This ensures nodes are properly removed from etcd/VIP before Machine CRDs are deleted
+	if result, handled := r.handleScaleDown(ctx, kubernetesCluster); handled {
+		return result, nil
+	}
+
+	// Reconcile machines based on cluster spec (creates/updates desired machines)
 	if err := r.MachineManager.ReconcileMachines(ctx, kubernetesCluster); err != nil {
 		vlog.Error("Failed to reconcile machines", err)
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
@@ -102,6 +122,54 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
+}
+
+// handleScaleDown handles machine scale-down operations.
+// Returns (result, true) if scale-down was needed and handled, (_, false) if no scale-down was needed.
+func (r *KubernetesClusterReconciler) handleScaleDown(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, bool) {
+	excessCPs, excessWorkers, err := r.MachineManager.GetExcessMachines(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to get excess machines", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Handle control plane scale-down (one at a time for safety)
+	if len(excessCPs) > 0 {
+		cpToRemove := excessCPs[len(excessCPs)-1] // Remove highest numbered first
+		vlog.Info(fmt.Sprintf("Scale-down: removing control plane %s (1 of %d excess)", cpToRemove.Name, len(excessCPs)))
+
+		if _, err := r.TalosManager.DeleteControlPlaneNode(ctx, cluster, cpToRemove.Name); err != nil {
+			vlog.Error(fmt.Sprintf("Failed to delete control plane node %s from Talos cluster", cpToRemove.Name), err)
+			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+		}
+
+		if err := r.MachineManager.DeleteMachine(ctx, cpToRemove); err != nil {
+			vlog.Error(fmt.Sprintf("Failed to delete machine CRD %s", cpToRemove.Name), err)
+			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+		}
+
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Handle worker scale-down (one at a time for safety)
+	if len(excessWorkers) > 0 {
+		workerToRemove := excessWorkers[len(excessWorkers)-1] // Remove highest numbered first
+		vlog.Info(fmt.Sprintf("Scale-down: removing worker %s (1 of %d excess)", workerToRemove.Name, len(excessWorkers)))
+
+		if _, err := r.TalosManager.DeleteWorkerNode(ctx, cluster, workerToRemove.Name); err != nil {
+			vlog.Error(fmt.Sprintf("Failed to delete worker node %s from Talos cluster", workerToRemove.Name), err)
+			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+		}
+
+		if err := r.MachineManager.DeleteMachine(ctx, workerToRemove); err != nil {
+			vlog.Error(fmt.Sprintf("Failed to delete machine CRD %s", workerToRemove.Name), err)
+			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+		}
+
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	return ctrl.Result{}, false
 }
 
 // isTalosProvider returns true if spec.data.provider == "talos"
@@ -254,12 +322,13 @@ func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *Ku
 	secretService := secretservice.NewSecretService(c)
 	statusManager := status.NewManager(c, secretService)
 	return &KubernetesClusterReconciler{
-		Client:         c,
-		Scheme:         scheme,
-		SecretService:  secretService,
-		TalosManager:   talos.NewTalosManager(c, statusManager),
-		MachineManager: machine.NewMachineManager(c, scheme),
-		StatusManager:  statusManager,
+		Client:           c,
+		Scheme:           scheme,
+		SecretService:    secretService,
+		TalosManager:     talos.NewTalosManager(c, statusManager),
+		MachineManager:   machine.NewMachineManager(c, scheme),
+		StatusManager:    statusManager,
+		ValidatorService: validationservice.NewValidationService(),
 	}
 }
 
