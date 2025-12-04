@@ -411,6 +411,11 @@ func (s *TalosConfigService) buildNodeAnnotationsPatch(cluster *vitistackv1alpha
 	annotations[vitistackv1alpha1.ClusterWorkspaceAnnotation] = networkNamespaceName
 	annotations[vitistackv1alpha1.InfrastructureAnnotation] = infrastructure
 
+	// Add nodepool annotation if present on the machine
+	if nodePool, ok := m.Annotations[vitistackv1alpha1.NodePoolAnnotation]; ok && nodePool != "" {
+		annotations[vitistackv1alpha1.NodePoolAnnotation] = nodePool
+	}
+
 	// Build the patch YAML
 	var patch strings.Builder
 	patch.WriteString("machine:\n  nodeAnnotations:\n")

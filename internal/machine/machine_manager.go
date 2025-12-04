@@ -7,6 +7,7 @@ import (
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/services/machineclassservice"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,6 +55,11 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackv1alpha1.
 	clusterId := cluster.Spec.Cluster.ClusterId
 	namespace := cluster.Namespace
 
+	// Validate machine classes before generating machines
+	if err := m.validateMachineClasses(context.Background(), cluster); err != nil {
+		return nil, fmt.Errorf("machine class validation failed: %w", err)
+	}
+
 	// Create control plane machines
 	controlPlaneMachines := m.generateControlPlaneMachines(cluster, clusterId, namespace)
 	machines = append(machines, controlPlaneMachines...)
@@ -96,7 +102,7 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 			},
 			Spec: vitistackv1alpha1.MachineSpec{
 				Name:         fmt.Sprintf("%s-ctp%d", clusterId, i),
-				InstanceType: controlPlaneMachineClass,
+				MachineClass: controlPlaneMachineClass,
 				Provider:     vitistackv1alpha1.MachineProviderType(cluster.Spec.Topology.ControlPlane.Provider.String()),
 				Disks:        controlPlaneDisks,
 				Tags: map[string]string{
@@ -141,7 +147,7 @@ func (m *MachineManager) generateWorkerMachines(cluster *vitistackv1alpha1.Kuber
 					},
 					Spec: vitistackv1alpha1.MachineSpec{
 						Name:         fmt.Sprintf("%s-wrk%d", clusterId, workerIndex),
-						InstanceType: machineClass,
+						MachineClass: machineClass,
 						Provider:     vitistackv1alpha1.MachineProviderType(nodePool.Provider.String()),
 						Disks:        workerDisks,
 						Tags: map[string]string{
@@ -168,7 +174,7 @@ func (m *MachineManager) generateWorkerMachines(cluster *vitistackv1alpha1.Kuber
 			},
 			Spec: vitistackv1alpha1.MachineSpec{
 				Name:         fmt.Sprintf("%s-wrk0", clusterId),
-				InstanceType: "medium",
+				MachineClass: "medium",
 				Tags: map[string]string{
 					"cluster": clusterId,
 					"role":    "worker",
@@ -312,5 +318,43 @@ func (m *MachineManager) CleanupMachines(ctx context.Context, clusterId, namespa
 	}
 
 	vlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s machineCount=%d", clusterId, len(machineList.Items)))
+	return nil
+}
+
+// validateMachineClasses validates that all machine classes referenced in the cluster spec exist and are enabled
+func (m *MachineManager) validateMachineClasses(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	// Collect all unique machine classes from the cluster spec
+	machineClasses := make(map[string]bool)
+
+	// Control plane machine class
+	cpMachineClass := cluster.Spec.Topology.ControlPlane.MachineClass
+	if cpMachineClass == "" {
+		cpMachineClass = "large" // default
+	}
+	machineClasses[cpMachineClass] = true
+
+	// Worker node pool machine classes
+	if len(cluster.Spec.Topology.Workers.NodePools) > 0 {
+		for i := range cluster.Spec.Topology.Workers.NodePools {
+			nodePool := cluster.Spec.Topology.Workers.NodePools[i]
+			mc := nodePool.MachineClass
+			if mc == "" {
+				mc = "medium" // default
+			}
+			machineClasses[mc] = true
+		}
+	} else {
+		// Default worker machine class
+		machineClasses["medium"] = true
+	}
+
+	// Validate each unique machine class
+	for machineClassName := range machineClasses {
+		if err := machineclassservice.ValidateMachineClass(ctx, machineClassName); err != nil {
+			return fmt.Errorf("invalid machineClass %q: %w", machineClassName, err)
+		}
+		vlog.Debug(fmt.Sprintf("Validated machineClass: %s", machineClassName))
+	}
+
 	return nil
 }

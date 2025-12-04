@@ -108,9 +108,13 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
 ##@ Security
-.PHONY: go-security-scan
-go-security-scan: install-security-scanner ## Run gosec security scan (fails on findings)
+.PHONY: gosec
+gosec: install-security-scanner ## Run gosec security scan (fails on findings)
 	$(GOSEC) ./...
+
+.PHONY: govulncheck
+govulncheck: install-govulncheck ## Run govulncheck vulnerability scan (fails on findings)
+	$(GOVULNCHECK) ./...
 
 .PHONY: go-security-scan-docker
 go-security-scan-docker: ## Run gosec scan using official container (alternative if local install fails)
@@ -214,6 +218,8 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 GOSEC ?= $(LOCALBIN)/gosec
+GOVULNCHECK ?= $(LOCALBIN)/govulncheck
+GOVULNCHECK_VERSION ?= latest
 
 # External CLI dependencies
 CURL ?= curl
@@ -281,6 +287,20 @@ $(GOSEC): $(LOCALBIN)
 	echo "gosec installed at $(GOSEC)"; \
 	chmod +x $(GOSEC)
 
+.PHONY: install-govulncheck
+install-govulncheck: $(GOVULNCHECK) ## Install govulncheck locally (vulnerability scanner for Go)
+$(GOVULNCHECK): $(LOCALBIN)
+	@set -e; echo "Attempting to install govulncheck $(GOVULNCHECK_VERSION)"; \
+	if ! GOBIN=$(LOCALBIN) go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) 2>/dev/null; then \
+		echo "Primary install failed, attempting install from @latest (compatibility fallback)"; \
+		if ! GOBIN=$(LOCALBIN) go install golang.org/x/vuln/cmd/govulncheck@latest; then \
+			echo "govulncheck installation failed for versions $(GOVULNCHECK_VERSION) and @latest"; \
+			exit 1; \
+		fi; \
+	fi; \
+	echo "govulncheck installed at $(GOVULNCHECK)"; \
+	chmod +x $(GOVULNCHECK)
+	
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
 # $2 - package url which can be installed
@@ -323,9 +343,9 @@ k8s-install-vitistack-crds: require-kubectl k8s-download-vitistack-crds ## Apply
 	@echo -e "$(GREEN)VitiStack CRDs installed successfully.$(RESET)"
 
 
-k8s-uninstall-viti-crds: check-kubectl ## Uninstall CRDs into a cluster
+k8s-uninstall-viti-crds: require-kubectl ## Uninstall CRDs into a cluster
 	@echo -e "${RED}Uninstalling CRDs...${RESET}"
-	${KUBECTL} delete -f hack/crds/
+	${KUBECTL} delete -f $(CRDS_DOWNLOAD_DIR)/
 
 # Dependency checks used by the CRD targets
 .PHONY: require-curl-jq

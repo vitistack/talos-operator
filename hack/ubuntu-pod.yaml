@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: debian-shell
+  labels:
+    app: debian-shell
+    app.kubernetes.io/name: debian-shell
+    app.kubernetes.io/component: debug
+    app.kubernetes.io/part-of: talos-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: debian-shell
+  template:
+    metadata:
+      labels:
+        app: debian-shell
+        app.kubernetes.io/name: debian-shell
+        app.kubernetes.io/component: debug
+        app.kubernetes.io/part-of: talos-operator
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: debian
+          image: debian:trixie
+          # Keep the container alive "forever"
+          command: ["sleep", "infinity"]
+          # Optional, but nice for interactive use:
+          tty: true
+          stdin: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETGID
+                - SETUID
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

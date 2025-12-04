@@ -22,12 +22,12 @@ spec:
     controlplane:
       replicas: 3
       version: "1.34.1"
-      machineClass: large # Should provide 4 vCPUs, 4 GiB RAM
+      machineClass: small # Should provide 4 vCPUs, 4 GiB RAM
       provider: kubevirt
       storage:
         - class: "standard"
           path: "/var/lib/vitistack/kubevirt"
-          size: "100Gi" # Talos recommended for production
+          size: "50Gi" # Talos recommended for production
       metadata:
         annotations:
           environment: development
@@ -40,8 +40,8 @@ spec:
         - name: wp
           taint: []
           version: "1.34.1"
-          replicas: 3
-          machineClass: large # Should provide 2 vCPUs, 2 GiB RAM
+          replicas: 4
+          machineClass: medium # Should provide 2 vCPUs, 2 GiB RAM
           autoscaling:
             enabled: false
             minReplicas: 1
@@ -59,4 +59,4 @@ spec:
           storage:
             - class: "standard"
               path: "/var/lib/vitistack/kubevirt"
-              size: "100Gi" # Talos recommended for production
+              size: "50Gi" # Talos recommended for production

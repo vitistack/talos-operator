@@ -22,7 +22,10 @@ jobs:
         run: |
           go mod download
 
-      - name: Run security scan
+      - name: Run gosec security scan
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          make gosec
+
+      - name: Run govulncheck vulnerability scan
+        run: |
+          make govulncheck

@@ -17,7 +17,7 @@ const (
 
 	// Default polling settings
 	DefaultMachineCheckInterval = 10 * time.Second
-	DefaultMachineTimeout       = 2 * time.Minute
+	DefaultMachineTimeout       = 30 * time.Second
 )
 
 // MachineService handles machine-related operations
