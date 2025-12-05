@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
@@ -39,13 +40,17 @@ func (s *EtcdService) MemberList(
 	ctx context.Context,
 	clientConfig *clientconfig.Config,
 	controlPlaneIP string) ([]Member, error) {
-	tClient, err := s.clientService.CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIP})
+	// Use a timeout to prevent hanging on unreachable nodes
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	tClient, err := s.clientService.CreateTalosClient(timeoutCtx, false, clientConfig, []string{controlPlaneIP})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Talos client for etcd member list: %w", err)
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(ctx, controlPlaneIP)
+	nodeCtx := talosclient.WithNodes(timeoutCtx, controlPlaneIP)
 
 	resp, err := tClient.EtcdMemberList(nodeCtx, &machineapi.EtcdMemberListRequest{
 		QueryLocal: false, // Query the actual etcd cluster, not just local
@@ -77,13 +82,17 @@ func (s *EtcdService) ForfeitLeadership(
 	ctx context.Context,
 	clientConfig *clientconfig.Config,
 	nodeIP string) error {
-	tClient, err := s.clientService.CreateTalosClient(ctx, false, clientConfig, []string{nodeIP})
+	// Use a timeout to prevent hanging on unreachable nodes
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	tClient, err := s.clientService.CreateTalosClient(timeoutCtx, false, clientConfig, []string{nodeIP})
 	if err != nil {
 		return fmt.Errorf("failed to create Talos client for etcd forfeit leadership: %w", err)
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	nodeCtx := talosclient.WithNodes(timeoutCtx, nodeIP)
 
 	_, err = tClient.EtcdForfeitLeadership(nodeCtx, &machineapi.EtcdForfeitLeadershipRequest{})
 	if err != nil {
@@ -106,13 +115,17 @@ func (s *EtcdService) RemoveMemberByID(
 	clientConfig *clientconfig.Config,
 	controlPlaneIP string,
 	memberID uint64) error {
-	tClient, err := s.clientService.CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIP})
+	// Use a timeout to prevent hanging on unreachable nodes
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	tClient, err := s.clientService.CreateTalosClient(timeoutCtx, false, clientConfig, []string{controlPlaneIP})
 	if err != nil {
 		return fmt.Errorf("failed to create Talos client for etcd remove member: %w", err)
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(ctx, controlPlaneIP)
+	nodeCtx := talosclient.WithNodes(timeoutCtx, controlPlaneIP)
 
 	err = tClient.EtcdRemoveMemberByID(nodeCtx, &machineapi.EtcdRemoveMemberByIDRequest{
 		MemberId: memberID,
@@ -131,13 +144,17 @@ func (s *EtcdService) LeaveCluster(
 	ctx context.Context,
 	clientConfig *clientconfig.Config,
 	nodeIP string) error {
-	tClient, err := s.clientService.CreateTalosClient(ctx, false, clientConfig, []string{nodeIP})
+	// Use a timeout to prevent hanging on unreachable nodes
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	tClient, err := s.clientService.CreateTalosClient(timeoutCtx, false, clientConfig, []string{nodeIP})
 	if err != nil {
 		return fmt.Errorf("failed to create Talos client for etcd leave: %w", err)
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	nodeCtx := talosclient.WithNodes(timeoutCtx, nodeIP)
 
 	err = tClient.EtcdLeaveCluster(nodeCtx, &machineapi.EtcdLeaveClusterRequest{})
 	if err != nil {

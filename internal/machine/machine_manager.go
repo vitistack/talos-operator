@@ -89,6 +89,12 @@ func (m *MachineManager) GetExcessMachines(ctx context.Context, cluster *vitista
 	// Find excess machines (exist but not desired, or belong to deleted nodepools)
 	for i := range currentMachines {
 		machine := &currentMachines[i]
+
+		// Skip machines that are already being deleted (have a DeletionTimestamp)
+		if machine.DeletionTimestamp != nil {
+			continue
+		}
+
 		role := machine.Labels[vitistackv1alpha1.NodeRoleAnnotation]
 
 		if role == "control-plane" {
