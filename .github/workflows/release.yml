@@ -98,28 +98,19 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Install yq
+        run: |
+          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+
       - name: Update chart version and app version
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v*}"
 
-          cat << EOF > .github/yq-script.yaml
-          - command: update
-            path: version
-            value: "${VERSION}"
-          - command: update
-            path: appVersion
-            value: "${VERSION}"
-          EOF
-
-          cat << EOF > .github/yq-values-script.yaml
-          - command: update
-            path: image.tag
-            value: "${VERSION}"
-          EOF
-
-          npx -y yq-cli write --file=.github/yq-script.yaml charts/talos-operator/Chart.yaml
-          npx -y yq-cli write --file=.github/yq-values-script.yaml charts/talos-operator/values.yaml
+          yq -i ".version = \"${VERSION}\"" charts/talos-operator/Chart.yaml
+          yq -i ".appVersion = \"${VERSION}\"" charts/talos-operator/Chart.yaml
+          yq -i ".image.tag = \"${VERSION}\"" charts/talos-operator/values.yaml
 
       - name: Package Helm chart
         run: |
