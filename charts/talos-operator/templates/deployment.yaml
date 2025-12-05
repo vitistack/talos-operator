@@ -80,6 +80,13 @@ spec:
               value: {{ .Values.config.talos.vmInstallImage.kubevirt | quote }}
             - name: TALOS_VM_INSTALL_IMAGE_DEFAULT
               value: {{ .Values.config.talos.vmInstallImage.default | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}

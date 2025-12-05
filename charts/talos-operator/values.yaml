@@ -160,3 +160,20 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Extra environment variables to add to the container
+# Example:
+# extraEnv:
+#   - name: MY_VAR
+#     value: "my-value"
+extraEnv: []
+
+# Environment variables from Secrets or ConfigMaps
+# Use this for sensitive data - reference existing secrets/configmaps
+# Example:
+# envFrom:
+#   - secretRef:
+#       name: my-secret
+#   - configMapRef:
+#       name: my-configmap
+envFrom: []

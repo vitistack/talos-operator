@@ -1,24 +1,47 @@
 apiVersion: v2
 name: talos-operator
-description: A Helm chart for Kubernetes
+description: A Kubernetes operator for managing Talos Linux clusters via the Vitistack platform
 
-# A chart can be either an 'application' or a 'library' chart.
-#
-# Application charts are a collection of templates that can be packaged into versioned archives
-# to be deployed.
-#
-# Library charts provide useful utilities or functions for the chart developer. They're included as
-# a dependency of application charts to inject those utilities and functions into the rendering
-# pipeline. Library charts do not define any templates and therefore cannot be deployed.
+# Chart type
 type: application
 
-# This is the chart version. This version number should be incremented each time you make changes
-# to the chart and its templates, including the app version.
-# Versions are expected to follow Semantic Versioning (https://semver.org/)
+# Chart version - increment for chart changes (follows SemVer)
 version: 0.1.0
 
-# This is the version number of the application being deployed. This version number should be
-# incremented each time you make changes to the application. Versions are not expected to
-# follow Semantic Versioning. They should reflect the version the application is using.
-# It is recommended to use it with quotes.
-appVersion: "1.16.0"
+# Application version - the version of the talos-operator being deployed
+appVersion: "0.1.0"
+
+# Chart icon - displayed in Helm repository UIs like ArtifactHub
+icon: https://vitistack.io/images/viti1.svg
+
+# Keywords for search and discovery
+keywords:
+  - talos
+  - kubernetes
+  - operator
+  - vitistack
+  - infrastructure
+  - cluster-management
+  - talos-linux
+
+# Home page of the project
+home: https://github.com/vitistack/talos-operator
+
+# Source code repository
+sources:
+  - https://github.com/vitistack/talos-operator
+
+# Maintainers of the chart
+maintainers:
+  - name: vitistack
+    url: https://github.com/vitistack
+
+# Minimum Kubernetes version required
+kubeVersion: ">= 1.26.0"
+
+# Annotations for ArtifactHub and other registries
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Full Lifecycle
+  artifacthub.io/category: integration-delivery
