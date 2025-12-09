@@ -3,6 +3,9 @@ package machine
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
@@ -32,8 +35,14 @@ func NewMachineManager(c client.Client, scheme *runtime.Scheme) *MachineManager 
 // ReconcileMachines creates or updates machine manifests based on the KubernetesCluster spec.
 // Returns a list of excess machines that should be deleted (scale-down scenario).
 func (m *MachineManager) ReconcileMachines(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	// Extract node information from cluster spec
-	desiredMachines, err := m.GenerateMachinesFromCluster(cluster)
+	// List existing machines to get current state
+	existingMachines, err := m.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to list existing machines: %w", err)
+	}
+
+	// Extract node information from cluster spec, passing existing machines for index allocation
+	desiredMachines, err := m.GenerateMachinesFromClusterWithContext(cluster, existingMachines)
 	if err != nil {
 		return fmt.Errorf("failed to generate machines from cluster spec: %w", err)
 	}
@@ -63,7 +72,7 @@ func (m *MachineManager) GetExcessMachines(ctx context.Context, cluster *vitista
 	err error,
 ) {
 	// Generate desired machines from cluster spec
-	desiredMachines, err := m.GenerateMachinesFromCluster(cluster)
+	desiredMachines, err := m.GenerateMachinesFromClusterWithContext(cluster, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate machines from cluster spec: %w", err)
 	}
@@ -153,8 +162,10 @@ func (m *MachineManager) DeleteMachine(ctx context.Context, machine *vitistackv1
 	return nil
 }
 
-// GenerateMachinesFromCluster extracts node information and creates Machine specs
-func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackv1alpha1.KubernetesCluster) ([]*vitistackv1alpha1.Machine, error) {
+// GenerateMachinesFromClusterWithContext extracts node information and creates Machine specs
+// When existingMachines is provided, it uses smart index allocation to preserve existing machines
+// and fill gaps when adding new workers
+func (m *MachineManager) GenerateMachinesFromClusterWithContext(cluster *vitistackv1alpha1.KubernetesCluster, existingMachines []vitistackv1alpha1.Machine) ([]*vitistackv1alpha1.Machine, error) {
 	var machines []*vitistackv1alpha1.Machine
 
 	// Extract basic information from cluster
@@ -170,8 +181,8 @@ func (m *MachineManager) GenerateMachinesFromCluster(cluster *vitistackv1alpha1.
 	controlPlaneMachines := m.generateControlPlaneMachines(cluster, clusterId, namespace)
 	machines = append(machines, controlPlaneMachines...)
 
-	// Create worker machines
-	workerMachines := m.generateWorkerMachines(cluster, clusterId, namespace)
+	// Create worker machines with context about existing machines
+	workerMachines := m.generateWorkerMachinesWithContext(cluster, clusterId, namespace, existingMachines)
 	machines = append(machines, workerMachines...)
 
 	return machines, nil
@@ -223,74 +234,158 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 	return machines
 }
 
-// generateWorkerMachines creates worker Machine objects from cluster spec
-func (m *MachineManager) generateWorkerMachines(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string) []*vitistackv1alpha1.Machine {
+// workerIndexContext holds context for worker index allocation across nodepools
+type workerIndexContext struct {
+	existingByNodePool map[string][]*vitistackv1alpha1.Machine
+	usedIndices        map[int]bool
+}
+
+// buildWorkerIndexContext scans existing machines to build nodepool groupings and used indices
+func buildWorkerIndexContext(existingMachines []vitistackv1alpha1.Machine, clusterId string) *workerIndexContext {
+	ctx := &workerIndexContext{
+		existingByNodePool: make(map[string][]*vitistackv1alpha1.Machine),
+		usedIndices:        make(map[int]bool),
+	}
+
+	workerIndexRegex := regexp.MustCompile(fmt.Sprintf(`^%s-wrk(\d+)$`, regexp.QuoteMeta(clusterId)))
+
+	for i := range existingMachines {
+		machine := &existingMachines[i]
+		// Only process workers
+		if machine.Labels[vitistackv1alpha1.NodeRoleAnnotation] != "worker" {
+			continue
+		}
+		// Skip machines being deleted
+		if machine.DeletionTimestamp != nil {
+			continue
+		}
+
+		// Extract worker index from name
+		matches := workerIndexRegex.FindStringSubmatch(machine.Name)
+		if len(matches) == 2 {
+			if idx, err := strconv.Atoi(matches[1]); err == nil {
+				ctx.usedIndices[idx] = true
+			}
+		}
+
+		// Group by nodepool annotation
+		nodePoolName := machine.Annotations[vitistackv1alpha1.NodePoolAnnotation]
+		if nodePoolName != "" {
+			ctx.existingByNodePool[nodePoolName] = append(ctx.existingByNodePool[nodePoolName], machine)
+		}
+	}
+
+	return ctx
+}
+
+// createWorkerMachine creates a worker Machine object with the given parameters
+func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass string, provider vitistackv1alpha1.MachineProviderType, disks []vitistackv1alpha1.MachineSpecDisk) *vitistackv1alpha1.Machine {
+	return &vitistackv1alpha1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				vitistackv1alpha1.ClusterIdAnnotation: clusterId,
+				vitistackv1alpha1.NodeRoleAnnotation:  "worker",
+			},
+			Annotations: map[string]string{
+				vitistackv1alpha1.NodePoolAnnotation: nodePoolName,
+			},
+		},
+		Spec: vitistackv1alpha1.MachineSpec{
+			Name:         name,
+			MachineClass: machineClass,
+			Provider:     provider,
+			Disks:        disks,
+			Tags: map[string]string{
+				"cluster":  clusterId,
+				"role":     "worker",
+				"nodepool": nodePoolName,
+			},
+		},
+	}
+}
+
+// generateWorkerMachinesWithContext creates worker Machine objects from cluster spec
+// Uses existing machines to determine nodepool membership and find available indices
+func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string, existingMachines []vitistackv1alpha1.Machine) []*vitistackv1alpha1.Machine {
 	var machines []*vitistackv1alpha1.Machine
 
 	// Create worker nodes based on node pools if available
-	if len(cluster.Spec.Topology.Workers.NodePools) > 0 {
-		workerIndex := 0
-		for idx := range cluster.Spec.Topology.Workers.NodePools {
-			nodePool := cluster.Spec.Topology.Workers.NodePools[idx]
-			workerDisks := convertStorageToDisks(nodePool.Storage)
-			machineClass := nodePool.MachineClass
-			if machineClass == "" {
-				machineClass = "medium"
-			}
-
-			for i := 0; i < nodePool.Replicas; i++ {
-				machine := &vitistackv1alpha1.Machine{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("%s-wrk%d", clusterId, workerIndex),
-						Namespace: namespace,
-						Labels: map[string]string{
-							vitistackv1alpha1.ClusterIdAnnotation: clusterId,
-							vitistackv1alpha1.NodeRoleAnnotation:  "worker",
-						},
-						Annotations: map[string]string{
-							vitistackv1alpha1.NodePoolAnnotation: nodePool.Name,
-						},
-					},
-					Spec: vitistackv1alpha1.MachineSpec{
-						Name:         fmt.Sprintf("%s-wrk%d", clusterId, workerIndex),
-						MachineClass: machineClass,
-						Provider:     vitistackv1alpha1.MachineProviderType(nodePool.Provider.String()),
-						Disks:        workerDisks,
-						Tags: map[string]string{
-							"cluster":  clusterId,
-							"role":     "worker",
-							"nodepool": nodePool.Name,
-						},
-					},
-				}
-				machines = append(machines, machine)
-				workerIndex++
-			}
-		}
-	} else {
+	if len(cluster.Spec.Topology.Workers.NodePools) == 0 {
 		// Create default worker node if no node pools are specified
-		machine := &vitistackv1alpha1.Machine{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-wrk0", clusterId),
-				Namespace: namespace,
-				Labels: map[string]string{
-					vitistackv1alpha1.ClusterIdAnnotation: clusterId,
-					vitistackv1alpha1.NodeRoleAnnotation:  "worker",
-				},
-			},
-			Spec: vitistackv1alpha1.MachineSpec{
-				Name:         fmt.Sprintf("%s-wrk0", clusterId),
-				MachineClass: "medium",
-				Tags: map[string]string{
-					"cluster": clusterId,
-					"role":    "worker",
-				},
-			},
+		return []*vitistackv1alpha1.Machine{
+			createWorkerMachine(fmt.Sprintf("%s-wrk0", clusterId), namespace, clusterId, "", "medium", "", nil),
 		}
+	}
+
+	// Build context from existing machines
+	indexCtx := buildWorkerIndexContext(existingMachines, clusterId)
+
+	// Process each nodepool
+	for idx := range cluster.Spec.Topology.Workers.NodePools {
+		nodePool := &cluster.Spec.Topology.Workers.NodePools[idx]
+		poolMachines := m.generateMachinesForNodePool(nodePool, clusterId, namespace, indexCtx)
+		machines = append(machines, poolMachines...)
+	}
+
+	return machines
+}
+
+// generateMachinesForNodePool generates machines for a single nodepool
+func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1.KubernetesClusterNodePool, clusterId, namespace string, indexCtx *workerIndexContext) []*vitistackv1alpha1.Machine {
+	workerDisks := convertStorageToDisks(nodePool.Storage)
+	machineClass := nodePool.MachineClass
+	if machineClass == "" {
+		machineClass = "medium"
+	}
+	provider := vitistackv1alpha1.MachineProviderType(nodePool.Provider.String())
+
+	// Get existing machines for this nodepool
+	existingForPool := indexCtx.existingByNodePool[nodePool.Name]
+	existingCount := len(existingForPool)
+	desiredCount := nodePool.Replicas
+
+	// Keep existing machines that belong to this nodepool (up to desired count)
+	keepCount := min(existingCount, desiredCount)
+
+	// Pre-allocate machines slice
+	machines := make([]*vitistackv1alpha1.Machine, 0, desiredCount)
+
+	// Sort existing machines by index to keep lower indices first
+	sort.Slice(existingForPool, func(i, j int) bool {
+		return existingForPool[i].Name < existingForPool[j].Name
+	})
+
+	// Add existing machines that we want to keep
+	for i := 0; i < keepCount; i++ {
+		existing := existingForPool[i]
+		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks)
+		machines = append(machines, machine)
+	}
+
+	// Create new machines if we need more
+	newMachinesNeeded := desiredCount - keepCount
+	for range newMachinesNeeded {
+		// Find next available index
+		newIndex := findNextAvailableIndex(indexCtx.usedIndices)
+		indexCtx.usedIndices[newIndex] = true
+
+		machineName := fmt.Sprintf("%s-wrk%d", clusterId, newIndex)
+		machine := createWorkerMachine(machineName, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks)
 		machines = append(machines, machine)
 	}
 
 	return machines
+}
+
+// findNextAvailableIndex finds the lowest unused index starting from 0
+func findNextAvailableIndex(usedIndices map[int]bool) int {
+	for i := 0; ; i++ {
+		if !usedIndices[i] {
+			return i
+		}
+	}
 }
 
 // convertStorageToDisks converts KubernetesClusterStorage to MachineSpecDisk

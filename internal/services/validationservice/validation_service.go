@@ -51,6 +51,11 @@ func (s *ValidationService) ValidateKubernetesCluster(cluster *vitistackv1alpha1
 		errs = append(errs, *err)
 	}
 
+	// Validate node pools - warn if no node pools are defined
+	if err := validateNodePools(cluster); err != nil {
+		errs = append(errs, *err)
+	}
+
 	if len(errs) > 0 {
 		return errs
 	}
@@ -114,5 +119,37 @@ func (s *ValidationService) ValidateControlPlaneScaleDown(currentCount, targetCo
 	if len(errs) > 0 {
 		return errs
 	}
+	return nil
+}
+
+// validateNodePools validates that removing all node pools is not allowed
+// Reducing replicas within a node pool is fine, but having zero node pools
+// would orphan pods and leave the cluster without worker capacity
+func validateNodePools(cluster *vitistackv1alpha1.KubernetesCluster) *ValidationError {
+	nodePools := cluster.Spec.Topology.Workers.NodePools
+
+	// Check if there are no node pools defined
+	if len(nodePools) == 0 {
+		return &ValidationError{
+			Field:   "spec.topology.workers.nodePools",
+			Message: "at least one node pool is required; removing all node pools would destroy all worker nodes and orphan running pods. To scale down, reduce replicas in existing node pools instead",
+		}
+	}
+
+	// Calculate total worker replicas across all node pools
+	totalReplicas := 0
+	for i := range nodePools {
+		np := &nodePools[i]
+		totalReplicas += np.Replicas
+	}
+
+	// Warn if total replicas is zero (all pools have 0 replicas)
+	if totalReplicas == 0 {
+		return &ValidationError{
+			Field:   "spec.topology.workers.nodePools",
+			Message: "total worker replicas across all node pools is 0; this will remove all worker nodes and orphan running pods",
+		}
+	}
+
 	return nil
 }

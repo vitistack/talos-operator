@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
@@ -532,7 +533,75 @@ func (t *TalosManager) drainNode(ctx context.Context, clientset *kubernetes.Clie
 		}
 	}
 
+	// Wait for pods to be terminated
+	if err := t.waitForPodsToTerminate(ctx, clientset, nodeName, podsToEvict); err != nil {
+		vlog.Warn(fmt.Sprintf("Timeout waiting for pods to terminate on node %s: %v", nodeName, err))
+		// Continue with deletion even if some pods haven't terminated
+	}
+
 	return nil
+}
+
+// waitForPodsToTerminate waits for the evicted pods to be fully terminated
+func (t *TalosManager) waitForPodsToTerminate(ctx context.Context, clientset *kubernetes.Clientset, nodeName string, podsToEvict []*corev1.Pod) error {
+	timeout := 2 * time.Minute
+	pollInterval := 5 * time.Second
+	deadline := time.Now().Add(timeout)
+
+	// Build a set of pod keys to track
+	pendingPods := make(map[string]bool)
+	for _, pod := range podsToEvict {
+		pendingPods[fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)] = true
+	}
+
+	vlog.Info(fmt.Sprintf("Waiting for %d pods to terminate on node %s (timeout: %v)", len(pendingPods), nodeName, timeout))
+
+	for time.Now().Before(deadline) {
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// List remaining pods on the node
+		podList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+			FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
+		})
+		if err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to list pods during drain wait: %v", err))
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		// Check which pods from our eviction list are still present
+		stillRunning := 0
+		for i := range podList.Items {
+			pod := &podList.Items[i]
+			podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+			if pendingPods[podKey] {
+				// Skip pods that are terminating but allow some grace
+				if pod.DeletionTimestamp != nil {
+					continue
+				}
+				// Skip DaemonSet and mirror pods (we didn't evict them)
+				if isDaemonSetPod(pod) || isMirrorPod(pod) {
+					continue
+				}
+				stillRunning++
+			}
+		}
+
+		if stillRunning == 0 {
+			vlog.Info(fmt.Sprintf("All evicted pods have terminated on node %s", nodeName))
+			return nil
+		}
+
+		vlog.Debug(fmt.Sprintf("Waiting for %d pods to terminate on node %s", stillRunning, nodeName))
+		time.Sleep(pollInterval)
+	}
+
+	return fmt.Errorf("timeout waiting for pods to terminate on node %s", nodeName)
 }
 
 // evictPod evicts a single pod using the Eviction API
