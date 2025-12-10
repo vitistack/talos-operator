@@ -71,8 +71,17 @@ func (m *MachineManager) GetExcessMachines(ctx context.Context, cluster *vitista
 	excessWorkers []*vitistackv1alpha1.Machine,
 	err error,
 ) {
-	// Generate desired machines from cluster spec
-	desiredMachines, err := m.GenerateMachinesFromClusterWithContext(cluster, nil)
+	// List all current machines for this cluster FIRST
+	// We need this to pass to GenerateMachinesFromClusterWithContext so it knows
+	// which machines already exist and belong to which nodepools
+	currentMachines, err := m.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list cluster machines: %w", err)
+	}
+
+	// Generate desired machines from cluster spec WITH context about existing machines
+	// This ensures existing machines that belong to valid nodepools are preserved
+	desiredMachines, err := m.GenerateMachinesFromClusterWithContext(cluster, currentMachines)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate machines from cluster spec: %w", err)
 	}
@@ -87,12 +96,6 @@ func (m *MachineManager) GetExcessMachines(ctx context.Context, cluster *vitista
 	desiredNodePools := make(map[string]bool)
 	for i := range cluster.Spec.Topology.Workers.NodePools {
 		desiredNodePools[cluster.Spec.Topology.Workers.NodePools[i].Name] = true
-	}
-
-	// List all current machines for this cluster
-	currentMachines, err := m.ListClusterMachines(ctx, cluster)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to list cluster machines: %w", err)
 	}
 
 	// Find excess machines (exist but not desired, or belong to deleted nodepools)
