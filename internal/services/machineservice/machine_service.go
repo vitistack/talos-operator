@@ -78,6 +78,59 @@ func (s *MachineService) WaitForMachinesReady(ctx context.Context,
 	}
 }
 
+// WaitForFirstControlPlaneReady waits for at least one control plane machine to be ready.
+// Returns the first ready control plane, allowing cluster bootstrap to start immediately.
+// Returns (nil, nil) if no control plane machines exist yet - caller should requeue.
+func (s *MachineService) WaitForFirstControlPlaneReady(ctx context.Context,
+	machines []*vitistackv1alpha1.Machine) (*vitistackv1alpha1.Machine, error) {
+	controlPlanes := s.FilterMachinesByRole(machines, "control-plane")
+	if len(controlPlanes) == 0 {
+		// No control planes exist yet - this is not an error, just means we need to wait
+		// Return nil so the reconciler can requeue and check again
+		vlog.Debug("No control plane machines found yet, will retry on next reconcile")
+		return nil, nil
+	}
+
+	timeout := time.After(DefaultMachineTimeout)
+	ticker := time.NewTicker(DefaultMachineCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timeout:
+			// Timeout waiting for control plane to be ready - return nil so reconciler requeues
+			vlog.Debug(fmt.Sprintf("Control plane not ready yet, will retry: count=%d", len(controlPlanes)))
+			return nil, nil
+		case <-ticker.C:
+			// Check if any control plane is ready (they're already sorted by name)
+			for _, cp := range controlPlanes {
+				updatedMachine := &vitistackv1alpha1.Machine{}
+				if err := s.Get(ctx, types.NamespacedName{
+					Name:      cp.Name,
+					Namespace: cp.Namespace,
+				}, updatedMachine); err != nil {
+					continue
+				}
+				if s.IsMachineReady(updatedMachine) {
+					vlog.Info(fmt.Sprintf("First control plane is ready: %s", updatedMachine.Name))
+					return updatedMachine, nil
+				}
+			}
+			vlog.Debug(fmt.Sprintf("Waiting for first control plane to be ready: total=%d", len(controlPlanes)))
+		}
+	}
+}
+
+// GetReadyMachines returns all machines that are currently ready (non-blocking).
+// This is useful for checking which additional machines have become ready.
+func (s *MachineService) GetReadyMachines(ctx context.Context,
+	machines []*vitistackv1alpha1.Machine) []*vitistackv1alpha1.Machine {
+	readyMachines, _ := s.checkMachinesReady(ctx, machines)
+	return readyMachines
+}
+
 // checkMachinesReady checks if all machines are in running state with IP addresses
 func (s *MachineService) checkMachinesReady(ctx context.Context,
 	machines []*vitistackv1alpha1.Machine) ([]*vitistackv1alpha1.Machine, bool) {

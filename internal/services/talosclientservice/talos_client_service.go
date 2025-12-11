@@ -323,9 +323,11 @@ func (s *TalosClientService) BootstrapTalosControlPlaneWithRetry(
 			return nil
 		} else {
 			lastErr = err
-			if !isTLSHandshakeAuthError(err) && !strings.Contains(err.Error(), "transport: authentication handshake failed") {
+			// Check if this is a retryable error
+			if !IsRetryableBootstrapError(err) {
 				return err
 			}
+			vlog.Info("Bootstrap attempt failed (will retry): node=" + controlPlaneIP + " error=" + err.Error())
 		}
 		if time.Now().After(deadline) {
 			return lastErr
@@ -381,6 +383,47 @@ func isTLSHandshakeAuthError(err error) bool {
 	}
 	s := err.Error()
 	return strings.Contains(s, "x509:") || strings.Contains(s, "tls:")
+}
+
+// isRetryableBootstrapError checks if a bootstrap error is transient and should be retried.
+// This includes TLS handshake errors, connection issues, and service unavailability.
+// IsRetryableBootstrapError checks if a bootstrap error is transient and should be retried.
+// This includes TLS handshake errors, connection issues, and service unavailability.
+func IsRetryableBootstrapError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for TLS/auth errors first
+	if isTLSHandshakeAuthError(err) {
+		return true
+	}
+
+	s := err.Error()
+
+	// Check for connection/transport errors that indicate the node is still coming up
+	retryablePatterns := []string{
+		"transport: authentication handshake failed",
+		"connection refused",
+		"connection reset",
+		"i/o timeout",
+		"no route to host",
+		"unavailable",
+		"Unavailable",
+		"DeadlineExceeded",
+		"deadline exceeded",
+		"EOF",
+		"broken pipe",
+		"connection closed",
+	}
+
+	for _, pattern := range retryablePatterns {
+		if strings.Contains(s, pattern) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // nodeInfo holds node IP and hostname for status checking.

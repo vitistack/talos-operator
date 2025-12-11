@@ -592,17 +592,25 @@ func (s *TalosConfigService) PatchNodeConfigWithEndpointIPs(nodeConfig []byte, e
 }
 
 func (s *TalosConfigService) SelectInstallDisk(m *vitistackv1alpha1.Machine) string {
+	// First, look for disks with "disk-" prefix (e.g., disk-0, disk-1)
+	// These are the actual storage disks, not boot media like cdrom-iso
+
 	for i := range m.Status.Disks {
 		d := m.Status.Disks[i]
-		if d.Device != "" {
-			if d.PVCName != "" {
-				return d.Device
-			}
-			if d.Device != "" {
-				return d.Device
-			}
+		if d.Device != "" && strings.HasPrefix(d.Name, "disk-") {
+			return d.Device
 		}
 	}
+	// Fallback: return first non-cdrom disk with a device path
+	for i := range m.Status.Disks {
+		d := m.Status.Disks[i]
+		if d.Device != "" && !strings.HasPrefix(d.Name, "cdrom") {
+			return d.Device
+		}
+	}
+	// Default to /dev/vda (virtio bus used for root disk)
+	// Note: Device path should normally come from Machine.Status.Disks
+	// which is populated by kubevirt-operator from VMI.Status.VolumeStatus
 	return "/dev/vda"
 }
 

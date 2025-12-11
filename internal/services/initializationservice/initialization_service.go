@@ -4,9 +4,11 @@ import (
 	"context"
 	"os"
 
+	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	"github.com/vitistack/common/pkg/operator/crdcheck"
 	"github.com/vitistack/talos-operator/internal/services/kubernetesproviderservice"
+	"github.com/vitistack/talos-operator/pkg/consts"
 )
 
 // CheckPrerequisites verifies that required CRDs are installed before starting.
@@ -25,6 +27,8 @@ func CheckPrerequisites() {
 		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "vitistacks"},
 	)
 
+	ValidateBootImageConfiguration()
+
 	vlog.Info("✅ Prerequisite checks passed")
 }
 
@@ -41,4 +45,40 @@ func EnsureKubernetesProvider() {
 	}
 
 	vlog.Info("✅ KubernetesProvider check completed")
+}
+
+// ValidateBootImageConfiguration validates that boot image settings are correctly configured.
+// If BOOT_IMAGE_SOURCE is set to "bootimage", BOOT_IMAGE must also be set.
+// It exits the process with code 1 if the configuration is invalid.
+func ValidateBootImageConfiguration() {
+	vlog.Info("Validating boot image configuration...")
+
+	bootImageSource := viper.GetString(consts.BOOT_IMAGE_SOURCE)
+
+	// Validate that the boot image source is valid
+	if !consts.IsValidBootImageSource(bootImageSource) {
+		vlog.Error("Invalid BOOT_IMAGE_SOURCE value", nil,
+			"value", bootImageSource,
+			"valid_values", consts.ValidBootImageSources())
+		os.Exit(1)
+	}
+
+	// If boot image source is "bootimage", BOOT_IMAGE must be set
+	if consts.BootImageSource(bootImageSource) == consts.BootImageSourceBootImage {
+		bootImage := viper.GetString(consts.BOOT_IMAGE)
+		if bootImage == "" {
+			vlog.Error("BOOT_IMAGE must be set when BOOT_IMAGE_SOURCE is 'bootimage'", nil,
+				"boot_image_source", bootImageSource,
+				"hint", "Set BOOT_IMAGE to the URL of the Talos ISO (e.g., https://github.com/siderolabs/talos/releases/download/v1.11.5/metal-amd64.iso)")
+			os.Exit(1)
+		}
+		vlog.Info("Boot image configuration validated",
+			"boot_image_source", bootImageSource,
+			"boot_image", bootImage)
+	} else {
+		vlog.Info("Boot image configuration validated",
+			"boot_image_source", bootImageSource)
+	}
+
+	vlog.Info("✅ Boot image configuration check completed")
 }

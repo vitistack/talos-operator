@@ -3,14 +3,17 @@ package machine
 import (
 	"context"
 	"fmt"
+	"maps"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/machineclassservice"
+	"github.com/vitistack/talos-operator/pkg/consts"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -22,6 +25,46 @@ import (
 type MachineManager struct {
 	client.Client
 	Scheme *runtime.Scheme
+}
+
+// getMachineOS returns the MachineOS configuration based on BOOT_IMAGE_SOURCE setting.
+// When BOOT_IMAGE_SOURCE is set to "bootimage", it populates the OS with the Talos image URL.
+// When BOOT_IMAGE_SOURCE is "pxe" (default), returns an empty MachineOS (PXE boot is used).
+func getMachineOS() vitistackv1alpha1.MachineOS {
+	bootImageSource := viper.GetString(consts.BOOT_IMAGE_SOURCE)
+
+	// If boot image source is "bootimage", set the imageID from BOOT_IMAGE
+	if consts.BootImageSource(bootImageSource) == consts.BootImageSourceBootImage {
+		bootImage := viper.GetString(consts.BOOT_IMAGE)
+		return vitistackv1alpha1.MachineOS{
+			Family:       "linux",
+			Distribution: "talos",
+			Architecture: "amd64",
+			ImageID:      bootImage,
+		}
+	}
+
+	// Default: PXE boot, no OS configuration needed
+	return vitistackv1alpha1.MachineOS{}
+}
+
+// getBootImageAnnotations returns the annotations required for boot image source.
+// When BOOT_IMAGE_SOURCE is set to "bootimage", it returns annotations to indicate
+// the use of a DataVolume for the boot source with HTTP type.
+// When BOOT_IMAGE_SOURCE is "pxe" (default), returns nil (no annotations needed).
+func getBootImageAnnotations() map[string]string {
+	bootImageSource := viper.GetString(consts.BOOT_IMAGE_SOURCE)
+
+	// If boot image source is "bootimage", return the required annotations
+	if consts.BootImageSource(bootImageSource) == consts.BootImageSourceBootImage {
+		return map[string]string{
+			"kubevirt.io/boot-source":      "datavolume",
+			"kubevirt.io/boot-source-type": "http",
+		}
+	}
+
+	// Default: PXE boot, no annotations needed
+	return nil
 }
 
 // NewMachineManager creates a new instance of MachineManager
@@ -210,11 +253,15 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 		controlPlaneMachineClass = "large"
 	}
 
+	// Get OS configuration based on boot image source setting
+	machineOS := getMachineOS()
+
 	for i := 0; i < controlPlaneReplicas; i++ {
 		machine := &vitistackv1alpha1.Machine{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-ctp%d", clusterId, i),
-				Namespace: namespace,
+				Name:        fmt.Sprintf("%s-ctp%d", clusterId, i),
+				Namespace:   namespace,
+				Annotations: getBootImageAnnotations(),
 				Labels: map[string]string{
 					vitistackv1alpha1.ClusterIdAnnotation: clusterId,
 					vitistackv1alpha1.NodeRoleAnnotation:  "control-plane",
@@ -225,6 +272,7 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 				MachineClass: controlPlaneMachineClass,
 				Provider:     vitistackv1alpha1.MachineProviderType(cluster.Spec.Topology.ControlPlane.Provider.String()),
 				Disks:        controlPlaneDisks,
+				OS:           machineOS,
 				Tags: map[string]string{
 					"cluster": clusterId,
 					"role":    "control-plane",
@@ -283,16 +331,23 @@ func buildWorkerIndexContext(existingMachines []vitistackv1alpha1.Machine, clust
 
 // createWorkerMachine creates a worker Machine object with the given parameters
 func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass string, provider vitistackv1alpha1.MachineProviderType, disks []vitistackv1alpha1.MachineSpecDisk) *vitistackv1alpha1.Machine {
+	// Get OS configuration based on boot image source setting
+	machineOS := getMachineOS()
+
+	// Build annotations: start with nodepool annotation, then add boot image annotations if needed
+	annotations := map[string]string{
+		vitistackv1alpha1.NodePoolAnnotation: nodePoolName,
+	}
+	maps.Copy(annotations, getBootImageAnnotations())
+
 	return &vitistackv1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
+			Name:        name,
+			Namespace:   namespace,
+			Annotations: annotations,
 			Labels: map[string]string{
 				vitistackv1alpha1.ClusterIdAnnotation: clusterId,
 				vitistackv1alpha1.NodeRoleAnnotation:  "worker",
-			},
-			Annotations: map[string]string{
-				vitistackv1alpha1.NodePoolAnnotation: nodePoolName,
 			},
 		},
 		Spec: vitistackv1alpha1.MachineSpec{
@@ -300,6 +355,7 @@ func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass 
 			MachineClass: machineClass,
 			Provider:     provider,
 			Disks:        disks,
+			OS:           machineOS,
 			Tags: map[string]string{
 				"cluster":  clusterId,
 				"role":     "worker",

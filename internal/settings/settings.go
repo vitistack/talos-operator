@@ -34,6 +34,13 @@ func Init() {
 	viper.SetDefault(consts.ENDPOINT_MODE, string(consts.DefaultEndpointMode))
 	viper.SetDefault(consts.CUSTOM_ENDPOINT, "")
 
+	// Boot image source configuration
+	// Valid values: "pxe", "bootimage"
+	// Default: "pxe" (uses PXE boot for machine provisioning)
+	// When set to "bootimage", BOOT_IMAGE must also be set with the URL to the Talos ISO
+	viper.SetDefault(consts.BOOT_IMAGE_SOURCE, string(consts.DefaultBootImageSource))
+	viper.SetDefault(consts.BOOT_IMAGE, "")
+
 	dotenv.LoadDotEnv()
 	viper.AutomaticEnv()
 }

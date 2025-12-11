@@ -140,7 +140,9 @@ type clusterInitPrep struct {
 	tenantPatches   []string
 }
 
-// prepareClusterInitialization prepares all required data for cluster initialization
+// prepareClusterInitialization prepares all required data for cluster initialization.
+// It only waits for the first control plane to be ready - other machines will be
+// processed as they become ready during the reconciliation loop.
 func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*clusterInitPrep, error) {
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
 	if err != nil {
@@ -154,31 +156,43 @@ func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster
 		return nil, nil
 	}
 
-	// Wait for all machines to be in running state
-	_ = t.statusManager.SetCondition(ctx, cluster, "MachinesReady", "False", "Waiting", "Waiting for machines to be running with IP addresses")
-	readyMachines, err := t.machineService.WaitForMachinesReady(ctx, machines)
+	// Wait only for the first control plane to be ready - don't block on all machines
+	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneReady", "False", "Waiting", "Waiting for first control plane to be running with IP address")
+	firstControlPlane, err := t.machineService.WaitForFirstControlPlaneReady(ctx, machines)
 	if err != nil {
-		_ = t.statusManager.SetCondition(ctx, cluster, "MachinesReady", "False", "Timeout", err.Error())
-		return nil, fmt.Errorf("failed waiting for machines to be ready: %w", err)
+		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneReady", "False", "Error", err.Error())
+		return nil, fmt.Errorf("failed waiting for first control plane to be ready: %w", err)
 	}
-	_ = t.statusManager.SetCondition(ctx, cluster, "MachinesReady", "True", "Ready", "All machines are running and have IP addresses")
+	if firstControlPlane == nil {
+		// No control plane ready yet - return nil to requeue
+		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneReady", "False", "Waiting", "Waiting for first control plane to be running with IP address")
+		return nil, nil
+	}
+	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneReady", "True", "Ready", fmt.Sprintf("First control plane %s is ready", firstControlPlane.Name))
 
-	// Collect control planes and workers
+	// Get all currently ready machines (non-blocking)
+	readyMachines := t.machineService.GetReadyMachines(ctx, machines)
+	vlog.Info(fmt.Sprintf("Ready machines: %d/%d", len(readyMachines), len(machines)))
+
+	// Collect control planes and workers from ready machines only
 	controlPlanes := t.machineService.FilterMachinesByRole(readyMachines, controlPlaneRole)
 	workers := filterNonControlPlanes(readyMachines)
 
-	// Validate and collect control plane IPs
+	// Ensure first control plane is in the list (it should be, but be safe)
+	if len(controlPlanes) == 0 {
+		controlPlanes = []*vitistackv1alpha1.Machine{firstControlPlane}
+	}
+
+	// Collect control plane IPs from ready control planes
 	controlPlaneIPs, err := t.collectControlPlaneIPs(ctx, cluster, controlPlanes)
 	if err != nil {
 		return nil, err
 	}
 
-	// Validate worker IPs
-	if err := t.validateWorkerIPs(ctx, cluster, workers); err != nil {
-		return nil, err
-	}
+	// Don't validate worker IPs here - they may not be ready yet
+	// Workers will be configured as they become ready
 
-	// Determine endpoint IPs
+	// Determine endpoint IPs (based on first control plane at minimum)
 	endpointIPs, err := t.determineControlPlaneEndpoints(ctx, cluster, controlPlaneIPs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine control plane endpoints: %w", err)
@@ -238,28 +252,6 @@ func (t *TalosManager) collectControlPlaneIPs(ctx context.Context, cluster *viti
 	return controlPlaneIPs, nil
 }
 
-// validateWorkerIPs validates that all workers have IPv4 addresses
-func (t *TalosManager) validateWorkerIPs(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, workers []*vitistackv1alpha1.Machine) error {
-	for _, m := range workers {
-		ipv4Found := false
-		if len(m.Status.PublicIPAddresses) > 0 {
-			for i := range m.Status.PublicIPAddresses {
-				ipAddr := m.Status.PublicIPAddresses[i]
-				ip := net.ParseIP(ipAddr)
-				if ip != nil && ip.To4() != nil {
-					ipv4Found = true
-					break
-				}
-			}
-		}
-		if !ipv4Found {
-			_ = t.statusManager.SetCondition(ctx, cluster, "WorkerIPsReady", "False", "NotReady", "Some worker nodes are missing IPv4 addresses")
-			return fmt.Errorf("workers not ready quite yet, missing IPv4 addresses before applying configuration")
-		}
-	}
-	return nil
-}
-
 // stageApplyFirstControlPlane handles Stage 1: Apply config to first control plane
 func (t *TalosManager) stageApplyFirstControlPlane(
 	ctx context.Context,
@@ -278,6 +270,13 @@ func (t *TalosManager) stageApplyFirstControlPlane(
 	vlog.Info(fmt.Sprintf("Stage 1: Applying config to first control plane: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
 	_ = t.statusManager.SetPhase(ctx, cluster, "ConfiguringFirstControlPlane")
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "Applying", "Applying config to first control plane")
+
+	// Mark machine as OS installed BEFORE applying config
+	// Config apply triggers Talos to install to disk and reboot immediately
+	// Talos runs in memory from ISO, so after config apply the ISO is no longer needed
+	// if err := t.markMachineAsOSInstalled(ctx, firstControlPlane); err != nil {
+	// 	vlog.Error("Failed to mark first control plane as OS installed", err)
+	// }
 
 	if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{firstControlPlane}, insecure, prep.tenantOverrides, prep.endpointIPs[0]); err != nil {
 		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "ApplyError", err.Error())
@@ -357,7 +356,12 @@ func (t *TalosManager) stageBootstrapCluster(
 	if err != nil {
 		return fmt.Errorf("failed to create Talos client for bootstrap: %w", err)
 	}
-	if err := t.clientService.BootstrapTalosControlPlaneWithRetry(ctx, bootstrapClient, firstCPIP, 5*time.Minute, 10*time.Second); err != nil {
+	// Use short timeout (1 minute) with quick retries (5 seconds) to allow other reconcilers to run
+	if err := t.clientService.BootstrapTalosControlPlaneWithRetry(ctx, bootstrapClient, firstCPIP, 1*time.Minute, 5*time.Second); err != nil {
+		// If it's a retryable error, return a RequeueError so other reconcilers can be processed
+		if talosclientservice.IsRetryableBootstrapError(err) {
+			return talosclientservice.NewRequeueError("bootstrap not ready yet, will retry", 10*time.Second)
+		}
 		_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "False", "BootstrapError", err.Error())
 		return fmt.Errorf("failed to bootstrap Talos cluster: %w", err)
 	}

@@ -27,6 +27,10 @@ var (
 	// CUSTOM_ENDPOINT is used when ENDPOINT_MODE is set to "custom".
 	// Should be a comma-separated list of IP addresses or hostnames.
 	CUSTOM_ENDPOINT = "CUSTOM_ENDPOINT"
+
+	BOOT_IMAGE_SOURCE = "BOOT_IMAGE_SOURCE"
+
+	BOOT_IMAGE = "BOOT_IMAGE"
 )
 
 // EndpointMode represents the mode for determining control plane endpoints
@@ -72,3 +76,47 @@ func ValidEndpointModes() []EndpointMode {
 		EndpointModeCustom,
 	}
 }
+
+// BootImageSource represents the source for booting machines
+type BootImageSource string
+
+const (
+	// BootImageSourcePXE uses PXE boot for machine provisioning.
+	// This is the default mode.
+	BootImageSourcePXE BootImageSource = "pxe"
+
+	// BootImageSourceBootImage uses a boot image (ISO/disk image) for machine provisioning.
+	// The imageID in the Machine spec will be used to create a DataVolume with CDI.
+	// This avoids PXE boot entirely - kubevirt and Proxmox operators handle the imageID.
+	BootImageSourceBootImage BootImageSource = "bootimage"
+
+	// DefaultBootImageSource is the default boot image source
+	DefaultBootImageSource = BootImageSourcePXE
+)
+
+// IsValidBootImageSource checks if the provided source is valid
+func IsValidBootImageSource(source string) bool {
+	switch BootImageSource(source) {
+	case BootImageSourcePXE, BootImageSourceBootImage:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidBootImageSources returns a list of valid boot image sources
+func ValidBootImageSources() []BootImageSource {
+	return []BootImageSource{
+		BootImageSourcePXE,
+		BootImageSourceBootImage,
+	}
+}
+
+// Machine annotation constants for signaling OS installation status
+const (
+	// OSInstalledAnnotation is set to "true" on a Machine CR after the OS (e.g., Talos)
+	// has been successfully installed to disk. This signals to the machine provider
+	// (e.g., kubevirt-provider) that it can safely eject the ISO/boot media.
+	// This annotation is generic so any Kubernetes operator can use it.
+	OSInstalledAnnotation = "vitistack.io/os-installed"
+)
