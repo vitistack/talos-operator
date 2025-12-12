@@ -271,13 +271,6 @@ func (t *TalosManager) stageApplyFirstControlPlane(
 	_ = t.statusManager.SetPhase(ctx, cluster, "ConfiguringFirstControlPlane")
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "Applying", "Applying config to first control plane")
 
-	// Mark machine as OS installed BEFORE applying config
-	// Config apply triggers Talos to install to disk and reboot immediately
-	// Talos runs in memory from ISO, so after config apply the ISO is no longer needed
-	// if err := t.markMachineAsOSInstalled(ctx, firstControlPlane); err != nil {
-	// 	vlog.Error("Failed to mark first control plane as OS installed", err)
-	// }
-
 	if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{firstControlPlane}, insecure, prep.tenantOverrides, prep.endpointIPs[0]); err != nil {
 		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "ApplyError", err.Error())
 		return fmt.Errorf("failed to apply config to first control plane: %w", err)

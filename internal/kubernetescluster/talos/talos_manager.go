@@ -177,36 +177,6 @@ func (t *TalosManager) addConfiguredNode(ctx context.Context, cluster *vitistack
 	return t.stateService.AddConfiguredNode(ctx, cluster, nodeName)
 }
 
-// markMachineAsOSInstalled sets the OSInstalledAnnotation to "true" on a Machine CR to signal
-// that the OS has been installed to disk and the machine provider can eject the boot media (ISO).
-// This is called AFTER the install completes and the node has rebooted.
-func (t *TalosManager) markMachineAsOSInstalled(ctx context.Context, machine *vitistackv1alpha1.Machine) error {
-	// Skip if already marked as installed
-	if machine.Annotations != nil && machine.Annotations[consts.OSInstalledAnnotation] == "true" {
-		return nil
-	}
-
-	// Fetch the latest version of the machine to avoid conflicts
-	latestMachine := &vitistackv1alpha1.Machine{}
-	if err := t.Get(ctx, types.NamespacedName{Name: machine.Name, Namespace: machine.Namespace}, latestMachine); err != nil {
-		return fmt.Errorf("failed to get machine %s: %w", machine.Name, err)
-	}
-
-	// Create a patch to add the annotation
-	patch := client.MergeFrom(latestMachine.DeepCopy())
-	if latestMachine.Annotations == nil {
-		latestMachine.Annotations = make(map[string]string)
-	}
-	latestMachine.Annotations[consts.OSInstalledAnnotation] = "true"
-
-	if err := t.Patch(ctx, latestMachine, patch); err != nil {
-		return fmt.Errorf("failed to patch machine %s with os-installed annotation: %w", machine.Name, err)
-	}
-
-	vlog.Info(fmt.Sprintf("Marked machine as OS installed: machine=%s", machine.Name))
-	return nil
-}
-
 // determineControlPlaneEndpoints determines the control plane endpoints based on the configured endpoint mode
 func (t *TalosManager) determineControlPlaneEndpoints(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
 	return t.endpointService.DetermineControlPlaneEndpoints(ctx, cluster, controlPlaneIPs)
@@ -379,14 +349,6 @@ func (t *TalosManager) applyConfigToSingleMachine(
 		return nil
 	}
 
-	// Mark machine as OS installed BEFORE applying config
-	// Config apply triggers Talos to install to disk and reboot immediately
-	// Talos runs in memory from ISO, so after config apply completes, the ISO is no longer needed
-	// if err := t.markMachineAsOSInstalled(ctx, m); err != nil {
-	// 	vlog.Error(fmt.Sprintf("Failed to mark %s %s as OS installed", grpCfg.nodeType, m.Name), err)
-	// 	// Continue anyway - this is a best-effort optimization
-	// }
-
 	vlog.Info(fmt.Sprintf("Applying config to %s: node=%s ip=%s", grpCfg.nodeType, m.Name, nodeIP))
 	if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{m}, insecure, tenantOverrides, endpointIP); err != nil {
 		_ = t.statusManager.SetCondition(ctx, cluster, grpCfg.conditionName, "False", "ApplyError", fmt.Sprintf("Failed on node %s: %s", m.Name, err.Error()))
@@ -486,11 +448,6 @@ func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv
 	if err := t.addConfiguredNode(ctx, cluster, node.Name); err != nil {
 		vlog.Error(fmt.Sprintf("Failed to add new %s %s to configured nodes", nodeType, node.Name), err)
 	}
-
-	// Mark machine as OS installed so the machine provider can eject the ISO
-	// if err := t.markMachineAsOSInstalled(ctx, node); err != nil {
-	// 	vlog.Error(fmt.Sprintf("Failed to mark new %s %s as OS installed", nodeType, node.Name), err)
-	// }
 
 	vlog.Info(fmt.Sprintf("New %s configured successfully: node=%s", nodeType, node.Name))
 	return nil
