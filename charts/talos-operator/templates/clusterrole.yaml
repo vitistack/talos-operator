@@ -46,6 +46,7 @@ rules:
   - apiGroups:
       - vitistack.io
     resources:
+      - controlplanevirtualsharedips
       - kubernetesclusters
       - kubernetesproviders
       - machineclasses
@@ -72,6 +73,7 @@ rules:
   - apiGroups:
       - vitistack.io
     resources:
+      - controlplanevirtualsharedips/status
       - kubernetesclusters/status
       - machines/status
     verbs:
