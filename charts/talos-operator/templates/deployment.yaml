@@ -43,43 +43,50 @@ spec:
           env:
             # Endpoint mode configuration
             - name: ENDPOINT_MODE
-              value: {{ .Values.config.endpointMode | quote }}
-            {{- if .Values.config.customEndpoint }}
+              value: {{ .Values.endpointMode | quote }}
+            {{- if .Values.customEndpoint }}
             - name: CUSTOM_ENDPOINT
-              value: {{ .Values.config.customEndpoint | quote }}
+              value: {{ .Values.customEndpoint | quote }}
+            {{- end }}
+            # Boot image source configuration
+            - name: BOOT_IMAGE_SOURCE
+              value: {{ .Values.bootImageSource | quote }}
+            {{- if .Values.bootImage }}
+            - name: BOOT_IMAGE
+              value: {{ .Values.bootImage | quote }}
             {{- end }}
             # Log configuration
             - name: LOG_LEVEL
-              value: {{ .Values.config.logLevel | quote }}
+              value: {{ .Values.logLevel | quote }}
             - name: LOG_JSON
-              value: {{ .Values.config.logJson | quote }}
+              value: {{ .Values.logJson | quote }}
             # Secret and naming configuration
-            {{- if .Values.config.secretPrefix }}
+            {{- if .Values.secretPrefix }}
             - name: SECRET_PREFIX
-              value: {{ .Values.config.secretPrefix | quote }}
+              value: {{ .Values.secretPrefix | quote }}
             {{- end }}
             - name: VITISTACK_NAME
-              value: {{ .Values.config.vitistackName | quote }}
+              value: {{ .Values.vitistackName | quote }}
             - name: NAME_KUBERNETES_PROVIDER
-              value: {{ .Values.config.kubernetesProviderName | quote }}
+              value: {{ .Values.kubernetesProviderName | quote }}
             # Tenant configuration
             - name: TENANT_CONFIGMAP_NAME
-              value: {{ .Values.config.tenant.configMapName | quote }}
+              value: {{ .Values.tenant.configMapName | quote }}
             - name: TENANT_CONFIGMAP_NAMESPACE
-              value: {{ .Values.config.tenant.configMapNamespace | quote }}
+              value: {{ .Values.tenant.configMapNamespace | quote }}
             - name: TENANT_CONFIGMAP_DATA_KEY
-              value: {{ .Values.config.tenant.configMapDataKey | quote }}
+              value: {{ .Values.tenant.configMapDataKey | quote }}
             # Talos configuration
             - name: TALOS_VERSION
-              value: {{ .Values.config.talos.version | quote }}
+              value: {{ .Values.talos.version | quote }}
             - name: DEFAULT_KUBERNETES_VERSION
-              value: {{ .Values.config.talos.defaultKubernetesVersion | quote }}
+              value: {{ .Values.talos.defaultKubernetesVersion | quote }}
             - name: TALOS_PREDICTABLE_NETWORK_NAMES
-              value: {{ .Values.config.talos.predictableNetworkNames | quote }}
+              value: {{ .Values.talos.predictableNetworkNames | quote }}
             - name: TALOS_VM_INSTALL_IMAGE_KUBEVIRT
-              value: {{ .Values.config.talos.vmInstallImage.kubevirt | quote }}
+              value: {{ .Values.talos.vmInstallImage.kubevirt | quote }}
             - name: TALOS_VM_INSTALL_IMAGE_DEFAULT
-              value: {{ .Values.config.talos.vmInstallImage.default | quote }}
+              value: {{ .Values.talos.vmInstallImage.default | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

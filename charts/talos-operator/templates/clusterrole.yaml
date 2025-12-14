@@ -1,0 +1,96 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "talos-operator.fullname" . }}
+  labels:
+    {{- include "talos-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - kubevirt.io
+    resources:
+      - virtualmachines
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - kubevirt.io
+    resources:
+      - virtualmachines/status
+    verbs:
+      - get
+  - apiGroups:
+      - vitistack.io
+    resources:
+      - kubernetesclusters
+      - machines
+      - networknamespaces
+      - vitistacks
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - vitistack.io
+    resources:
+      - kubernetesclusters/finalizers
+      - machines/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - vitistack.io
+    resources:
+      - kubernetesclusters/status
+      - machines/status
+    verbs:
+      - get
+      - patch
+      - update
+  # Leader election
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch

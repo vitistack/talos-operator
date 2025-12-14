@@ -11,5 +11,5 @@ spec:
     - name: wget
       image: busybox
       command: ['wget']
-      args: ['{{ include "talos-operator.fullname" . }}:{{ .Values.service.port }}']
+      args: ['{{ include "talos-operator.fullname" . }}:{{ .Values.service.port }}/healthz']
   restartPolicy: Never
