@@ -47,7 +47,10 @@ rules:
       - vitistack.io
     resources:
       - kubernetesclusters
+      - kubernetesproviders
+      - machineproviders
       - machines
+      - networkconfigurations
       - networknamespaces
       - vitistacks
     verbs:
