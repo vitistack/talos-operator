@@ -48,6 +48,7 @@ rules:
     resources:
       - kubernetesclusters
       - kubernetesproviders
+      - machineclasses
       - machineproviders
       - machines
       - networkconfigurations
