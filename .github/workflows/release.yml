@@ -12,7 +12,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/vitistack/talos-operator
+  IMAGE_NAME: ghcr.io/vitistack/viti-talos-operator
   HELM_REGISTRY: ghcr.io/vitistack/helm
 
 jobs:
