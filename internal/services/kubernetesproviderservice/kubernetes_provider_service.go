@@ -222,7 +222,7 @@ func createDefaultKubernetesProvider(ctx context.Context) error {
 		Spec: vitistackv1alpha1.KubernetesProviderSpec{
 			ProviderType: TalosProviderType,
 			DisplayName:  "Talos Operator Provider",
-			Version:      "v1.34.1", // Default Kubernetes version for Talos 1.11.5 clusters
+			Version:      "v1.34.1", // Default Kubernetes version for Talos 1.11.6 clusters
 			Region:       region,
 		},
 	}

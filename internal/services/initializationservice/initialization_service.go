@@ -69,7 +69,7 @@ func ValidateBootImageConfiguration() {
 		if bootImage == "" {
 			vlog.Error("BOOT_IMAGE must be set when BOOT_IMAGE_SOURCE is 'bootimage'", nil,
 				"boot_image_source", bootImageSource,
-				"hint", "Set BOOT_IMAGE to the URL of the Talos ISO (e.g., https://github.com/siderolabs/talos/releases/download/v1.11.5/metal-amd64.iso)")
+				"hint", "Set BOOT_IMAGE to the URL of the Talos ISO (e.g., https://github.com/siderolabs/talos/releases/download/v1.11.6/metal-amd64.iso)")
 			os.Exit(1)
 		}
 		vlog.Info("Boot image configuration validated",
