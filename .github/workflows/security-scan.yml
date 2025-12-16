@@ -2,7 +2,7 @@ name: Security Scan
 
 on:
   schedule:
-    - cron: '0 0 * * 1' # Run weekly on Mondays
+    - cron: '0 0 * * 0' # Run weekly on Sundays
 
 jobs:
   security-scan:
@@ -17,10 +17,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Install dependencies
-        run: |
-          go mod download
 
       - name: Run gosec security scan
         run: |

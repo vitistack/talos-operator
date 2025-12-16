@@ -8,65 +8,48 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write # Required for keyless signing with Sigstore
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/vitistack/talos-operator
+  HELM_REGISTRY: ghcr.io/vitistack/helm
 
 jobs:
-  build:
-    name: Build
+  # Build OCI images
+  build-image:
+    name: Build Image (${{ matrix.platform }})
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Install dependencies
-        run: |
-          go mod download
-
-      - name: Build
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v*}"
-          echo "Version $VERSION"
-          touch cmd/isbuilt
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-
-  create-oci-image:
-    name: Create OCI Image (${{ matrix.platform }})
-    needs: build
-    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract metadata (tags, labels) for Docker
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/vitistack/viti-talos-operator
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha
+          images: ${{ env.IMAGE_NAME }}
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -79,7 +62,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
-          outputs: type=image,name=ghcr.io/vitistack/viti-talos-operator,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
         run: |
@@ -88,36 +71,82 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
-          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          name: digests-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  merge-manifests:
-    name: Merge Multi-Arch Manifests
-    needs: create-oci-image
+  # Package Helm chart in parallel with image builds
+  package-helm:
+    name: Package Helm Chart
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Update chart versions
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          yq -i ".version = \"${VERSION}\"" charts/talos-operator/Chart.yaml
+          yq -i ".appVersion = \"${VERSION}\"" charts/talos-operator/Chart.yaml
+          yq -i ".image.tag = \"${VERSION}\"" charts/talos-operator/values.yaml
+
+      - name: Package Helm chart
+        run: helm package charts/talos-operator
+
+      - name: Upload chart artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: helm-chart
+          path: talos-operator-*.tgz
+          retention-days: 1
+
+  # Merge multi-arch manifests and sign everything
+  publish-and-sign:
+    name: Publish & Sign
+    needs: [build-image, package-helm]
+    runs-on: ubuntu-latest
+    steps:
       - name: Download digests
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
+      - name: Download Helm chart
+        uses: actions/download-artifact@v7
+        with:
+          name: helm-chart
+          path: /tmp/helm
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Extract metadata (tags, labels) for Docker
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/vitistack/viti-talos-operator
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -127,69 +156,26 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create manifest list and push
+      - name: Create and push multi-arch manifest
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf 'ghcr.io/vitistack/viti-talos-operator@sha256:%s ' *)
+            $(printf '${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
-      - name: Inspect image
+      - name: Push Helm chart
         run: |
-          docker buildx imagetools inspect ghcr.io/vitistack/viti-talos-operator:${{ steps.meta.outputs.version }}
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+          helm push /tmp/helm/talos-operator-*.tgz oci://${{ env.HELM_REGISTRY }}
 
-  create-chart-package:
-    name: Create and Push Helm Chart
-    needs: merge-manifests
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.extract-version.outputs.version }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: 'latest'
+      - name: Sign container image
+        run: cosign sign --yes ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
 
-      - name: Extract version
-        id: extract-version
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v*}"
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Install yq
-        run: |
-          sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
-          sudo chmod +x /usr/local/bin/yq
-
-      - name: Update chart version and app version
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v*}"
-
-          yq -i ".version = \"${VERSION}\"" charts/talos-operator/Chart.yaml
-          yq -i ".appVersion = \"${VERSION}\"" charts/talos-operator/Chart.yaml
-          yq -i ".image.tag = \"${VERSION}\"" charts/talos-operator/values.yaml
-
-      - name: Package Helm chart
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v*}"
-          helm package charts/talos-operator
-
-      - name: Log in to GitHub Container Registry
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Push Helm chart to OCI registry
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v*}"
-          helm push talos-operator-${VERSION}.tgz oci://ghcr.io/vitistack/helm
+      - name: Sign Helm chart
+        run: cosign sign --yes ${{ env.HELM_REGISTRY }}/talos-operator:${{ needs.package-helm.outputs.version }}

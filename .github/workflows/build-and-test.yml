@@ -6,9 +6,13 @@ on:
   pull_request:
     branches: ['main', 'master']
 
+env:
+  GO_VERSION_FILE: go.mod
+
 jobs:
-  build-test-checksecurity:
-    name: Build, lint, test and check security
+  # First job: Build and generate artifacts needed by other jobs
+  build:
+    name: Build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -17,59 +21,101 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ env.GO_VERSION_FILE }}
           cache: true
           cache-dependency-path: go.sum
 
-      # Cache bin folder (Go tools and built binaries)
-      - name: Cache bin folder
+      - name: Build
+        run: make build
+
+  # Lint runs in parallel with test and security
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Cache golangci-lint
         uses: actions/cache@v5
         with:
-          path: bin
-          key: ${{ runner.os }}-bin-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
+          path: |
+            bin/golangci-lint*
+            ~/.cache/golangci-lint
+          key: ${{ runner.os }}-golangci-lint-${{ hashFiles('go.mod') }}
           restore-keys: |
-            ${{ runner.os }}-bin-
-
-      - name: Install dependencies
-        run: |
-          go mod download
-
-      - name: Build
-        run: |
-          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.0' }}"
-          VERSION="${VERSION#v*}"
-          echo "Version $VERSION"
-          make build
+            ${{ runner.os }}-golangci-lint-
 
       - name: Lint
-        run: |
-          make lint
+        run: make lint
 
-      - name: Setup test environment
-        run: |
-          if [ ! -d "bin/k8s" ] || [ -z "$(ls -A bin/k8s 2>/dev/null)" ]; then
-            echo "Setting up test environment..."
-            make test-setup
-          else
-            echo "Using cached test environment"
-            make manifests generate
-          fi
+  # Test runs in parallel
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Cache envtest binaries
+        uses: actions/cache@v5
+        with:
+          path: bin/k8s
+          key: ${{ runner.os }}-envtest-${{ hashFiles('go.mod') }}
+          restore-keys: |
+            ${{ runner.os }}-envtest-
+
+      - name: Cache tools
+        uses: actions/cache@v5
+        with:
+          path: |
+            bin/controller-gen*
+            bin/setup-envtest*
+          key: ${{ runner.os }}-tools-${{ hashFiles('go.mod', 'Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-tools-
+
       - name: Run tests
-        run: |
-          make test
-          go tool cover -func=coverage.out
+        run: make test
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: coverage
           path: coverage.out
           retention-days: 7
 
-      - name: Run gosec security scan
-        run: |
-          make gosec
+  # Security scans run in parallel
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
 
-      - name: Run govulncheck vulnerability scan
-        run: |
-          make govulncheck
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Run gosec
+        run: make gosec
+
+      - name: Run govulncheck
+        run: make govulncheck
