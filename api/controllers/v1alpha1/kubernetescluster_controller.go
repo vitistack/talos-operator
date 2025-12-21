@@ -11,8 +11,10 @@ import (
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
+	"github.com/vitistack/talos-operator/internal/services/machineservice"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
+	"github.com/vitistack/talos-operator/internal/services/upgradeservice"
 	"github.com/vitistack/talos-operator/internal/services/validationservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +35,7 @@ type KubernetesClusterReconciler struct {
 	MachineManager   *machine.MachineManager              // Manager for Machine resources
 	StatusManager    *status.StatusManager                // Manager for status updates
 	ValidatorService *validationservice.ValidationService // Service for validating resources
+	UpgradeService   *upgradeservice.UpgradeService       // Service for managing upgrades
 
 	SecretService *secretservice.SecretService
 }
@@ -114,6 +117,11 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
+	// Handle upgrade requests (only for ready clusters)
+	if result, handled := r.handleUpgrades(ctx, kubernetesCluster); handled {
+		return result, nil
+	}
+
 	// Update KubernetesCluster status (skip if being deleted)
 	if kubernetesCluster.GetDeletionTimestamp() == nil {
 		if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, kubernetesCluster); err != nil {
@@ -122,6 +130,107 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
+}
+
+// handleUpgrades checks for and processes upgrade requests via annotations.
+// Returns (result, true) if an upgrade was handled/in-progress, (_, false) if no upgrade action needed.
+func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, bool) {
+	// Only handle upgrades for clusters that are ready
+	if cluster.Status.Phase != status.PhaseReady &&
+		cluster.Status.Phase != status.PhaseUpgradingTalos &&
+		cluster.Status.Phase != status.PhaseUpgradingKubernetes {
+		return ctrl.Result{}, false
+	}
+
+	state := r.UpgradeService.GetUpgradeState(cluster)
+
+	// Handle ongoing Talos upgrade
+	if state.TalosStatus == consts.UpgradeStatusInProgress {
+		vlog.Info(fmt.Sprintf("Talos upgrade in progress: cluster=%s progress=%s", cluster.Name, state.TalosProgress))
+		// TODO: Check node upgrade status and continue rolling upgrade
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+	}
+
+	// Handle ongoing Kubernetes upgrade
+	if state.KubernetesStatus == consts.UpgradeStatusInProgress {
+		vlog.Info(fmt.Sprintf("Kubernetes upgrade in progress: cluster=%s", cluster.Name))
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+	}
+
+	// Check for new Talos upgrade request
+	if r.UpgradeService.IsTalosUpgradeRequested(cluster) {
+		return r.handleTalosUpgradeRequest(ctx, cluster, state)
+	}
+
+	// Check for new Kubernetes upgrade request (only if no Talos upgrade pending)
+	if r.UpgradeService.IsKubernetesUpgradeRequested(cluster) {
+		return r.handleKubernetesUpgradeRequest(ctx, cluster, state)
+	}
+
+	return ctrl.Result{}, false
+}
+
+// handleTalosUpgradeRequest processes a Talos upgrade request
+func (r *KubernetesClusterReconciler) handleTalosUpgradeRequest(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, state *upgradeservice.UpgradeState) (ctrl.Result, bool) {
+	vlog.Info(fmt.Sprintf("Processing Talos upgrade request: cluster=%s current=%s target=%s",
+		cluster.Name, state.TalosCurrent, state.TalosTarget))
+
+	// Validate upgrade target
+	if err := r.UpgradeService.ValidateUpgradeTarget(state.TalosCurrent, state.TalosTarget); err != nil {
+		vlog.Error(fmt.Sprintf("Invalid Talos upgrade target: %v", err), err)
+		_ = r.UpgradeService.FailTalosUpgrade(ctx, cluster, err.Error())
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Get all machines for this cluster
+	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to get cluster machines for upgrade", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Start the upgrade
+	if err := r.UpgradeService.StartTalosUpgrade(ctx, cluster, len(machines)); err != nil {
+		vlog.Error("Failed to start Talos upgrade", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	vlog.Info(fmt.Sprintf("Talos upgrade started: cluster=%s nodes=%d", cluster.Name, len(machines)))
+
+	// The actual upgrade execution will happen on subsequent reconcile loops
+	// as the orchestrator processes nodes one by one
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, true
+}
+
+// handleKubernetesUpgradeRequest processes a Kubernetes upgrade request
+func (r *KubernetesClusterReconciler) handleKubernetesUpgradeRequest(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, state *upgradeservice.UpgradeState) (ctrl.Result, bool) {
+	vlog.Info(fmt.Sprintf("Processing Kubernetes upgrade request: cluster=%s current=%s target=%s",
+		cluster.Name, state.KubernetesCurrent, state.KubernetesTarget))
+
+	// Check if Kubernetes upgrade should be blocked
+	if blocked, reason := r.UpgradeService.ShouldBlockKubernetesUpgrade(cluster); blocked {
+		vlog.Info(fmt.Sprintf("Kubernetes upgrade blocked: cluster=%s reason=%s", cluster.Name, reason))
+		_ = r.UpgradeService.BlockKubernetesUpgrade(ctx, cluster, reason)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Validate upgrade target
+	if err := r.UpgradeService.ValidateUpgradeTarget(state.KubernetesCurrent, state.KubernetesTarget); err != nil {
+		vlog.Error(fmt.Sprintf("Invalid Kubernetes upgrade target: %v", err), err)
+		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, err.Error())
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Start the upgrade
+	if err := r.UpgradeService.StartKubernetesUpgrade(ctx, cluster); err != nil {
+		vlog.Error("Failed to start Kubernetes upgrade", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade started: cluster=%s", cluster.Name))
+
+	// The actual upgrade execution will happen via the TalosManager
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, true
 }
 
 // handleScaleDown handles machine scale-down operations.
@@ -321,6 +430,8 @@ func (r *KubernetesClusterReconciler) getFreshCluster(ctx context.Context, kc *v
 func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *KubernetesClusterReconciler {
 	secretService := secretservice.NewSecretService(c)
 	statusManager := status.NewManager(c, secretService)
+	clientService := talosclientservice.NewTalosClientService()
+	machineSvc := machineservice.NewMachineService(c)
 	return &KubernetesClusterReconciler{
 		Client:           c,
 		Scheme:           scheme,
@@ -329,6 +440,7 @@ func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *Ku
 		MachineManager:   machine.NewMachineManager(c, scheme),
 		StatusManager:    statusManager,
 		ValidatorService: validationservice.NewValidationService(),
+		UpgradeService:   upgradeservice.NewUpgradeService(c, statusManager, clientService, machineSvc),
 	}
 }
 

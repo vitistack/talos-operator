@@ -120,3 +120,101 @@ const (
 	// This annotation is generic so any Kubernetes operator can use it.
 	OSInstalledAnnotation = "vitistack.io/os-installed"
 )
+
+// Upgrade annotation constants for KubernetesCluster resources.
+// These annotations enable a provider-agnostic upgrade flow where:
+// 1. Operator detects available upgrades and sets *-available annotations
+// 2. User triggers upgrades by setting *-target annotations
+// 3. Operator performs upgrades and updates *-current/*-status annotations
+const (
+	// AnnotationPrefix is the base prefix for all upgrade annotations
+	UpgradeAnnotationPrefix = "upgrade.vitistack.io/"
+
+	// === TALOS UPGRADE ANNOTATIONS ===
+
+	// TalosAvailableAnnotation indicates a new Talos version is available for upgrade.
+	// Set by operator when a newer Talos version is detected.
+	// Value: version string (e.g., "1.9.0")
+	TalosAvailableAnnotation = UpgradeAnnotationPrefix + "talos-available"
+
+	// TalosCurrentAnnotation indicates the current running Talos version.
+	// Set and maintained by operator.
+	// Value: version string (e.g., "1.8.0")
+	TalosCurrentAnnotation = UpgradeAnnotationPrefix + "talos-current"
+
+	// TalosTargetAnnotation triggers a Talos upgrade when set by user.
+	// Set by user to request an upgrade to the specified version.
+	// Removed by operator after successful upgrade.
+	// Value: version string (e.g., "1.9.0")
+	TalosTargetAnnotation = UpgradeAnnotationPrefix + "talos-target"
+
+	// TalosStatusAnnotation indicates the current Talos upgrade status.
+	// Set by operator during upgrade process.
+	// Value: one of UpgradeStatus* constants
+	TalosStatusAnnotation = UpgradeAnnotationPrefix + "talos-status"
+
+	// TalosMessageAnnotation provides human-readable upgrade progress/status.
+	// Set by operator during upgrade process.
+	// Value: status message (e.g., "Upgrading node cp-0 (1/5)")
+	TalosMessageAnnotation = UpgradeAnnotationPrefix + "talos-message"
+
+	// TalosProgressAnnotation tracks upgrade progress.
+	// Set by operator during rolling upgrades.
+	// Value: "nodesUpgraded/totalNodes" (e.g., "2/5")
+	TalosProgressAnnotation = UpgradeAnnotationPrefix + "talos-progress"
+
+	// === KUBERNETES UPGRADE ANNOTATIONS ===
+
+	// KubernetesAvailableAnnotation indicates a new Kubernetes version is available.
+	// Only set by operator when Talos version supports the new K8s version.
+	// Value: version string (e.g., "1.32.0")
+	KubernetesAvailableAnnotation = UpgradeAnnotationPrefix + "kubernetes-available"
+
+	// KubernetesCurrentAnnotation indicates the current running Kubernetes version.
+	// Set and maintained by operator.
+	// Value: version string (e.g., "1.31.0")
+	KubernetesCurrentAnnotation = UpgradeAnnotationPrefix + "kubernetes-current"
+
+	// KubernetesTargetAnnotation triggers a Kubernetes upgrade when set by user.
+	// Set by user to request an upgrade to the specified version.
+	// Removed by operator after successful upgrade.
+	// Blocked if Talos version is incompatible.
+	// Value: version string (e.g., "1.32.0")
+	KubernetesTargetAnnotation = UpgradeAnnotationPrefix + "kubernetes-target"
+
+	// KubernetesStatusAnnotation indicates the current Kubernetes upgrade status.
+	// Set by operator during upgrade process.
+	// Value: one of UpgradeStatus* constants
+	KubernetesStatusAnnotation = UpgradeAnnotationPrefix + "kubernetes-status"
+
+	// KubernetesMessageAnnotation provides human-readable upgrade progress/status.
+	// Set by operator during upgrade process.
+	// Value: status message (e.g., "Upgrading Kubernetes components")
+	KubernetesMessageAnnotation = UpgradeAnnotationPrefix + "kubernetes-message"
+)
+
+// UpgradeStatus constants for *-status annotations
+type UpgradeStatus string
+
+const (
+	// UpgradeStatusIdle indicates no upgrade is in progress
+	UpgradeStatusIdle UpgradeStatus = "idle"
+
+	// UpgradeStatusPending indicates an upgrade is queued but not started
+	UpgradeStatusPending UpgradeStatus = "pending"
+
+	// UpgradeStatusInProgress indicates an upgrade is currently running
+	UpgradeStatusInProgress UpgradeStatus = "in-progress"
+
+	// UpgradeStatusCompleted indicates an upgrade finished successfully
+	UpgradeStatusCompleted UpgradeStatus = "completed"
+
+	// UpgradeStatusFailed indicates an upgrade failed
+	UpgradeStatusFailed UpgradeStatus = "failed"
+
+	// UpgradeStatusBlocked indicates an upgrade is blocked (e.g., K8s blocked by Talos version)
+	UpgradeStatusBlocked UpgradeStatus = "blocked"
+
+	// UpgradeStatusRollingBack indicates a rollback is in progress
+	UpgradeStatusRollingBack UpgradeStatus = "rolling-back"
+)

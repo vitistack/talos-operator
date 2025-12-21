@@ -27,6 +27,14 @@ const (
 	phaseReady           = "Ready"
 	phaseRunning         = "Running"
 	PhaseValidationError = "ValidationError"
+
+	// Upgrade-related phases
+	PhaseUpgradingTalos      = "UpgradingTalos"
+	PhaseUpgradingKubernetes = "UpgradingKubernetes"
+	PhaseUpgradeFailed       = "UpgradeFailed"
+
+	// Exported phases for use by other packages
+	PhaseReady = phaseReady
 )
 
 // StatusManager handles machine status updates and monitoring
