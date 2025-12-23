@@ -161,6 +161,11 @@ func (t *TalosManager) GetClientService() *talosclientservice.TalosClientService
 	return t.clientService
 }
 
+// GetStateService returns the Talos state service for version/upgrade state management
+func (t *TalosManager) GetStateService() *talosstateservice.TalosStateService {
+	return t.stateService
+}
+
 // talosSecretFlags is an alias to the state service's TalosSecretFlags type
 type talosSecretFlags = talosstateservice.TalosSecretFlags
 

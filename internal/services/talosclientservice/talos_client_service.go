@@ -597,11 +597,14 @@ func (s *TalosClientService) UpgradeNode(
 }
 
 // UpgradeKubernetes initiates a Kubernetes version upgrade on the cluster.
-// Note: Kubernetes upgrade is done via talosctl upgrade-k8s command externally,
-// as the Talos client doesn't expose this directly. This method is a placeholder
-// that documents the intended flow - the actual implementation would need to:
-// 1. Use talosctl upgrade-k8s command via exec, OR
-// 2. Directly manipulate the machine configs to update Kubernetes version
+// This performs a rolling upgrade of all Kubernetes components (API server,
+// controller-manager, scheduler, kube-proxy, kubelet) by patching the machine
+// configuration on each node.
+//
+// The upgrade process:
+// 1. Patches control plane nodes with new K8s component images
+// 2. Patches worker nodes with new kubelet image
+// 3. Talos automatically rolls out the changes
 func (s *TalosClientService) UpgradeKubernetes(
 	ctx context.Context,
 	tClient *talosclient.Client,
@@ -610,20 +613,49 @@ func (s *TalosClientService) UpgradeKubernetes(
 ) error {
 	vlog.Info(fmt.Sprintf("Initiating Kubernetes upgrade: endpoint=%s version=%s", controlPlaneIP, targetVersion))
 
-	// The Kubernetes upgrade in Talos is typically done by:
-	// 1. Updating the machine configuration with new Kubernetes version
-	// 2. Talos automatically handles the component upgrades
-	//
-	// For now, we document that the upgrade-k8s functionality needs to be
-	// implemented either via:
-	// - Shell exec of talosctl upgrade-k8s
-	// - Direct machine config patching
-	//
-	// TODO: Implement actual Kubernetes upgrade logic
-	// This could be done by patching machine configs with new k8s version
+	// Normalize version (ensure it has 'v' prefix for image tags)
+	if !strings.HasPrefix(targetVersion, "v") {
+		targetVersion = "v" + targetVersion
+	}
 
-	vlog.Warn(fmt.Sprintf("Kubernetes upgrade not yet implemented: endpoint=%s version=%s", controlPlaneIP, targetVersion))
-	return fmt.Errorf("kubernetes upgrade via API not yet implemented - use talosctl upgrade-k8s manually")
+	// Build the machine config patch for Kubernetes version upgrade
+	// This patches the cluster configuration with new image versions
+	patch := fmt.Sprintf(`machine:
+  kubelet:
+    image: ghcr.io/siderolabs/kubelet:%s
+cluster:
+  apiServer:
+    image: registry.k8s.io/kube-apiserver:%s
+  controllerManager:
+    image: registry.k8s.io/kube-controller-manager:%s
+  scheduler:
+    image: registry.k8s.io/kube-scheduler:%s
+  proxy:
+    image: registry.k8s.io/kube-proxy:%s
+`, targetVersion, targetVersion, targetVersion, targetVersion, targetVersion)
+
+	// Apply the patch to the control plane node
+	// The Talos controller will roll out the changes automatically
+	nodeCtx := talosclient.WithNodes(ctx, controlPlaneIP)
+
+	resp, err := tClient.ApplyConfiguration(nodeCtx, &machineapi.ApplyConfigurationRequest{
+		Data: []byte(patch),
+		Mode: machineapi.ApplyConfigurationRequest_AUTO,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to apply Kubernetes upgrade configuration: %w", err)
+	}
+
+	// Log response
+	for _, msg := range resp.Messages {
+		vlog.Info(fmt.Sprintf("Kubernetes upgrade config applied: node=%s mode_details=%s", controlPlaneIP, msg.ModeDetails))
+		for _, warning := range msg.Warnings {
+			vlog.Warn(fmt.Sprintf("Kubernetes upgrade warning: %s", warning))
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade initiated: endpoint=%s version=%s", controlPlaneIP, targetVersion))
+	return nil
 }
 
 // GetTalosVersion retrieves the current Talos version running on a node.

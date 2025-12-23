@@ -32,6 +32,8 @@ type NodeUpgradeInfo struct {
 	Role     string // "control-plane" or "worker"
 	Machine  *vitistackv1alpha1.Machine
 	Upgraded bool
+	Failed   bool // Node previously failed upgrade
+	Skipped  bool // Node should be skipped
 }
 
 // UpgradeResult contains the result of an upgrade operation
@@ -40,6 +42,7 @@ type UpgradeResult struct {
 	NodesUpgraded int
 	TotalNodes    int
 	FailedNode    string
+	SkippedNodes  []string // Nodes that were skipped (e.g., previously failed)
 	Error         error
 	NeedsRequeue  bool
 	RequeueAfter  time.Duration
@@ -75,9 +78,25 @@ func (o *UpgradeOrchestrator) PerformTalosUpgrade(
 
 	// Find the next node that needs upgrading
 	nodesUpgraded := 0
+	var skippedNodes []string
 	for i, node := range orderedNodes {
+		// Count already upgraded nodes
 		if node.Upgraded {
 			nodesUpgraded++
+			continue
+		}
+
+		// Skip nodes marked as skipped (e.g., previously failed and user chose to skip)
+		if node.Skipped {
+			skippedNodes = append(skippedNodes, node.Name)
+			vlog.Info(fmt.Sprintf("Skipping node %s as requested", node.Name))
+			continue
+		}
+
+		// Skip nodes that previously failed (unless retry is requested)
+		if node.Failed {
+			skippedNodes = append(skippedNodes, node.Name)
+			vlog.Warn(fmt.Sprintf("Skipping previously failed node %s (use retry-failed-nodes annotation to retry)", node.Name))
 			continue
 		}
 
@@ -98,7 +117,15 @@ func (o *UpgradeOrchestrator) PerformTalosUpgrade(
 				NodesUpgraded: nodesUpgraded,
 				TotalNodes:    totalNodes,
 				FailedNode:    node.Name,
+				SkippedNodes:  skippedNodes,
 				Error:         err,
+			}
+		}
+
+		// Mark node as upgraded in the state service
+		if o.upgradeService.stateService != nil {
+			if err := o.upgradeService.stateService.MarkNodeUpgraded(ctx, cluster, node.Name); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to mark node %s as upgraded in state: %v", node.Name, err))
 			}
 		}
 
@@ -112,17 +139,24 @@ func (o *UpgradeOrchestrator) PerformTalosUpgrade(
 			Success:       true,
 			NodesUpgraded: nodesUpgraded,
 			TotalNodes:    totalNodes,
+			SkippedNodes:  skippedNodes,
 			NeedsRequeue:  true,
 			RequeueAfter:  30 * time.Second, // Check again after 30s
 		}
 	}
 
-	// All nodes upgraded
-	vlog.Info(fmt.Sprintf("All nodes upgraded: cluster=%s nodes=%d", cluster.Name, totalNodes))
+	// All nodes upgraded (or skipped)
+	if len(skippedNodes) > 0 {
+		vlog.Warn(fmt.Sprintf("Upgrade completed with skipped nodes: cluster=%s upgraded=%d skipped=%d nodes=%v",
+			cluster.Name, nodesUpgraded, len(skippedNodes), skippedNodes))
+	} else {
+		vlog.Info(fmt.Sprintf("All nodes upgraded: cluster=%s nodes=%d", cluster.Name, nodesUpgraded))
+	}
 	return &UpgradeResult{
 		Success:       true,
-		NodesUpgraded: totalNodes,
+		NodesUpgraded: nodesUpgraded,
 		TotalNodes:    totalNodes,
+		SkippedNodes:  skippedNodes,
 		NeedsRequeue:  false,
 	}
 }

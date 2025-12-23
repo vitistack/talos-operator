@@ -192,6 +192,31 @@ const (
 	// Set by operator during upgrade process.
 	// Value: status message (e.g., "Upgrading Kubernetes components")
 	KubernetesMessageAnnotation = UpgradeAnnotationPrefix + "kubernetes-message"
+
+	// === UPGRADE CONTROL ANNOTATIONS ===
+
+	// ResumeUpgradeAnnotation triggers resume of a failed/interrupted upgrade.
+	// Set by user to "true" to resume an upgrade that was interrupted or partially failed.
+	// Removed by operator after processing.
+	// Value: "true" to resume
+	ResumeUpgradeAnnotation = UpgradeAnnotationPrefix + "resume"
+
+	// SkipFailedNodesAnnotation instructs operator to skip failed nodes and continue.
+	// Set by user to "true" to skip nodes that failed upgrade and continue with remaining nodes.
+	// Removed by operator after processing.
+	// Value: "true" to skip failed nodes
+	SkipFailedNodesAnnotation = UpgradeAnnotationPrefix + "skip-failed-nodes"
+
+	// RetryFailedNodesAnnotation instructs operator to retry upgrading failed nodes.
+	// Set by user to "true" to retry nodes that previously failed.
+	// Removed by operator after processing.
+	// Value: "true" to retry failed nodes
+	RetryFailedNodesAnnotation = UpgradeAnnotationPrefix + "retry-failed-nodes"
+
+	// FailedNodesAnnotation lists the nodes that failed during upgrade.
+	// Set by operator when nodes fail.
+	// Value: comma-separated list of node names (e.g., "worker-1,worker-2")
+	FailedNodesAnnotation = UpgradeAnnotationPrefix + "failed-nodes"
 )
 
 // UpgradeStatus constants for *-status annotations
