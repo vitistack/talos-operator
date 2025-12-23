@@ -3,6 +3,7 @@ package talosstateservice
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,20 @@ func (s *TalosStateService) EnsureSecretExists(ctx context.Context, cluster *vit
 		"first_controlplane_ready":   []byte(falseStr),
 		"configured_nodes":           []byte(""), // comma-separated list of node names that have been configured
 		"created_at":                 []byte(now),
+		// Version tracking - persisted for recovery and verification
+		"talos_version":      []byte(""),
+		"kubernetes_version": []byte(""),
+		// Upgrade state tracking - for resume/recovery of interrupted upgrades
+		"upgrade_in_progress":    []byte(falseStr),
+		"upgrade_type":           []byte(""),  // "talos" or "kubernetes"
+		"upgrade_target":         []byte(""),  // target version
+		"upgrade_started_at":     []byte(""),  // when upgrade started
+		"upgrade_last_node":      []byte(""),  // last node being upgraded (for resume)
+		"upgrade_nodes_done":     []byte("0"), // count of completed nodes
+		"upgrade_nodes_total":    []byte("0"), // total nodes to upgrade
+		"upgrade_upgraded_nodes": []byte(""),  // comma-separated list of successfully upgraded node names
+		"upgrade_failed_nodes":   []byte(""),  // comma-separated list of failed node names with error
+		"upgrade_failed_reason":  []byte(""),  // reason for last failure
 	}
 	err = s.secretService.CreateTalosSecret(ctx, cluster, data)
 	if err == nil {
@@ -212,6 +227,439 @@ func (s *TalosStateService) GetState(ctx context.Context, cluster *vitistackv1al
 		hasKubeconfig = true
 	}
 	return bootstrapped, hasKubeconfig, nil
+}
+
+// ClusterVersions holds the persisted version information from the secret
+type ClusterVersions struct {
+	TalosVersion      string
+	KubernetesVersion string
+}
+
+// UpgradeStateInfo holds the persisted upgrade state for recovery
+type UpgradeStateInfo struct {
+	InProgress    bool
+	UpgradeType   string   // "talos" or "kubernetes"
+	Target        string   // target version
+	StartedAt     string   // RFC3339 timestamp
+	LastNode      string   // last node being upgraded
+	NodesDone     int      // count of completed nodes
+	NodesTotal    int      // total nodes to upgrade
+	UpgradedNodes []string // list of successfully upgraded node names
+	FailedNodes   []string // list of failed node names
+	FailedReason  string   // reason for last failure
+}
+
+// GetClusterVersions retrieves the persisted Talos and Kubernetes versions from the secret
+func (s *TalosStateService) GetClusterVersions(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*ClusterVersions, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if secret.Data == nil {
+		return &ClusterVersions{}, nil
+	}
+	return &ClusterVersions{
+		TalosVersion:      string(secret.Data["talos_version"]),
+		KubernetesVersion: string(secret.Data["kubernetes_version"]),
+	}, nil
+}
+
+// SetClusterVersions persists the Talos and Kubernetes versions in the secret
+func (s *TalosStateService) SetClusterVersions(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, talosVersion, kubernetesVersion string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		if talosVersion != "" {
+			secret.Data["talos_version"] = []byte(talosVersion)
+		}
+		if kubernetesVersion != "" {
+			secret.Data["kubernetes_version"] = []byte(kubernetesVersion)
+		}
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to set cluster versions after %d retries", maxRetries)
+}
+
+// GetUpgradeState retrieves the persisted upgrade state from the secret
+func (s *TalosStateService) GetUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*UpgradeStateInfo, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if secret.Data == nil {
+		return &UpgradeStateInfo{}, nil
+	}
+
+	nodesDone := 0
+	nodesTotal := 0
+	if v := string(secret.Data["upgrade_nodes_done"]); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			nodesDone = parsed
+		}
+	}
+	if v := string(secret.Data["upgrade_nodes_total"]); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			nodesTotal = parsed
+		}
+	}
+
+	// Parse upgraded and failed nodes lists
+	var upgradedNodes, failedNodes []string
+	if v := string(secret.Data["upgrade_upgraded_nodes"]); v != "" {
+		upgradedNodes = strings.Split(v, ",")
+	}
+	if v := string(secret.Data["upgrade_failed_nodes"]); v != "" {
+		failedNodes = strings.Split(v, ",")
+	}
+
+	return &UpgradeStateInfo{
+		InProgress:    isFlagTrue(secret.Data, "upgrade_in_progress"),
+		UpgradeType:   string(secret.Data["upgrade_type"]),
+		Target:        string(secret.Data["upgrade_target"]),
+		StartedAt:     string(secret.Data["upgrade_started_at"]),
+		LastNode:      string(secret.Data["upgrade_last_node"]),
+		NodesDone:     nodesDone,
+		NodesTotal:    nodesTotal,
+		UpgradedNodes: upgradedNodes,
+		FailedNodes:   failedNodes,
+		FailedReason:  string(secret.Data["upgrade_failed_reason"]),
+	}, nil
+}
+
+// StartUpgradeState marks an upgrade as in progress in the secret for recovery purposes
+func (s *TalosStateService) StartUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, upgradeType, targetVersion string, totalNodes int) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+		secret.Data["upgrade_in_progress"] = []byte(trueStr)
+		secret.Data["upgrade_type"] = []byte(upgradeType)
+		secret.Data["upgrade_target"] = []byte(targetVersion)
+		secret.Data["upgrade_started_at"] = []byte(now)
+		secret.Data["upgrade_last_node"] = []byte("")
+		secret.Data["upgrade_nodes_done"] = []byte("0")
+		secret.Data["upgrade_nodes_total"] = []byte(fmt.Sprintf("%d", totalNodes))
+		// Clear node tracking lists for fresh upgrade
+		secret.Data["upgrade_upgraded_nodes"] = []byte("")
+		secret.Data["upgrade_failed_nodes"] = []byte("")
+		secret.Data["upgrade_failed_reason"] = []byte("")
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Upgrade state persisted: cluster=%s type=%s target=%s nodes=%d",
+				cluster.Name, upgradeType, targetVersion, totalNodes))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to start upgrade state after %d retries", maxRetries)
+}
+
+// UpdateUpgradeProgress updates the upgrade progress in the secret
+func (s *TalosStateService) UpdateUpgradeProgress(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string, nodesDone int) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		secret.Data["upgrade_last_node"] = []byte(nodeName)
+		secret.Data["upgrade_nodes_done"] = []byte(fmt.Sprintf("%d", nodesDone))
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to update upgrade progress after %d retries", maxRetries)
+}
+
+// MarkNodeUpgraded adds a node to the list of successfully upgraded nodes
+func (s *TalosStateService) MarkNodeUpgraded(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		// Parse existing upgraded nodes and add new one
+		existingNodes := string(secret.Data["upgrade_upgraded_nodes"])
+		var nodes []string
+		if existingNodes != "" {
+			nodes = strings.Split(existingNodes, ",")
+		}
+
+		// Check if already in list
+		for _, n := range nodes {
+			if n == nodeName {
+				return nil // Already marked
+			}
+		}
+
+		nodes = append(nodes, nodeName)
+		secret.Data["upgrade_upgraded_nodes"] = []byte(strings.Join(nodes, ","))
+
+		// Also update nodes done count
+		nodesDone := len(nodes)
+		secret.Data["upgrade_nodes_done"] = []byte(fmt.Sprintf("%d", nodesDone))
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Node marked as upgraded: cluster=%s node=%s (%d done)", cluster.Name, nodeName, nodesDone))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to mark node upgraded after %d retries", maxRetries)
+}
+
+// MarkNodeFailed adds a node to the list of failed nodes with a reason
+func (s *TalosStateService) MarkNodeFailed(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName, reason string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		// Parse existing failed nodes and add new one
+		existingNodes := string(secret.Data["upgrade_failed_nodes"])
+		var nodes []string
+		if existingNodes != "" {
+			nodes = strings.Split(existingNodes, ",")
+		}
+
+		// Check if already in list
+		for _, n := range nodes {
+			if n == nodeName {
+				// Update reason only
+				secret.Data["upgrade_failed_reason"] = []byte(reason)
+				return s.secretService.UpdateTalosSecret(ctx, secret)
+			}
+		}
+
+		nodes = append(nodes, nodeName)
+		secret.Data["upgrade_failed_nodes"] = []byte(strings.Join(nodes, ","))
+		secret.Data["upgrade_failed_reason"] = []byte(reason)
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Warn(fmt.Sprintf("Node marked as failed: cluster=%s node=%s reason=%s", cluster.Name, nodeName, reason))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to mark node failed after %d retries", maxRetries)
+}
+
+// IsNodeUpgraded checks if a node is in the upgraded list
+func (s *TalosStateService) IsNodeUpgraded(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) bool {
+	state, err := s.GetUpgradeState(ctx, cluster)
+	if err != nil {
+		return false
+	}
+	for _, n := range state.UpgradedNodes {
+		if n == nodeName {
+			return true
+		}
+	}
+	return false
+}
+
+// IsNodeFailed checks if a node is in the failed list
+func (s *TalosStateService) IsNodeFailed(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) bool {
+	state, err := s.GetUpgradeState(ctx, cluster)
+	if err != nil {
+		return false
+	}
+	for _, n := range state.FailedNodes {
+		if n == nodeName {
+			return true
+		}
+	}
+	return false
+}
+
+// ClearNodeFromFailed removes a node from the failed list (for retry)
+func (s *TalosStateService) ClearNodeFromFailed(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			return nil
+		}
+
+		existingNodes := string(secret.Data["upgrade_failed_nodes"])
+		if existingNodes == "" {
+			return nil
+		}
+
+		nodes := strings.Split(existingNodes, ",")
+		var newNodes []string
+		found := false
+		for _, n := range nodes {
+			if n != nodeName {
+				newNodes = append(newNodes, n)
+			} else {
+				found = true
+			}
+		}
+
+		if !found {
+			return nil
+		}
+
+		secret.Data["upgrade_failed_nodes"] = []byte(strings.Join(newNodes, ","))
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Node cleared from failed list for retry: cluster=%s node=%s", cluster.Name, nodeName))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to clear node from failed list after %d retries", maxRetries)
+}
+
+// CompleteUpgradeState marks an upgrade as complete and updates the version in the secret
+func (s *TalosStateService) CompleteUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, upgradeType, newVersion string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		// Update the appropriate version field
+		switch upgradeType {
+		case "talos":
+			secret.Data["talos_version"] = []byte(newVersion)
+		case "kubernetes":
+			secret.Data["kubernetes_version"] = []byte(newVersion)
+		}
+
+		// Clear upgrade state
+		now := time.Now().UTC().Format(time.RFC3339)
+		secret.Data["upgrade_in_progress"] = []byte(falseStr)
+		secret.Data["upgrade_type"] = []byte("")
+		secret.Data["upgrade_target"] = []byte("")
+		secret.Data["upgrade_completed_at"] = []byte(now)
+		secret.Data["upgrade_last_node"] = []byte("")
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Upgrade completed and version persisted: cluster=%s type=%s version=%s",
+				cluster.Name, upgradeType, newVersion))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to complete upgrade state after %d retries", maxRetries)
+}
+
+// ClearUpgradeState clears the upgrade state (e.g., on failure or manual reset)
+func (s *TalosStateService) ClearUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			return nil // Nothing to clear
+		}
+
+		secret.Data["upgrade_in_progress"] = []byte(falseStr)
+		secret.Data["upgrade_type"] = []byte("")
+		secret.Data["upgrade_target"] = []byte("")
+		secret.Data["upgrade_last_node"] = []byte("")
+		secret.Data["upgrade_nodes_done"] = []byte("0")
+		secret.Data["upgrade_nodes_total"] = []byte("0")
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to clear upgrade state after %d retries", maxRetries)
 }
 
 // LoadTalosArtifacts attempts to read talosconfig (and ensures role templates exist) from the consolidated Secret.

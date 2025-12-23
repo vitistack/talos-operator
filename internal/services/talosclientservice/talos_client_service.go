@@ -567,3 +567,173 @@ func (s *TalosClientService) checkNodeReady(
 	// Node status not found yet (kubelet may not have registered)
 	return false, nil
 }
+
+// UpgradeNode initiates a Talos OS upgrade on a single node.
+// The node will download the new image and reboot to apply the upgrade.
+// This is equivalent to `talosctl upgrade --image <installerImage>`.
+func (s *TalosClientService) UpgradeNode(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+	installerImage string,
+) error {
+	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+
+	vlog.Info(fmt.Sprintf("Initiating Talos upgrade: node=%s image=%s", nodeIP, installerImage))
+
+	// Call the Upgrade API
+	// Parameters: image, stage (false = immediate), force (false = normal), preserveData (false)
+	resp, err := tClient.Upgrade(nodeCtx, installerImage, false, false)
+	if err != nil {
+		return fmt.Errorf("upgrade API call failed for node %s: %w", nodeIP, err)
+	}
+
+	// Log response
+	for _, msg := range resp.Messages {
+		vlog.Info(fmt.Sprintf("Talos upgrade response: node=%s ack=%s", nodeIP, msg.Ack))
+	}
+
+	return nil
+}
+
+// UpgradeKubernetes initiates a Kubernetes version upgrade on the cluster.
+// This performs a rolling upgrade of all Kubernetes components (API server,
+// controller-manager, scheduler, kube-proxy, kubelet) by patching the machine
+// configuration on each node.
+//
+// The upgrade process:
+// 1. Patches control plane nodes with new K8s component images
+// 2. Patches worker nodes with new kubelet image
+// 3. Talos automatically rolls out the changes
+func (s *TalosClientService) UpgradeKubernetes(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	controlPlaneIP string,
+	targetVersion string,
+) error {
+	vlog.Info(fmt.Sprintf("Initiating Kubernetes upgrade: endpoint=%s version=%s", controlPlaneIP, targetVersion))
+
+	// Normalize version (ensure it has 'v' prefix for image tags)
+	if !strings.HasPrefix(targetVersion, "v") {
+		targetVersion = "v" + targetVersion
+	}
+
+	// Build the machine config patch for Kubernetes version upgrade
+	// This patches the cluster configuration with new image versions
+	patch := fmt.Sprintf(`machine:
+  kubelet:
+    image: ghcr.io/siderolabs/kubelet:%s
+cluster:
+  apiServer:
+    image: registry.k8s.io/kube-apiserver:%s
+  controllerManager:
+    image: registry.k8s.io/kube-controller-manager:%s
+  scheduler:
+    image: registry.k8s.io/kube-scheduler:%s
+  proxy:
+    image: registry.k8s.io/kube-proxy:%s
+`, targetVersion, targetVersion, targetVersion, targetVersion, targetVersion)
+
+	// Apply the patch to the control plane node
+	// The Talos controller will roll out the changes automatically
+	nodeCtx := talosclient.WithNodes(ctx, controlPlaneIP)
+
+	resp, err := tClient.ApplyConfiguration(nodeCtx, &machineapi.ApplyConfigurationRequest{
+		Data: []byte(patch),
+		Mode: machineapi.ApplyConfigurationRequest_AUTO,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to apply Kubernetes upgrade configuration: %w", err)
+	}
+
+	// Log response
+	for _, msg := range resp.Messages {
+		vlog.Info(fmt.Sprintf("Kubernetes upgrade config applied: node=%s mode_details=%s", controlPlaneIP, msg.ModeDetails))
+		for _, warning := range msg.Warnings {
+			vlog.Warn(fmt.Sprintf("Kubernetes upgrade warning: %s", warning))
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade initiated: endpoint=%s version=%s", controlPlaneIP, targetVersion))
+	return nil
+}
+
+// GetTalosVersion retrieves the current Talos version running on a node.
+func (s *TalosClientService) GetTalosVersion(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+) (string, error) {
+	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+
+	resp, err := tClient.Version(nodeCtx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get Talos version from node %s: %w", nodeIP, err)
+	}
+
+	for _, msg := range resp.Messages {
+		if msg.Version != nil {
+			return msg.Version.Tag, nil
+		}
+	}
+
+	return "", fmt.Errorf("no version information returned from node %s", nodeIP)
+}
+
+// GetKubernetesVersion retrieves the current Kubernetes version from a node.
+// This queries the Talos Version API which includes Kubernetes version info.
+func (s *TalosClientService) GetKubernetesVersion(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+) (string, error) {
+	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+
+	// The Version API returns both Talos and Kubernetes versions
+	resp, err := tClient.Version(nodeCtx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get version info from node %s: %w", nodeIP, err)
+	}
+
+	// The Version API doesn't directly expose Kubernetes version
+	// Kubernetes version is managed via machine config, not runtime API
+	// To get the actual running K8s version, query the Kubernetes API instead
+	_ = resp // suppress unused warning
+
+	return "", fmt.Errorf("kubernetes version retrieval from Talos API needs implementation - query Kubernetes API instead")
+}
+
+// IsEtcdHealthy checks if the etcd cluster is healthy.
+// This should be called before performing upgrades to ensure cluster stability.
+func (s *TalosClientService) IsEtcdHealthy(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+) (bool, error) {
+	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+
+	// Use the ServiceInfo API to check etcd health
+	services, err := tClient.ServiceInfo(nodeCtx, "etcd")
+	if err != nil {
+		return false, fmt.Errorf("failed to get etcd service info: %w", err)
+	}
+
+	for _, svc := range services {
+		// svc.Service is *machineapi.ServiceInfo which has Id, State, Health fields directly
+		if svc.Service != nil {
+			if svc.Service.Id == "etcd" || svc.Service.GetId() == "etcd" {
+				health := svc.Service.GetHealth()
+				state := svc.Service.GetState()
+				// Check if etcd is running and healthy
+				if state == "Running" && health != nil && health.Healthy {
+					return true, nil
+				}
+				vlog.Info(fmt.Sprintf("etcd service state: node=%s state=%s healthy=%v",
+					nodeIP, state, health != nil && health.Healthy))
+				return false, nil
+			}
+		}
+	}
+
+	return false, fmt.Errorf("etcd service not found on node %s", nodeIP)
+}

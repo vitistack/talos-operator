@@ -534,11 +534,23 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackv1a
 			return fmt.Errorf("failed to get machine: %w", err)
 		}
 	} else {
+		// Machine exists, check if update is needed
+		// Compare spec and labels to determine if patch is necessary
+		specChanged := !machineSpecEqual(&existingMachine.Spec, &machine.Spec)
+		labelsChanged := !mapsEqual(existingMachine.Labels, machine.Labels)
+		annotationsChanged := !annotationsContainAll(existingMachine.Annotations, machine.Annotations)
+
+		if !specChanged && !labelsChanged && !annotationsChanged {
+			// No changes needed, skip update
+			return nil
+		}
+
 		// Machine exists, update it if needed using strategic merge patch to avoid conflicts
 		patch := client.MergeFrom(existingMachine.DeepCopy())
 		existingMachine.Spec = machine.Spec
 		existingMachine.Labels = machine.Labels
-		existingMachine.Annotations = machine.Annotations
+		// Merge annotations: preserve existing annotations, add/update operator-managed ones
+		existingMachine.Annotations = mergeAnnotations(existingMachine.Annotations, machine.Annotations)
 		if err := m.Patch(ctx, existingMachine, patch); err != nil {
 			// If patch fails due to conflict, it's likely because status was updated
 			// Log as debug and skip - the spec should be reconciled on next iteration
@@ -551,6 +563,61 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackv1a
 	}
 
 	return nil
+}
+
+// machineSpecEqual compares two MachineSpec structs for equality
+func machineSpecEqual(a, b *vitistackv1alpha1.MachineSpec) bool {
+	// Compare key fields that the operator manages
+	if a.Name != b.Name || a.MachineClass != b.MachineClass || a.Provider != b.Provider {
+		return false
+	}
+	// Compare OS struct
+	if a.OS != b.OS {
+		return false
+	}
+	// Compare Disks
+	if len(a.Disks) != len(b.Disks) {
+		return false
+	}
+	for i := range a.Disks {
+		if a.Disks[i] != b.Disks[i] {
+			return false
+		}
+	}
+	return mapsEqual(a.Tags, b.Tags)
+}
+
+// mapsEqual compares two string maps for equality
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+// annotationsContainAll checks if existing annotations contain all desired annotations with matching values
+func annotationsContainAll(existing, desired map[string]string) bool {
+	for k, v := range desired {
+		if ev, ok := existing[k]; !ok || ev != v {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeAnnotations merges desired annotations into existing annotations
+// Preserves existing annotations, adds/updates operator-managed ones
+func mergeAnnotations(existing, desired map[string]string) map[string]string {
+	if existing == nil {
+		existing = make(map[string]string)
+	}
+	maps.Copy(existing, desired)
+	return existing
 }
 
 // CleanupMachines deletes all machines associated with a cluster
