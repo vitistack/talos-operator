@@ -14,6 +14,7 @@ import (
 // It sets default values for machine manifests path and persistence, and enables
 // automatic environment variable binding.
 func Init() {
+	viper.SetDefault(consts.DEVELOPMENT, false)
 	viper.SetDefault(consts.LOG_JSON, true)
 	viper.SetDefault(consts.LOG_LEVEL, "info")
 	viper.SetDefault(consts.SECRET_PREFIX, "")

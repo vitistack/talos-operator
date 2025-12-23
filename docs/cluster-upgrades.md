@@ -26,10 +26,10 @@ Talos uses an A/B partition layout for safe, atomic upgrades:
 │  EFI Partition (boot)                  │
 ├────────────────────────────────────────┤
 │  SYSTEM-A  ◄── Currently running       │
-│  (Talos 1.8.0)                         │
+│  (Talos 1.11.6)                        │
 ├────────────────────────────────────────┤
 │  SYSTEM-B  ◄── Upgrade target          │
-│  (Talos 1.9.0 written here)            │
+│  (Talos 1.12.0 written here)           │
 ├────────────────────────────────────────┤
 │  STATE (persistent data)               │
 │  - Machine config                      │
@@ -40,6 +40,7 @@ Talos uses an A/B partition layout for safe, atomic upgrades:
 ```
 
 This design means:
+
 - **No in-place modification** - The new version is written to the inactive partition
 - **Atomic switch** - Bootloader switches partitions on reboot
 - **Easy rollback** - Previous version remains intact on the other partition
@@ -52,7 +53,7 @@ When each node is upgraded, it goes through these stages:
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. DOWNLOAD NEW IMAGE                                          │
 │     Node downloads the new Talos installer image                │
-│     (e.g., ghcr.io/siderolabs/installer:v1.9.0)                │
+│     (e.g., ghcr.io/siderolabs/installer:v1.12.0)               │
 │     Duration: ~30-60 seconds (depends on network)               │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -99,26 +100,28 @@ The operator performs upgrades **one node at a time** to maintain cluster availa
 ```
 
 **Why workers first?**
+
 - Worker failures have less impact on cluster stability
 - Control plane must remain available to reschedule pods
 - Validates the upgrade works before touching critical nodes
 
 **Why one at a time?**
+
 - Maintains etcd quorum (for 3 control planes, 2 must be healthy)
 - Allows workloads to be rescheduled
 - Enables early failure detection
 
 ### What Gets Upgraded vs Preserved
 
-| Component | Upgraded? | Notes |
-|-----------|-----------|-------|
-| Talos kernel | ✅ Yes | New Linux kernel version |
-| Talos userspace | ✅ Yes | containerd, kubelet binaries, system services |
-| System extensions | ✅ Yes | If included in the installer image |
-| Machine config | ❌ No | Preserved in STATE partition |
-| etcd data | ❌ No | Preserved in STATE partition |
-| Certificates | ❌ No | Preserved in STATE partition |
-| Kubernetes workloads | ❌ No | Rescheduled during node reboot |
+| Component            | Upgraded? | Notes                                         |
+| -------------------- | --------- | --------------------------------------------- |
+| Talos kernel         | ✅ Yes    | New Linux kernel version                      |
+| Talos userspace      | ✅ Yes    | containerd, kubelet binaries, system services |
+| System extensions    | ✅ Yes    | If included in the installer image            |
+| Machine config       | ❌ No     | Preserved in STATE partition                  |
+| etcd data            | ❌ No     | Preserved in STATE partition                  |
+| Certificates         | ❌ No     | Preserved in STATE partition                  |
+| Kubernetes workloads | ❌ No     | Rescheduled during node reboot                |
 
 ### Pre-flight Checks
 
@@ -135,6 +138,7 @@ If a node fails to come back after upgrade, Talos can roll back:
 **Automatic rollback**: If the new system fails to boot properly, the bootloader can fall back to the previous partition.
 
 **Manual rollback**: You can explicitly roll back a node:
+
 ```bash
 talosctl rollback --nodes <node-ip>
 ```
@@ -145,14 +149,14 @@ This switches back to the previous system partition without losing data.
 
 For a typical 5-node cluster (3 control planes + 2 workers):
 
-| Node | Type | Time |
-|------|------|------|
-| worker-0 | Worker | ~3 min |
-| worker-1 | Worker | ~3 min |
-| cp-0 | Control Plane | ~4 min |
-| cp-1 | Control Plane | ~4 min |
-| cp-2 | Control Plane | ~4 min |
-| **Total** | | **~18 min** |
+| Node      | Type          | Time        |
+| --------- | ------------- | ----------- |
+| worker-0  | Worker        | ~3 min      |
+| worker-1  | Worker        | ~3 min      |
+| cp-0      | Control Plane | ~4 min      |
+| cp-1      | Control Plane | ~4 min      |
+| cp-2      | Control Plane | ~4 min      |
+| **Total** |               | **~18 min** |
 
 > **Note:** Times vary based on network speed, hardware, and cluster size.
 
@@ -204,20 +208,20 @@ CLUSTER-WIDE:
 
 ### Key Differences from Talos Upgrade
 
-| Aspect | Talos OS Upgrade | Kubernetes Upgrade |
-|--------|------------------|-------------------|
-| Reboot required | ✅ Yes | ❌ No |
-| Rolling (node-by-node) | ✅ Yes | ❌ Components updated directly |
-| Downtime | Brief per node | Minimal/none |
-| Duration | ~2-4 min/node | ~5-10 min total |
+| Aspect                 | Talos OS Upgrade | Kubernetes Upgrade             |
+| ---------------------- | ---------------- | ------------------------------ |
+| Reboot required        | ✅ Yes           | ❌ No                          |
+| Rolling (node-by-node) | ✅ Yes           | ❌ Components updated directly |
+| Downtime               | Brief per node   | Minimal/none                   |
+| Duration               | ~2-4 min/node    | ~5-10 min total                |
 
 ### Version Skew Policy
 
 Kubernetes requires upgrading **one minor version at a time**:
 
 ```
-✅ Valid:   1.30 → 1.31 → 1.32
-❌ Invalid: 1.30 → 1.32 (skipping 1.31)
+✅ Valid:   1.33 → 1.34 → 1.35
+❌ Invalid: 1.33 → 1.35 (skipping 1.34)
 ```
 
 This ensures compatibility between control plane and kubelet versions.
@@ -227,13 +231,13 @@ This ensures compatibility between control plane and kubelet versions.
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. Operator detects new Talos version available                │
-│     → Sets: upgrade.vitistack.io/talos-available: "1.9.0"       │
+│     → Sets: upgrade.vitistack.io/talos-available: "1.12.0"      │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  2. User triggers Talos upgrade                                 │
-│     → Sets: upgrade.vitistack.io/talos-target: "1.9.0"          │
+│     → Sets: upgrade.vitistack.io/talos-target: "1.12.0"         │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -253,7 +257,7 @@ This ensures compatibility between control plane and kubelet versions.
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  5. User triggers Kubernetes upgrade                            │
-│     → Sets: upgrade.vitistack.io/kubernetes-target: "1.32.0"    │
+│     → Sets: upgrade.vitistack.io/kubernetes-target: "1.35.0"    │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -275,24 +279,24 @@ This ensures compatibility between control plane and kubelet versions.
 
 ### Talos Upgrade Annotations
 
-| Annotation | Set By | Description |
-|------------|--------|-------------|
-| `upgrade.vitistack.io/talos-available` | Operator | New Talos version available for upgrade |
-| `upgrade.vitistack.io/talos-current` | Operator | Current running Talos version |
-| `upgrade.vitistack.io/talos-target` | **User** | Target version to upgrade to (triggers upgrade) |
-| `upgrade.vitistack.io/talos-status` | Operator | Current status: `idle`, `in-progress`, `completed`, `failed` |
-| `upgrade.vitistack.io/talos-message` | Operator | Human-readable status message |
-| `upgrade.vitistack.io/talos-progress` | Operator | Progress indicator (e.g., "2/5" nodes upgraded) |
+| Annotation                             | Set By   | Description                                                  |
+| -------------------------------------- | -------- | ------------------------------------------------------------ |
+| `upgrade.vitistack.io/talos-available` | Operator | New Talos version available for upgrade                      |
+| `upgrade.vitistack.io/talos-current`   | Operator | Current running Talos version                                |
+| `upgrade.vitistack.io/talos-target`    | **User** | Target version to upgrade to (triggers upgrade)              |
+| `upgrade.vitistack.io/talos-status`    | Operator | Current status: `idle`, `in-progress`, `completed`, `failed` |
+| `upgrade.vitistack.io/talos-message`   | Operator | Human-readable status message                                |
+| `upgrade.vitistack.io/talos-progress`  | Operator | Progress indicator (e.g., "2/5" nodes upgraded)              |
 
 ### Kubernetes Upgrade Annotations
 
-| Annotation | Set By | Description |
-|------------|--------|-------------|
-| `upgrade.vitistack.io/kubernetes-available` | Operator | New K8s version available (only after Talos is compatible) |
-| `upgrade.vitistack.io/kubernetes-current` | Operator | Current running Kubernetes version |
-| `upgrade.vitistack.io/kubernetes-target` | **User** | Target version to upgrade to (triggers upgrade) |
-| `upgrade.vitistack.io/kubernetes-status` | Operator | Current status: `idle`, `in-progress`, `completed`, `failed`, `blocked` |
-| `upgrade.vitistack.io/kubernetes-message` | Operator | Human-readable status message |
+| Annotation                                  | Set By   | Description                                                             |
+| ------------------------------------------- | -------- | ----------------------------------------------------------------------- |
+| `upgrade.vitistack.io/kubernetes-available` | Operator | New K8s version available (only after Talos is compatible)              |
+| `upgrade.vitistack.io/kubernetes-current`   | Operator | Current running Kubernetes version                                      |
+| `upgrade.vitistack.io/kubernetes-target`    | **User** | Target version to upgrade to (triggers upgrade)                         |
+| `upgrade.vitistack.io/kubernetes-status`    | Operator | Current status: `idle`, `in-progress`, `completed`, `failed`, `blocked` |
+| `upgrade.vitistack.io/kubernetes-message`   | Operator | Human-readable status message                                           |
 
 ## Upgrading Talos OS
 
@@ -305,12 +309,13 @@ kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations}' |
 ```
 
 Look for:
+
 ```json
 {
-  "upgrade.vitistack.io/talos-available": "1.9.0",
-  "upgrade.vitistack.io/talos-current": "1.8.0",
+  "upgrade.vitistack.io/talos-available": "1.12.0",
+  "upgrade.vitistack.io/talos-current": "1.11.6",
   "upgrade.vitistack.io/talos-status": "idle",
-  "upgrade.vitistack.io/talos-message": "Upgrade available: 1.8.0 → 1.9.0"
+  "upgrade.vitistack.io/talos-message": "Upgrade available: 1.11.6 → 1.12.0"
 }
 ```
 
@@ -320,7 +325,7 @@ Set the target version annotation to trigger the upgrade:
 
 ```bash
 kubectl annotate kubernetescluster my-cluster \
-  upgrade.vitistack.io/talos-target="1.9.0"
+  upgrade.vitistack.io/talos-target="1.12.0"
 ```
 
 Or using `kubectl patch`:
@@ -329,7 +334,7 @@ Or using `kubectl patch`:
 kubectl patch kubernetescluster my-cluster --type=merge -p '
 metadata:
   annotations:
-    upgrade.vitistack.io/talos-target: "1.9.0"
+    upgrade.vitistack.io/talos-target: "1.12.0"
 '
 ```
 
@@ -356,7 +361,7 @@ Once complete, verify the upgrade:
 
 ```bash
 kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upgrade\.vitistack\.io/talos-current}'
-# Output: 1.9.0
+# Output: 1.12.0
 
 kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upgrade\.vitistack\.io/talos-status}'
 # Output: completed
@@ -376,10 +381,11 @@ kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations}' |
 ```
 
 Look for:
+
 ```json
 {
-  "upgrade.vitistack.io/kubernetes-available": "1.32.0",
-  "upgrade.vitistack.io/kubernetes-current": "1.31.0",
+  "upgrade.vitistack.io/kubernetes-available": "1.35.0",
+  "upgrade.vitistack.io/kubernetes-current": "1.34.1",
   "upgrade.vitistack.io/kubernetes-status": "idle"
 }
 ```
@@ -390,7 +396,7 @@ Look for:
 
 ```bash
 kubectl annotate kubernetescluster my-cluster \
-  upgrade.vitistack.io/kubernetes-target="1.32.0"
+  upgrade.vitistack.io/kubernetes-target="1.35.0"
 ```
 
 ### Step 3: Monitor Progress
@@ -406,7 +412,7 @@ kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upg
 
 ```bash
 kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upgrade\.vitistack\.io/kubernetes-current}'
-# Output: 1.32.0
+# Output: 1.35.0
 ```
 
 ## Blocked Upgrades
@@ -417,10 +423,11 @@ Kubernetes upgrades may be blocked if:
 2. **Talos version is incompatible** - Upgrade Talos first
 
 When blocked, you'll see:
+
 ```json
 {
   "upgrade.vitistack.io/kubernetes-status": "blocked",
-  "upgrade.vitistack.io/kubernetes-message": "Talos 1.8.0 does not support K8s 1.32.0. Upgrade Talos first."
+  "upgrade.vitistack.io/kubernetes-message": "Talos 1.11.6 does not support K8s 1.35.0. Upgrade Talos first."
 }
 ```
 
@@ -440,6 +447,7 @@ The cluster phase will be `UpgradeFailed`.
 ### Recovering from Failed Upgrades
 
 1. Check the operator logs for detailed error information:
+
    ```bash
    kubectl logs -n vitistack-system deploy/talos-operator -f
    ```
@@ -447,14 +455,15 @@ The cluster phase will be `UpgradeFailed`.
 2. Investigate the specific node that failed
 
 3. To retry the upgrade, first clear the failed status by removing the target annotation, then set it again:
+
    ```bash
    # Remove the target annotation
    kubectl annotate kubernetescluster my-cluster \
      upgrade.vitistack.io/talos-target-
-   
+
    # Set it again to retry
    kubectl annotate kubernetescluster my-cluster \
-     upgrade.vitistack.io/talos-target="1.9.0"
+     upgrade.vitistack.io/talos-target="1.12.0"
    ```
 
 ## Upgrade Order and Best Practices
@@ -483,12 +492,12 @@ The cluster phase will be `UpgradeFailed`.
 
 ## Status Phases
 
-| Phase | Description |
-|-------|-------------|
-| `Ready` | Cluster is healthy and running |
-| `UpgradingTalos` | Talos OS upgrade in progress |
-| `UpgradingKubernetes` | Kubernetes upgrade in progress |
-| `UpgradeFailed` | Upgrade failed - check annotations for details |
+| Phase                 | Description                                    |
+| --------------------- | ---------------------------------------------- |
+| `Ready`               | Cluster is healthy and running                 |
+| `UpgradingTalos`      | Talos OS upgrade in progress                   |
+| `UpgradingKubernetes` | Kubernetes upgrade in progress                 |
+| `UpgradeFailed`       | Upgrade failed - check annotations for details |
 
 ## Conditions
 
@@ -515,7 +524,7 @@ kubectl get kubernetescluster my-cluster -o yaml | grep -A5 "annotations:"
 
 # 2. Trigger Talos upgrade
 kubectl annotate kubernetescluster my-cluster \
-  upgrade.vitistack.io/talos-target="1.9.0"
+  upgrade.vitistack.io/talos-target="1.12.0"
 
 # 3. Wait for Talos upgrade to complete
 kubectl wait kubernetescluster my-cluster \
@@ -524,7 +533,7 @@ kubectl wait kubernetescluster my-cluster \
 
 # 4. Trigger Kubernetes upgrade
 kubectl annotate kubernetescluster my-cluster \
-  upgrade.vitistack.io/kubernetes-target="1.32.0"
+  upgrade.vitistack.io/kubernetes-target="1.35.0"
 
 # 5. Wait for Kubernetes upgrade to complete
 kubectl wait kubernetescluster my-cluster \

@@ -3,11 +3,14 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/helpers/nodehelper"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
@@ -31,11 +34,12 @@ type KubernetesClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	TalosManager     *talos.TalosManager                  // Manager for Talos clusters
-	MachineManager   *machine.MachineManager              // Manager for Machine resources
-	StatusManager    *status.StatusManager                // Manager for status updates
-	ValidatorService *validationservice.ValidationService // Service for validating resources
-	UpgradeService   *upgradeservice.UpgradeService       // Service for managing upgrades
+	TalosManager        *talos.TalosManager                  // Manager for Talos clusters
+	MachineManager      *machine.MachineManager              // Manager for Machine resources
+	StatusManager       *status.StatusManager                // Manager for status updates
+	ValidatorService    *validationservice.ValidationService // Service for validating resources
+	UpgradeService      *upgradeservice.UpgradeService       // Service for managing upgrades
+	UpgradeOrchestrator *upgradeservice.UpgradeOrchestrator  // Orchestrator for executing upgrades
 
 	SecretService *secretservice.SecretService
 }
@@ -43,6 +47,7 @@ type KubernetesClusterReconciler struct {
 const (
 	KubernetesClusterFinalizer               = "kubernetescluster.vitistack.io/finalizer"
 	ControllerRequeueDelay     time.Duration = 5 * time.Second
+	controlPlaneRole                         = "control-plane"
 )
 
 // +kubebuilder:rbac:groups=vitistack.io,resources=kubernetesclusters,verbs=get;list;watch;create;update;patch;delete
@@ -129,6 +134,11 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
+	// Initialize upgrade annotations for ready clusters (detects current versions)
+	if kubernetesCluster.Status.Phase == status.PhaseReady {
+		r.initializeUpgradeAnnotations(ctx, kubernetesCluster)
+	}
+
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 }
 
@@ -144,17 +154,14 @@ func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluste
 
 	state := r.UpgradeService.GetUpgradeState(cluster)
 
-	// Handle ongoing Talos upgrade
+	// Handle ongoing Talos upgrade - continue the rolling upgrade
 	if state.TalosStatus == consts.UpgradeStatusInProgress {
-		vlog.Info(fmt.Sprintf("Talos upgrade in progress: cluster=%s progress=%s", cluster.Name, state.TalosProgress))
-		// TODO: Check node upgrade status and continue rolling upgrade
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+		return r.continueTalosUpgrade(ctx, cluster, state)
 	}
 
-	// Handle ongoing Kubernetes upgrade
+	// Handle ongoing Kubernetes upgrade - check completion status
 	if state.KubernetesStatus == consts.UpgradeStatusInProgress {
-		vlog.Info(fmt.Sprintf("Kubernetes upgrade in progress: cluster=%s", cluster.Name))
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, true
+		return r.continueKubernetesUpgrade(ctx, cluster, state)
 	}
 
 	// Check for new Talos upgrade request
@@ -168,6 +175,105 @@ func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluste
 	}
 
 	return ctrl.Result{}, false
+}
+
+// continueTalosUpgrade continues a rolling Talos upgrade that is in progress
+func (r *KubernetesClusterReconciler) continueTalosUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, state *upgradeservice.UpgradeState) (ctrl.Result, bool) {
+	vlog.Info(fmt.Sprintf("Continuing Talos upgrade: cluster=%s progress=%s", cluster.Name, state.TalosProgress))
+
+	// Get Talos client config
+	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to get Talos client config for upgrade", err)
+		_ = r.UpgradeService.FailTalosUpgrade(ctx, cluster, fmt.Sprintf("failed to get talos config: %v", err))
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Get all machines and build node info
+	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to get cluster machines for upgrade", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	nodes := r.buildNodeUpgradeInfo(ctx, clientConfig, machines, state.TalosTarget)
+
+	// Build the installer image URL for the target version
+	talosInstallerImage := r.buildTalosInstallerImage(state.TalosTarget)
+
+	// Perform preflight checks before continuing
+	controlPlaneIP := r.getFirstControlPlaneIP(machines)
+	if controlPlaneIP == "" {
+		vlog.Error("No control plane IP found for preflight checks", nil)
+		_ = r.UpgradeService.FailTalosUpgrade(ctx, cluster, "no control plane IP available")
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Continue the rolling upgrade
+	result := r.UpgradeOrchestrator.PerformTalosUpgrade(ctx, cluster, clientConfig, nodes, state.TalosTarget, talosInstallerImage)
+
+	if result.Error != nil {
+		vlog.Error(fmt.Sprintf("Talos upgrade failed on node %s", result.FailedNode), result.Error)
+		_ = r.UpgradeService.FailTalosUpgrade(ctx, cluster, result.Error.Error())
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	if result.NeedsRequeue {
+		// More nodes to upgrade, or waiting for node to come back
+		return ctrl.Result{RequeueAfter: result.RequeueAfter}, true
+	}
+
+	// All nodes upgraded successfully
+	if err := r.UpgradeService.CompleteTalosUpgrade(ctx, cluster); err != nil {
+		vlog.Error("Failed to mark Talos upgrade as complete", err)
+	}
+
+	vlog.Info(fmt.Sprintf("Talos upgrade completed: cluster=%s version=%s", cluster.Name, state.TalosTarget))
+	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+}
+
+// continueKubernetesUpgrade continues a Kubernetes upgrade that is in progress
+func (r *KubernetesClusterReconciler) continueKubernetesUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, state *upgradeservice.UpgradeState) (ctrl.Result, bool) {
+	vlog.Info(fmt.Sprintf("Continuing Kubernetes upgrade: cluster=%s target=%s", cluster.Name, state.KubernetesTarget))
+
+	// Get Talos client config
+	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to get Talos client config for K8s upgrade", err)
+		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, fmt.Sprintf("failed to get talos config: %v", err))
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Get control plane IP
+	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to get cluster machines for K8s upgrade", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	controlPlaneIP := r.getFirstControlPlaneIP(machines)
+	if controlPlaneIP == "" {
+		vlog.Error("No control plane IP found for Kubernetes upgrade", nil)
+		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, "no control plane IP available")
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Perform the Kubernetes upgrade
+	result := r.UpgradeOrchestrator.PerformKubernetesUpgrade(ctx, cluster, clientConfig, controlPlaneIP, state.KubernetesTarget)
+
+	if result.Error != nil {
+		vlog.Error("Kubernetes upgrade failed", result.Error)
+		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, result.Error.Error())
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Kubernetes upgrade completed
+	if err := r.UpgradeService.CompleteKubernetesUpgrade(ctx, cluster); err != nil {
+		vlog.Error("Failed to mark Kubernetes upgrade as complete", err)
+	}
+
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: cluster=%s version=%s", cluster.Name, state.KubernetesTarget))
+	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 }
 
 // handleTalosUpgradeRequest processes a Talos upgrade request
@@ -432,15 +538,17 @@ func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *Ku
 	statusManager := status.NewManager(c, secretService)
 	clientService := talosclientservice.NewTalosClientService()
 	machineSvc := machineservice.NewMachineService(c)
+	upgradeService := upgradeservice.NewUpgradeService(c, statusManager, clientService, machineSvc)
 	return &KubernetesClusterReconciler{
-		Client:           c,
-		Scheme:           scheme,
-		SecretService:    secretService,
-		TalosManager:     talos.NewTalosManager(c, statusManager),
-		MachineManager:   machine.NewMachineManager(c, scheme),
-		StatusManager:    statusManager,
-		ValidatorService: validationservice.NewValidationService(),
-		UpgradeService:   upgradeservice.NewUpgradeService(c, statusManager, clientService, machineSvc),
+		Client:              c,
+		Scheme:              scheme,
+		SecretService:       secretService,
+		TalosManager:        talos.NewTalosManager(c, statusManager),
+		MachineManager:      machine.NewMachineManager(c, scheme),
+		StatusManager:       statusManager,
+		ValidatorService:    validationservice.NewValidationService(),
+		UpgradeService:      upgradeService,
+		UpgradeOrchestrator: upgradeservice.NewUpgradeOrchestrator(upgradeService, clientService),
 	}
 }
 
@@ -449,4 +557,147 @@ func (r *KubernetesClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&vitistackv1alpha1.KubernetesCluster{}).
 		Owns(&vitistackv1alpha1.Machine{}).
 		Complete(r)
+}
+
+// buildNodeUpgradeInfo creates NodeUpgradeInfo for all machines in the cluster
+func (r *KubernetesClusterReconciler) buildNodeUpgradeInfo(
+	ctx context.Context,
+	clientConfig *clientconfig.Config,
+	machines []vitistackv1alpha1.Machine,
+	targetVersion string,
+) []upgradeservice.NodeUpgradeInfo {
+	nodes := make([]upgradeservice.NodeUpgradeInfo, 0, len(machines))
+
+	for i := range machines {
+		m := &machines[i]
+		ip := nodehelper.GetFirstIPv4(m)
+		if ip == "" {
+			vlog.Warn(fmt.Sprintf("Machine %s has no IPv4 address, skipping for upgrade", m.Name))
+			continue
+		}
+
+		role := "worker"
+		if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == controlPlaneRole {
+			role = controlPlaneRole
+		}
+
+		// Check if this node is already upgraded
+		upgraded := false
+		if clientConfig != nil {
+			upgraded, _, _ = r.UpgradeOrchestrator.CheckNodeUpgradeStatus(ctx, clientConfig, ip, targetVersion)
+		}
+
+		nodes = append(nodes, upgradeservice.NodeUpgradeInfo{
+			Name:     m.Name,
+			IP:       ip,
+			Role:     role,
+			Machine:  m,
+			Upgraded: upgraded,
+		})
+	}
+
+	return nodes
+}
+
+// getFirstControlPlaneIP returns the IP of the first control plane machine
+func (r *KubernetesClusterReconciler) getFirstControlPlaneIP(machines []vitistackv1alpha1.Machine) string {
+	for i := range machines {
+		m := &machines[i]
+		if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == controlPlaneRole {
+			ip := nodehelper.GetFirstIPv4(m)
+			if ip != "" {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+// buildTalosInstallerImage constructs the Talos installer image URL for a given version
+func (r *KubernetesClusterReconciler) buildTalosInstallerImage(version string) string {
+	// Use the configured install image with the target version
+	// The base image is configured via environment variables (e.g., TALOS_VM_INSTALL_IMAGE_KUBEVIRT)
+	baseImage := viper.GetString(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT)
+	if baseImage == "" {
+		baseImage = viper.GetString(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT)
+	}
+	if baseImage == "" {
+		// Fallback to official Talos installer
+		return fmt.Sprintf("ghcr.io/siderolabs/installer:%s", version)
+	}
+
+	// Replace version in the base image
+	// Base image format: factory.talos.dev/installer/<schematic>:v1.x.x
+	// We need to replace the version tag
+	parts := strings.Split(baseImage, ":")
+	if len(parts) >= 2 {
+		return parts[0] + ":" + version
+	}
+
+	return baseImage
+}
+
+// initializeUpgradeAnnotations detects and sets the current Talos and Kubernetes versions
+// on the cluster annotations when the cluster is ready
+func (r *KubernetesClusterReconciler) initializeUpgradeAnnotations(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) {
+	state := r.UpgradeService.GetUpgradeState(cluster)
+
+	// Skip if versions are already set
+	if state.TalosCurrent != "" && state.KubernetesCurrent != "" {
+		return
+	}
+
+	// Get Talos client config
+	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to get Talos config for version detection: %v", err))
+		return
+	}
+
+	// Get machines to find a control plane IP
+	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to list machines for version detection: %v", err))
+		return
+	}
+
+	controlPlaneIP := r.getFirstControlPlaneIP(machines)
+	if controlPlaneIP == "" {
+		vlog.Warn("No control plane IP available for version detection")
+		return
+	}
+
+	// Get Talos version from cluster
+	talosVersion := ""
+	if state.TalosCurrent == "" {
+		client, err := r.TalosManager.GetClientService().CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIP})
+		if err == nil {
+			defer func() { _ = client.Close() }()
+			talosVersion, _ = r.TalosManager.GetClientService().GetTalosVersion(ctx, client, controlPlaneIP)
+		}
+	}
+
+	// Get Kubernetes version from cluster spec (this is what was configured)
+	k8sVersion := ""
+	if state.KubernetesCurrent == "" {
+		// Use the version from the cluster spec (topology.version)
+		k8sVersion = cluster.Spec.Topology.Version
+	}
+
+	// Initialize the upgrade annotations
+	// Re-fetch the cluster to avoid conflict with status updates that may have occurred
+	if talosVersion != "" || k8sVersion != "" {
+		freshCluster := &vitistackv1alpha1.KubernetesCluster{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), freshCluster); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to re-fetch cluster for annotation update: %v", err))
+			return
+		}
+
+		if err := r.UpgradeService.InitializeCurrentVersions(ctx, freshCluster, talosVersion, k8sVersion); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to initialize upgrade annotations (will retry): %v", err))
+		} else {
+			vlog.Info(fmt.Sprintf("Initialized upgrade annotations: cluster=%s talos=%s k8s=%s",
+				cluster.Name, talosVersion, k8sVersion))
+		}
+	}
 }

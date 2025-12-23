@@ -1,6 +1,7 @@
 package consts
 
 var (
+	DEVELOPMENT                     = "DEVELOPMENT"
 	LOG_LEVEL                       = "LOG_LEVEL"
 	LOG_JSON                        = "LOG_JSON"
 	LOG_ADD_CALLER                  = "LOG_ADD_CALLER"

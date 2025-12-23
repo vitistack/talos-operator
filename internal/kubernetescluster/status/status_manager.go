@@ -327,6 +327,13 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 		}
 		return err
 	}
+
+	// Check if phase is already set to the desired value - skip update if unchanged
+	currentPhase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
+	if currentPhase == phase {
+		return nil // No change needed
+	}
+
 	if err := ensureStatusMap(u); err != nil {
 		vlog.Error("Failed to ensure status map exists: cluster="+kc.Name, err)
 		return err
@@ -384,9 +391,13 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 		return err
 	}
 
-	// Update conditions
-	if err := m.updateConditionInStatus(u, condType, status, reason, message, kc.Name); err != nil {
+	// Update conditions - returns changed=false if condition already exists with same values
+	changed, err := m.updateConditionInStatus(u, condType, status, reason, message, kc.Name)
+	if err != nil {
 		return err
+	}
+	if !changed {
+		return nil // No change needed, skip API update
 	}
 
 	// Touch state.lastUpdated and lastUpdatedBy
@@ -435,7 +446,8 @@ func (m *StatusManager) ClearValidationError(ctx context.Context, kc *vitistackv
 }
 
 // updateConditionInStatus updates the condition in the status.conditions slice
-func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, condType, status, reason, message, clusterName string) error {
+// Returns (changed bool, error). changed is false if the condition already exists with the same values.
+func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, condType, status, reason, message, clusterName string) (bool, error) {
 	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
 	if !found {
 		conds = []any{}
@@ -451,36 +463,38 @@ func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, co
 	}
 
 	// Replace existing condition of same type or append
-	conds = replaceOrAppendCondition(conds, newCond, condType)
+	conds, changed := replaceOrAppendCondition(conds, newCond, condType)
+	if !changed {
+		return false, nil // No change needed
+	}
 
 	// Sort conditions by lastTransitionTime (newest first)
 	conds = sortConditionsByTime(conds)
 
 	if err := unstructured.SetNestedSlice(u.Object, conds, "status", "conditions"); err != nil {
 		vlog.Error("Failed to set nested slice for conditions: cluster="+clusterName+" condition="+condType, err)
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
-// replaceOrAppendCondition replaces an existing condition or appends a new one
-func replaceOrAppendCondition(conds []any, newCond map[string]any, condType string) []any {
+// replaceOrAppendCondition replaces an existing condition or appends a new one.
+// Returns (conditions, changed). changed is false if the condition already exists with the same values.
+func replaceOrAppendCondition(conds []any, newCond map[string]any, condType string) ([]any, bool) {
 	for i, ci := range conds {
 		if cm, ok := ci.(map[string]any); ok {
 			if t, _ := cm["type"].(string); t == condType {
-				// Check if unchanged
+				// Check if unchanged - if status, reason, and message are the same, no update needed
 				if cm["status"] == newCond["status"] && cm["reason"] == newCond["reason"] && cm["message"] == newCond["message"] {
-					// Still bump lastTransitionTime
-					cm["lastTransitionTime"] = newCond["lastTransitionTime"]
-					conds[i] = cm
-					return conds
+					// No change needed - don't update lastTransitionTime
+					return conds, false
 				}
 				conds[i] = newCond
-				return conds
+				return conds, true
 			}
 		}
 	}
-	return append(conds, newCond)
+	return append(conds, newCond), true
 }
 
 // sortConditionsByTime sorts conditions by lastTransitionTime (newest first)
