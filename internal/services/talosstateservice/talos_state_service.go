@@ -84,6 +84,13 @@ func (s *TalosStateService) EnsureSecretExists(ctx context.Context, cluster *vit
 		"upgrade_upgraded_nodes": []byte(""),  // comma-separated list of successfully upgraded node names
 		"upgrade_failed_nodes":   []byte(""),  // comma-separated list of failed node names with error
 		"upgrade_failed_reason":  []byte(""),  // reason for last failure
+		// Pre-upgrade health check state
+		"health_check_passed":       []byte(falseStr), // whether last health check passed
+		"health_check_at":           []byte(""),       // timestamp of last health check
+		"health_etcd_healthy":       []byte(falseStr), // etcd cluster health
+		"health_nodes_ready":        []byte(falseStr), // all nodes ready
+		"health_controlplane_ready": []byte(falseStr), // control plane components healthy
+		"health_check_message":      []byte(""),       // human-readable health status message
 	}
 	err = s.secretService.CreateTalosSecret(ctx, cluster, data)
 	if err == nil {
@@ -844,4 +851,87 @@ func (s *TalosStateService) UpsertConfigWithRoleYAML(ctx context.Context, cluste
 		return err
 	}
 	return fmt.Errorf("failed to upsert config after %d retries", maxRetries)
+}
+
+// HealthCheckState represents the pre-upgrade health check state
+type HealthCheckState struct {
+	Passed            bool   // overall health check passed
+	CheckedAt         string // RFC3339 timestamp
+	EtcdHealthy       bool   // etcd cluster is healthy
+	NodesReady        bool   // all nodes are ready
+	ControlPlaneReady bool   // control plane components are healthy
+	Message           string // human-readable message
+}
+
+// GetHealthCheckState retrieves the last health check state from the secret
+func (s *TalosStateService) GetHealthCheckState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*HealthCheckState, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if secret.Data == nil {
+		return &HealthCheckState{}, nil
+	}
+
+	return &HealthCheckState{
+		Passed:            isFlagTrue(secret.Data, "health_check_passed"),
+		CheckedAt:         string(secret.Data["health_check_at"]),
+		EtcdHealthy:       isFlagTrue(secret.Data, "health_etcd_healthy"),
+		NodesReady:        isFlagTrue(secret.Data, "health_nodes_ready"),
+		ControlPlaneReady: isFlagTrue(secret.Data, "health_controlplane_ready"),
+		Message:           string(secret.Data["health_check_message"]),
+	}, nil
+}
+
+// SetHealthCheckState persists the health check result to the secret
+func (s *TalosStateService) SetHealthCheckState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, state *HealthCheckState) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+		secret.Data["health_check_at"] = []byte(now)
+		secret.Data["health_check_message"] = []byte(state.Message)
+
+		if state.Passed {
+			secret.Data["health_check_passed"] = []byte(trueStr)
+		} else {
+			secret.Data["health_check_passed"] = []byte(falseStr)
+		}
+		if state.EtcdHealthy {
+			secret.Data["health_etcd_healthy"] = []byte(trueStr)
+		} else {
+			secret.Data["health_etcd_healthy"] = []byte(falseStr)
+		}
+		if state.NodesReady {
+			secret.Data["health_nodes_ready"] = []byte(trueStr)
+		} else {
+			secret.Data["health_nodes_ready"] = []byte(falseStr)
+		}
+		if state.ControlPlaneReady {
+			secret.Data["health_controlplane_ready"] = []byte(trueStr)
+		} else {
+			secret.Data["health_controlplane_ready"] = []byte(falseStr)
+		}
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Health check state persisted: cluster=%s passed=%v etcd=%v nodes=%v cp=%v",
+				cluster.Name, state.Passed, state.EtcdHealthy, state.NodesReady, state.ControlPlaneReady))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to set health check state after %d retries", maxRetries)
 }

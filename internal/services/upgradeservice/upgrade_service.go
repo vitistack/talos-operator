@@ -777,6 +777,43 @@ func (s *UpgradeService) ValidateUpgradeTarget(currentVersion, targetVersion str
 	return nil
 }
 
+// ValidateKubernetesUpgradeTarget validates Kubernetes upgrade target version.
+// Unlike ValidateUpgradeTarget, this allows same-version "upgrades" to re-apply
+// configuration when some nodes may be lagging behind.
+func (s *UpgradeService) ValidateKubernetesUpgradeTarget(currentVersion, targetVersion string) error {
+	if currentVersion == "" || targetVersion == "" {
+		return fmt.Errorf("current and target versions must be specified")
+	}
+
+	// Parse versions (strip 'v' prefix if present)
+	current, err := semver.NewVersion(strings.TrimPrefix(currentVersion, "v"))
+	if err != nil {
+		return fmt.Errorf("invalid current version %s: %w", currentVersion, err)
+	}
+
+	target, err := semver.NewVersion(strings.TrimPrefix(targetVersion, "v"))
+	if err != nil {
+		return fmt.Errorf("invalid target version %s: %w", targetVersion, err)
+	}
+
+	// Allow same version (re-apply) or greater version
+	// Same version is allowed to catch up lagging nodes
+	if target.LessThan(current) {
+		return fmt.Errorf("target version %s must be greater than or equal to current version %s", targetVersion, currentVersion)
+	}
+
+	// For Kubernetes, only allow one minor version upgrade at a time
+	// This is a Kubernetes best practice (skip check if same version)
+	if !target.Equal(current) && target.Major() == current.Major() {
+		if target.Minor()-current.Minor() > 1 {
+			return fmt.Errorf("can only upgrade one minor version at a time: %s → %s (max: %d.%d.x)",
+				currentVersion, targetVersion, current.Major(), current.Minor()+1)
+		}
+	}
+
+	return nil
+}
+
 // IsUpgradeInProgress returns true if any upgrade is currently in progress
 func (s *UpgradeService) IsUpgradeInProgress(cluster *vitistackv1alpha1.KubernetesCluster) bool {
 	state := s.GetUpgradeState(cluster)

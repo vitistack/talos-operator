@@ -17,6 +17,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/services/machineservice"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
+	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 	"github.com/vitistack/talos-operator/internal/services/upgradeservice"
 	"github.com/vitistack/talos-operator/internal/services/validationservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
@@ -282,22 +283,23 @@ func (r *KubernetesClusterReconciler) continueKubernetesUpgrade(ctx context.Cont
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 	}
 
-	// Get control plane IP
+	// Get all machines
 	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
 	if err != nil {
 		vlog.Error("Failed to get cluster machines for K8s upgrade", err)
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 	}
 
-	controlPlaneIP := r.getFirstControlPlaneIP(machines)
-	if controlPlaneIP == "" {
-		vlog.Error("No control plane IP found for Kubernetes upgrade", nil)
-		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, "no control plane IP available")
+	// Build node list with role information
+	nodes := r.buildNodeUpgradeInfoList(machines)
+	if len(nodes) == 0 {
+		vlog.Error("No nodes found for Kubernetes upgrade", nil)
+		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, "no nodes available for upgrade")
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 	}
 
-	// Perform the Kubernetes upgrade
-	result := r.UpgradeOrchestrator.PerformKubernetesUpgrade(ctx, cluster, clientConfig, controlPlaneIP, state.KubernetesTarget)
+	// Perform the Kubernetes upgrade on all nodes
+	result := r.UpgradeOrchestrator.PerformKubernetesUpgrade(ctx, cluster, clientConfig, nodes, state.KubernetesTarget)
 
 	if result.Error != nil {
 		vlog.Error("Kubernetes upgrade failed", result.Error)
@@ -312,6 +314,24 @@ func (r *KubernetesClusterReconciler) continueKubernetesUpgrade(ctx context.Cont
 
 	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: cluster=%s version=%s", cluster.Name, state.KubernetesTarget))
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+}
+
+// buildNodeUpgradeInfoList creates a list of NodeUpgradeInfo from machines
+func (r *KubernetesClusterReconciler) buildNodeUpgradeInfoList(machines []vitistackv1alpha1.Machine) []talosclientservice.NodeUpgradeInfo {
+	nodes := make([]talosclientservice.NodeUpgradeInfo, 0, len(machines))
+	for i := range machines {
+		m := &machines[i]
+		ip := nodehelper.GetFirstIPv4(m)
+		if ip == "" {
+			continue
+		}
+		isControlPlane := m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == controlPlaneRole
+		nodes = append(nodes, talosclientservice.NodeUpgradeInfo{
+			IP:             ip,
+			IsControlPlane: isControlPlane,
+		})
+	}
+	return nodes
 }
 
 // handleTalosUpgradeRequest processes a Talos upgrade request
@@ -330,6 +350,32 @@ func (r *KubernetesClusterReconciler) handleTalosUpgradeRequest(ctx context.Cont
 	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
 	if err != nil {
 		vlog.Error("Failed to get cluster machines for upgrade", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Get Talos client config for health checks
+	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to get Talos client config for pre-upgrade health check", err)
+		_ = r.UpgradeService.FailTalosUpgrade(ctx, cluster, fmt.Sprintf("failed to get talos config: %v", err))
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Get control plane IP and all node IPs for health checks
+	controlPlaneIP := r.getFirstControlPlaneIP(machines)
+	if controlPlaneIP == "" {
+		vlog.Error("No control plane IP found for pre-upgrade health check", nil)
+		_ = r.UpgradeService.FailTalosUpgrade(ctx, cluster, "no control plane IP available")
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	allNodeIPs := r.getAllNodeIPs(machines)
+
+	// Perform pre-upgrade health checks
+	_, err = r.UpgradeOrchestrator.PreflightChecks(ctx, cluster, clientConfig, controlPlaneIP, allNodeIPs)
+	if err != nil {
+		vlog.Error(fmt.Sprintf("Pre-upgrade health check failed: %v", err), err)
+		_ = r.UpgradeService.FailTalosUpgrade(ctx, cluster, fmt.Sprintf("pre-upgrade health check failed: %v", err))
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 	}
 
@@ -358,10 +404,43 @@ func (r *KubernetesClusterReconciler) handleKubernetesUpgradeRequest(ctx context
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 	}
 
-	// Validate upgrade target
-	if err := r.UpgradeService.ValidateUpgradeTarget(state.KubernetesCurrent, state.KubernetesTarget); err != nil {
+	// Validate upgrade target - allows same version to re-apply for lagging nodes
+	if err := r.UpgradeService.ValidateKubernetesUpgradeTarget(state.KubernetesCurrent, state.KubernetesTarget); err != nil {
 		vlog.Error(fmt.Sprintf("Invalid Kubernetes upgrade target: %v", err), err)
 		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, err.Error())
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Get all machines for health checks
+	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to get cluster machines for Kubernetes upgrade", err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Get Talos client config for health checks
+	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to get Talos client config for pre-upgrade health check", err)
+		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, fmt.Sprintf("failed to get talos config: %v", err))
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	// Get control plane IP and all node IPs for health checks
+	controlPlaneIP := r.getFirstControlPlaneIP(machines)
+	if controlPlaneIP == "" {
+		vlog.Error("No control plane IP found for pre-upgrade health check", nil)
+		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, "no control plane IP available")
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	allNodeIPs := r.getAllNodeIPs(machines)
+
+	// Perform pre-upgrade health checks
+	_, err = r.UpgradeOrchestrator.PreflightChecks(ctx, cluster, clientConfig, controlPlaneIP, allNodeIPs)
+	if err != nil {
+		vlog.Error(fmt.Sprintf("Pre-upgrade health check failed: %v", err), err)
+		_ = r.UpgradeService.FailKubernetesUpgrade(ctx, cluster, fmt.Sprintf("pre-upgrade health check failed: %v", err))
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 	}
 
@@ -623,6 +702,8 @@ func (r *KubernetesClusterReconciler) buildNodeUpgradeInfo(
 		}
 	}
 
+	stateService := r.TalosManager.GetStateService()
+
 	for i := range machines {
 		m := &machines[i]
 		ip := nodehelper.GetFirstIPv4(m)
@@ -636,24 +717,9 @@ func (r *KubernetesClusterReconciler) buildNodeUpgradeInfo(
 			role = controlPlaneRole
 		}
 
-		// Check if this node is already upgraded
-		upgraded := false
-		if clientConfig != nil {
-			upgraded, _, _ = r.UpgradeOrchestrator.CheckNodeUpgradeStatus(ctx, clientConfig, ip, targetVersion)
-		}
-
-		// Check if this node previously failed
-		failed := false
-		skipped := false
-		stateService := r.TalosManager.GetStateService()
-		if stateService != nil && cluster != nil {
-			failed = stateService.IsNodeFailed(ctx, cluster, m.Name)
-			// If failed and user wants to skip, mark as skipped
-			if failed && skipFailedNodes {
-				skipped = true
-				vlog.Info(fmt.Sprintf("Node %s marked as skipped (previously failed, skip-failed-nodes=true)", m.Name))
-			}
-		}
+		// Check upgrade status and failed status
+		upgraded := r.checkNodeUpgradeStatus(ctx, clientConfig, stateService, cluster, m.Name, ip, targetVersion)
+		failed, skipped := r.checkNodeFailedStatus(ctx, stateService, cluster, m.Name, skipFailedNodes)
 
 		nodes = append(nodes, upgradeservice.NodeUpgradeInfo{
 			Name:     m.Name,
@@ -669,6 +735,75 @@ func (r *KubernetesClusterReconciler) buildNodeUpgradeInfo(
 	return nodes
 }
 
+// checkNodeUpgradeStatus determines if a node is upgraded or has an upgrade pending
+func (r *KubernetesClusterReconciler) checkNodeUpgradeStatus(
+	ctx context.Context,
+	clientConfig *clientconfig.Config,
+	stateService *talosstateservice.TalosStateService,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	nodeName, nodeIP, targetVersion string,
+) bool {
+	// First check state service if upgrade was already initiated for this node
+	if stateService != nil && cluster != nil && stateService.IsNodeUpgraded(ctx, cluster, nodeName) {
+		return r.checkInitiatedUpgradeCompletion(ctx, clientConfig, nodeName, nodeIP, targetVersion)
+	}
+
+	// Fallback to checking actual version if no state service
+	if clientConfig != nil {
+		upgraded, _, _ := r.UpgradeOrchestrator.CheckNodeUpgradeStatus(ctx, clientConfig, nodeIP, targetVersion)
+		return upgraded
+	}
+
+	return false
+}
+
+// checkInitiatedUpgradeCompletion checks if an already-initiated upgrade has completed
+func (r *KubernetesClusterReconciler) checkInitiatedUpgradeCompletion(
+	ctx context.Context,
+	clientConfig *clientconfig.Config,
+	nodeName, nodeIP, targetVersion string,
+) bool {
+	if clientConfig == nil {
+		// No client config but node is marked as upgraded - assume pending
+		return true
+	}
+
+	isUpgraded, _, err := r.UpgradeOrchestrator.CheckNodeUpgradeStatus(ctx, clientConfig, nodeIP, targetVersion)
+	switch {
+	case err != nil:
+		// Node not reachable - it's likely still rebooting
+		vlog.Info(fmt.Sprintf("Node %s upgrade initiated, waiting for reboot (API not reachable)", nodeName))
+		return true // Treat as upgraded to prevent re-sending upgrade request
+	case isUpgraded:
+		// Node has the target version - fully upgraded
+		return true
+	default:
+		// Node is reachable but doesn't have target version yet - still rebooting
+		vlog.Info(fmt.Sprintf("Node %s upgrade initiated, version not yet updated", nodeName))
+		return true // Treat as upgraded to prevent re-sending upgrade request
+	}
+}
+
+// checkNodeFailedStatus checks if a node previously failed and should be skipped
+func (r *KubernetesClusterReconciler) checkNodeFailedStatus(
+	ctx context.Context,
+	stateService *talosstateservice.TalosStateService,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	nodeName string,
+	skipFailedNodes bool,
+) (failed, skipped bool) {
+	if stateService == nil || cluster == nil {
+		return false, false
+	}
+
+	failed = stateService.IsNodeFailed(ctx, cluster, nodeName)
+	if failed && skipFailedNodes {
+		skipped = true
+		vlog.Info(fmt.Sprintf("Node %s marked as skipped (previously failed, skip-failed-nodes=true)", nodeName))
+	}
+	return failed, skipped
+}
+
 // getFirstControlPlaneIP returns the IP of the first control plane machine
 func (r *KubernetesClusterReconciler) getFirstControlPlaneIP(machines []vitistackv1alpha1.Machine) string {
 	for i := range machines {
@@ -681,6 +816,19 @@ func (r *KubernetesClusterReconciler) getFirstControlPlaneIP(machines []vitistac
 		}
 	}
 	return ""
+}
+
+// getAllNodeIPs returns all node IPs from the machines list
+func (r *KubernetesClusterReconciler) getAllNodeIPs(machines []vitistackv1alpha1.Machine) []string {
+	var ips []string
+	for i := range machines {
+		m := &machines[i]
+		ip := nodehelper.GetFirstIPv4(m)
+		if ip != "" {
+			ips = append(ips, ip)
+		}
+	}
+	return ips
 }
 
 // buildTalosInstallerImage constructs the Talos installer image URL for a given version

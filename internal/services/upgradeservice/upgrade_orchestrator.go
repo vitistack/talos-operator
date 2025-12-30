@@ -3,13 +3,32 @@ package upgradeservice
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
+	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 )
+
+// isConnectionError checks if an error is due to connection issues (node rebooting/unreachable)
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// Common connection error patterns during node reboot
+	return strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection error") ||
+		strings.Contains(errStr, "Unavailable") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "graceful_stop") ||
+		strings.Contains(errStr, "transport") ||
+		strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "context deadline exceeded")
+}
 
 // UpgradeOrchestrator handles the actual execution of Talos and Kubernetes upgrades
 type UpgradeOrchestrator struct {
@@ -48,6 +67,14 @@ type UpgradeResult struct {
 	RequeueAfter  time.Duration
 }
 
+// upgradeState holds the state during a rolling upgrade
+type upgradeState struct {
+	nodesUpgraded      int
+	skippedNodes       []string
+	totalNodes         int
+	lastUpgradedWorker *NodeUpgradeInfo
+}
+
 // PerformTalosUpgrade executes a rolling Talos upgrade across all nodes.
 // It upgrades workers first, then control planes (one at a time).
 // Returns UpgradeResult indicating progress and whether a requeue is needed.
@@ -68,95 +95,197 @@ func (o *UpgradeOrchestrator) PerformTalosUpgrade(
 	}
 
 	// Sort nodes: workers first, then control planes
+	orderedNodes := o.buildOrderedNodeList(nodes, targetVersion)
+
+	state := &upgradeState{
+		totalNodes: totalNodes,
+	}
+
+	// Process each node
+	for i, node := range orderedNodes {
+		result := o.processNodeForUpgrade(ctx, cluster, clientConfig, node, i, state, talosInstallerImage)
+		if result != nil {
+			return result
+		}
+	}
+
+	return o.buildCompletionResult(cluster, state)
+}
+
+// buildOrderedNodeList sorts nodes with workers first, then control planes
+func (o *UpgradeOrchestrator) buildOrderedNodeList(nodes []NodeUpgradeInfo, targetVersion string) []NodeUpgradeInfo {
 	workers, controlPlanes := o.sortNodesByRole(nodes)
 	orderedNodes := make([]NodeUpgradeInfo, 0, len(workers)+len(controlPlanes))
 	orderedNodes = append(orderedNodes, workers...)
 	orderedNodes = append(orderedNodes, controlPlanes...)
 
-	vlog.Info(fmt.Sprintf("Starting Talos upgrade: cluster=%s target=%s workers=%d controlPlanes=%d",
-		cluster.Name, targetVersion, len(workers), len(controlPlanes)))
+	vlog.Info(fmt.Sprintf("Starting Talos upgrade: target=%s workers=%d controlPlanes=%d",
+		targetVersion, len(workers), len(controlPlanes)))
 
-	// Find the next node that needs upgrading
-	nodesUpgraded := 0
-	var skippedNodes []string
-	for i, node := range orderedNodes {
-		// Count already upgraded nodes
-		if node.Upgraded {
-			nodesUpgraded++
-			continue
+	return orderedNodes
+}
+
+// processNodeForUpgrade handles upgrade logic for a single node
+// Returns an UpgradeResult if the loop should exit, nil to continue
+func (o *UpgradeOrchestrator) processNodeForUpgrade(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	node NodeUpgradeInfo,
+	nodeIndex int,
+	state *upgradeState,
+	talosInstallerImage string,
+) *UpgradeResult {
+	// Handle already upgraded nodes
+	if node.Upgraded {
+		state.nodesUpgraded++
+		if node.Role == "worker" {
+			nodeCopy := node
+			state.lastUpgradedWorker = &nodeCopy
 		}
+		return nil
+	}
 
-		// Skip nodes marked as skipped (e.g., previously failed and user chose to skip)
-		if node.Skipped {
-			skippedNodes = append(skippedNodes, node.Name)
-			vlog.Info(fmt.Sprintf("Skipping node %s as requested", node.Name))
-			continue
-		}
+	// Handle skipped nodes
+	if node.Skipped {
+		state.skippedNodes = append(state.skippedNodes, node.Name)
+		vlog.Info(fmt.Sprintf("Skipping node %s as requested", node.Name))
+		return nil
+	}
 
-		// Skip nodes that previously failed (unless retry is requested)
-		if node.Failed {
-			skippedNodes = append(skippedNodes, node.Name)
-			vlog.Warn(fmt.Sprintf("Skipping previously failed node %s (use retry-failed-nodes annotation to retry)", node.Name))
-			continue
-		}
+	// Handle failed nodes
+	if node.Failed {
+		state.skippedNodes = append(state.skippedNodes, node.Name)
+		vlog.Warn(fmt.Sprintf("Skipping previously failed node %s (use retry-failed-nodes annotation to retry)", node.Name))
+		return nil
+	}
 
-		// Found a node that needs upgrading
-		vlog.Info(fmt.Sprintf("Upgrading Talos on node: cluster=%s node=%s ip=%s role=%s (%d/%d)",
-			cluster.Name, node.Name, node.IP, node.Role, i+1, totalNodes))
+	// Check worker readiness before proceeding
+	if result := o.checkWorkerReadiness(ctx, clientConfig, node, state); result != nil {
+		return result
+	}
 
-		// Update progress annotation
-		if err := o.upgradeService.UpdateTalosUpgradeProgress(ctx, cluster, node.Name, nodesUpgraded, totalNodes); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to update progress: %v", err))
-		}
+	// Perform the upgrade
+	return o.executeNodeUpgrade(ctx, cluster, clientConfig, node, nodeIndex, state, talosInstallerImage)
+}
 
-		// Perform the actual upgrade on this node
-		if err := o.upgradeTalosNode(ctx, clientConfig, node.IP, talosInstallerImage); err != nil {
-			vlog.Error(fmt.Sprintf("Failed to upgrade Talos on node %s: %v", node.Name, err), err)
-			return &UpgradeResult{
-				Success:       false,
-				NodesUpgraded: nodesUpgraded,
-				TotalNodes:    totalNodes,
-				FailedNode:    node.Name,
-				SkippedNodes:  skippedNodes,
-				Error:         err,
-			}
-		}
+// checkWorkerReadiness verifies the last upgraded worker is ready before upgrading the next
+func (o *UpgradeOrchestrator) checkWorkerReadiness(
+	ctx context.Context,
+	clientConfig *clientconfig.Config,
+	node NodeUpgradeInfo,
+	state *upgradeState,
+) *UpgradeResult {
+	if node.Role != "worker" || state.lastUpgradedWorker == nil {
+		return nil
+	}
 
-		// Mark node as upgraded in the state service
-		if o.upgradeService.stateService != nil {
-			if err := o.upgradeService.stateService.MarkNodeUpgraded(ctx, cluster, node.Name); err != nil {
-				vlog.Warn(fmt.Sprintf("Failed to mark node %s as upgraded in state: %v", node.Name, err))
-			}
-		}
+	ready, err := o.clientService.IsKubernetesNodeReady(ctx, clientConfig, state.lastUpgradedWorker.IP, state.lastUpgradedWorker.Name)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to check Kubernetes readiness for node %s: %v", state.lastUpgradedWorker.Name, err))
+		return nil // Continue anyway after warning
+	}
 
-		nodesUpgraded++
-		vlog.Info(fmt.Sprintf("Talos upgrade initiated on node: cluster=%s node=%s (%d/%d complete)",
-			cluster.Name, node.Name, nodesUpgraded, totalNodes))
-
-		// After initiating upgrade on one node, requeue to check status
-		// The node will reboot during upgrade, so we need to wait
+	if !ready {
+		vlog.Info(fmt.Sprintf("Waiting for worker node %s to be Kubernetes-ready before upgrading next worker %s",
+			state.lastUpgradedWorker.Name, node.Name))
 		return &UpgradeResult{
 			Success:       true,
-			NodesUpgraded: nodesUpgraded,
-			TotalNodes:    totalNodes,
-			SkippedNodes:  skippedNodes,
+			NodesUpgraded: state.nodesUpgraded,
+			TotalNodes:    state.totalNodes,
+			SkippedNodes:  state.skippedNodes,
 			NeedsRequeue:  true,
-			RequeueAfter:  30 * time.Second, // Check again after 30s
+			RequeueAfter:  15 * time.Second,
 		}
 	}
 
-	// All nodes upgraded (or skipped)
-	if len(skippedNodes) > 0 {
+	vlog.Info(fmt.Sprintf("Worker node %s is Kubernetes-ready, proceeding with next worker upgrade", state.lastUpgradedWorker.Name))
+	return nil
+}
+
+// executeNodeUpgrade performs the actual upgrade on a node
+func (o *UpgradeOrchestrator) executeNodeUpgrade(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	node NodeUpgradeInfo,
+	nodeIndex int,
+	state *upgradeState,
+	talosInstallerImage string,
+) *UpgradeResult {
+	vlog.Info(fmt.Sprintf("Upgrading Talos on node: cluster=%s node=%s ip=%s role=%s (%d/%d)",
+		cluster.Name, node.Name, node.IP, node.Role, nodeIndex+1, state.totalNodes))
+
+	// Update progress annotation
+	if err := o.upgradeService.UpdateTalosUpgradeProgress(ctx, cluster, node.Name, state.nodesUpgraded, state.totalNodes); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to update progress: %v", err))
+	}
+
+	// Check if node was already marked as having upgrade initiated
+	alreadyInitiated := false
+	if o.upgradeService.stateService != nil {
+		alreadyInitiated = o.upgradeService.stateService.IsNodeUpgraded(ctx, cluster, node.Name)
+	}
+
+	// Perform the actual upgrade
+	if err := o.upgradeTalosNode(ctx, clientConfig, node.IP, talosInstallerImage); err != nil {
+		// If upgrade was already initiated and we get a connection error, node is likely rebooting
+		if alreadyInitiated && isConnectionError(err) {
+			vlog.Info(fmt.Sprintf("Node %s upgrade already initiated, connection error indicates reboot in progress", node.Name))
+			return &UpgradeResult{
+				Success:       true,
+				NodesUpgraded: state.nodesUpgraded,
+				TotalNodes:    state.totalNodes,
+				SkippedNodes:  state.skippedNodes,
+				NeedsRequeue:  true,
+				RequeueAfter:  30 * time.Second,
+			}
+		}
+		vlog.Error(fmt.Sprintf("Failed to upgrade Talos on node %s: %v", node.Name, err), err)
+		return &UpgradeResult{
+			Success:       false,
+			NodesUpgraded: state.nodesUpgraded,
+			TotalNodes:    state.totalNodes,
+			FailedNode:    node.Name,
+			SkippedNodes:  state.skippedNodes,
+			Error:         err,
+		}
+	}
+
+	// Mark node as upgraded in the state service
+	if o.upgradeService.stateService != nil {
+		if err := o.upgradeService.stateService.MarkNodeUpgraded(ctx, cluster, node.Name); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to mark node %s as upgraded in state: %v", node.Name, err))
+		}
+	}
+
+	state.nodesUpgraded++
+	vlog.Info(fmt.Sprintf("Talos upgrade initiated on node: cluster=%s node=%s (%d/%d complete)",
+		cluster.Name, node.Name, state.nodesUpgraded, state.totalNodes))
+
+	return &UpgradeResult{
+		Success:       true,
+		NodesUpgraded: state.nodesUpgraded,
+		TotalNodes:    state.totalNodes,
+		SkippedNodes:  state.skippedNodes,
+		NeedsRequeue:  true,
+		RequeueAfter:  30 * time.Second,
+	}
+}
+
+// buildCompletionResult creates the result when all nodes have been processed
+func (o *UpgradeOrchestrator) buildCompletionResult(cluster *vitistackv1alpha1.KubernetesCluster, state *upgradeState) *UpgradeResult {
+	if len(state.skippedNodes) > 0 {
 		vlog.Warn(fmt.Sprintf("Upgrade completed with skipped nodes: cluster=%s upgraded=%d skipped=%d nodes=%v",
-			cluster.Name, nodesUpgraded, len(skippedNodes), skippedNodes))
+			cluster.Name, state.nodesUpgraded, len(state.skippedNodes), state.skippedNodes))
 	} else {
-		vlog.Info(fmt.Sprintf("All nodes upgraded: cluster=%s nodes=%d", cluster.Name, nodesUpgraded))
+		vlog.Info(fmt.Sprintf("All nodes upgraded: cluster=%s nodes=%d", cluster.Name, state.nodesUpgraded))
 	}
 	return &UpgradeResult{
 		Success:       true,
-		NodesUpgraded: nodesUpgraded,
-		TotalNodes:    totalNodes,
-		SkippedNodes:  skippedNodes,
+		NodesUpgraded: state.nodesUpgraded,
+		TotalNodes:    state.totalNodes,
+		SkippedNodes:  state.skippedNodes,
 		NeedsRequeue:  false,
 	}
 }
@@ -183,16 +312,38 @@ func (o *UpgradeOrchestrator) upgradeTalosNode(
 	return nil
 }
 
-// PerformKubernetesUpgrade executes a Kubernetes version upgrade using talosctl upgrade-k8s
+// PerformKubernetesUpgrade executes a Kubernetes version upgrade on all nodes
 func (o *UpgradeOrchestrator) PerformKubernetesUpgrade(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientConfig *clientconfig.Config,
-	controlPlaneIP string,
+	nodes []talosclientservice.NodeUpgradeInfo,
 	targetVersion string,
 ) *UpgradeResult {
-	vlog.Info(fmt.Sprintf("Starting Kubernetes upgrade: cluster=%s target=%s endpoint=%s",
-		cluster.Name, targetVersion, controlPlaneIP))
+	vlog.Info(fmt.Sprintf("Starting Kubernetes upgrade: cluster=%s target=%s nodes=%d",
+		cluster.Name, targetVersion, len(nodes)))
+
+	if len(nodes) == 0 {
+		return &UpgradeResult{
+			Success: false,
+			Error:   fmt.Errorf("no nodes provided for Kubernetes upgrade"),
+		}
+	}
+
+	// Get first control plane IP for client connection
+	var controlPlaneIP string
+	for _, node := range nodes {
+		if node.IsControlPlane {
+			controlPlaneIP = node.IP
+			break
+		}
+	}
+	if controlPlaneIP == "" {
+		return &UpgradeResult{
+			Success: false,
+			Error:   fmt.Errorf("no control plane node found for Kubernetes upgrade"),
+		}
+	}
 
 	// Create Talos client
 	client, err := o.clientService.CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIP})
@@ -204,8 +355,8 @@ func (o *UpgradeOrchestrator) PerformKubernetesUpgrade(
 	}
 	defer func() { _ = client.Close() }()
 
-	// Perform Kubernetes upgrade
-	if err := o.clientService.UpgradeKubernetes(ctx, client, controlPlaneIP, targetVersion); err != nil {
+	// Perform Kubernetes upgrade on all nodes
+	if err := o.clientService.UpgradeKubernetes(ctx, client, nodes, targetVersion); err != nil {
 		return &UpgradeResult{
 			Success: false,
 			Error:   fmt.Errorf("kubernetes upgrade failed: %w", err),
@@ -280,33 +431,91 @@ func (o *UpgradeOrchestrator) WaitForNodeReady(
 	return fmt.Errorf("timeout waiting for node %s to be ready", nodeIP)
 }
 
-// PreflightChecks performs checks before starting an upgrade
+// PreflightChecks performs comprehensive health checks before starting an upgrade
+// and persists the result to the cluster secret for tracking.
 func (o *UpgradeOrchestrator) PreflightChecks(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientConfig *clientconfig.Config,
 	controlPlaneIP string,
-) error {
-	// Check that all Talos APIs are reachable
-	if !o.clientService.IsTalosAPIReachable(controlPlaneIP) {
-		return fmt.Errorf("talos API not reachable on control plane %s", controlPlaneIP)
+	allNodeIPs []string,
+) (*talosstateservice.HealthCheckState, error) {
+	healthState := &talosstateservice.HealthCheckState{
+		Passed:            false,
+		EtcdHealthy:       false,
+		NodesReady:        false,
+		ControlPlaneReady: false,
 	}
 
-	// Check etcd health
+	var issues []string
+
+	// 1. Check Talos API reachability on control plane
+	vlog.Info(fmt.Sprintf("Pre-upgrade health check: checking Talos API reachability on %s", controlPlaneIP))
+	if !o.clientService.IsTalosAPIReachable(controlPlaneIP) {
+		issues = append(issues, fmt.Sprintf("Talos API not reachable on control plane %s", controlPlaneIP))
+	} else {
+		healthState.ControlPlaneReady = true
+	}
+
+	// 2. Check etcd health
+	vlog.Info("Pre-upgrade health check: checking etcd cluster health")
 	client, err := o.clientService.CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIP})
 	if err != nil {
-		return fmt.Errorf("failed to create Talos client: %w", err)
-	}
-	defer func() { _ = client.Close() }()
+		issues = append(issues, fmt.Sprintf("Failed to create Talos client: %v", err))
+	} else {
+		defer func() { _ = client.Close() }()
 
-	healthy, err := o.clientService.IsEtcdHealthy(ctx, client, controlPlaneIP)
-	if err != nil {
-		return fmt.Errorf("failed to check etcd health: %w", err)
-	}
-	if !healthy {
-		return fmt.Errorf("etcd cluster is not healthy - upgrade aborted for safety")
+		healthy, etcdErr := o.clientService.IsEtcdHealthy(ctx, client, controlPlaneIP)
+		switch {
+		case etcdErr != nil:
+			issues = append(issues, fmt.Sprintf("Failed to check etcd health: %v", etcdErr))
+		case !healthy:
+			issues = append(issues, "etcd cluster is not healthy")
+		default:
+			healthState.EtcdHealthy = true
+			vlog.Info("Pre-upgrade health check: etcd cluster is healthy")
+		}
 	}
 
-	vlog.Info(fmt.Sprintf("Preflight checks passed: cluster=%s", cluster.Name))
-	return nil
+	// 3. Check all nodes are reachable
+	vlog.Info(fmt.Sprintf("Pre-upgrade health check: checking %d nodes are reachable", len(allNodeIPs)))
+	allNodesReachable := true
+	unreachableNodes := []string{}
+	for _, nodeIP := range allNodeIPs {
+		if !o.clientService.IsTalosAPIReachable(nodeIP) {
+			allNodesReachable = false
+			unreachableNodes = append(unreachableNodes, nodeIP)
+		}
+	}
+	if !allNodesReachable {
+		issues = append(issues, fmt.Sprintf("Talos API not reachable on nodes: %v", unreachableNodes))
+	} else {
+		healthState.NodesReady = true
+		vlog.Info(fmt.Sprintf("Pre-upgrade health check: all %d nodes are reachable", len(allNodeIPs)))
+	}
+
+	// Build result message
+	if len(issues) > 0 {
+		healthState.Message = fmt.Sprintf("Health check failed: %s", strings.Join(issues, "; "))
+		healthState.Passed = false
+		vlog.Error(fmt.Sprintf("Pre-upgrade health check FAILED: cluster=%s issues=%v", cluster.Name, issues), nil)
+	} else {
+		healthState.Message = "All health checks passed"
+		healthState.Passed = true
+		vlog.Info(fmt.Sprintf("Pre-upgrade health check PASSED: cluster=%s etcd=%v nodes=%v cp=%v",
+			cluster.Name, healthState.EtcdHealthy, healthState.NodesReady, healthState.ControlPlaneReady))
+	}
+
+	// Persist health state to secret (if state service available)
+	if o.upgradeService != nil && o.upgradeService.stateService != nil {
+		if err := o.upgradeService.stateService.SetHealthCheckState(ctx, cluster, healthState); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to persist health check state: %v", err))
+		}
+	}
+
+	if !healthState.Passed {
+		return healthState, fmt.Errorf("pre-upgrade health check failed: %s", healthState.Message)
+	}
+
+	return healthState, nil
 }

@@ -13,6 +13,9 @@ import (
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
+	"github.com/siderolabs/talos/pkg/machinery/config/encoder"
+	v1alpha1config "github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
+	"github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/k8s"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
@@ -568,6 +571,17 @@ func (s *TalosClientService) checkNodeReady(
 	return false, nil
 }
 
+// IsKubernetesNodeReady checks if a node's kubelet is ready and the node can accept pods.
+// This queries the Talos NodeStatus resource which tracks kubelet registration and readiness.
+func (s *TalosClientService) IsKubernetesNodeReady(
+	ctx context.Context,
+	clientConfig *clientconfig.Config,
+	nodeIP string,
+	hostname string,
+) (bool, error) {
+	return s.checkNodeReady(ctx, clientConfig, nodeIP, hostname)
+}
+
 // UpgradeNode initiates a Talos OS upgrade on a single node.
 // The node will download the new image and reboot to apply the upgrade.
 // This is equivalent to `talosctl upgrade --image <installerImage>`.
@@ -596,51 +610,112 @@ func (s *TalosClientService) UpgradeNode(
 	return nil
 }
 
+// NodeUpgradeInfo contains information about a node to upgrade
+type NodeUpgradeInfo struct {
+	IP             string
+	IsControlPlane bool
+}
+
 // UpgradeKubernetes initiates a Kubernetes version upgrade on the cluster.
-// This performs a rolling upgrade of all Kubernetes components (API server,
-// controller-manager, scheduler, kube-proxy, kubelet) by patching the machine
-// configuration on each node.
+// This performs a rolling upgrade of all Kubernetes components by patching the machine
+// configuration on each node:
+// - Control plane nodes: kubelet, apiserver, controller-manager, scheduler, proxy
+// - Worker nodes: kubelet only
 //
-// The upgrade process:
-// 1. Patches control plane nodes with new K8s component images
-// 2. Patches worker nodes with new kubelet image
-// 3. Talos automatically rolls out the changes
+// The upgrade process for each node:
+// 1. Fetches the current full machine config from the node
+// 2. Patches the Kubernetes component images to the new version
+// 3. Applies the patched config without reboot (Talos handles rolling update)
 func (s *TalosClientService) UpgradeKubernetes(
 	ctx context.Context,
 	tClient *talosclient.Client,
-	controlPlaneIP string,
+	nodes []NodeUpgradeInfo,
 	targetVersion string,
 ) error {
-	vlog.Info(fmt.Sprintf("Initiating Kubernetes upgrade: endpoint=%s version=%s", controlPlaneIP, targetVersion))
+	if len(nodes) == 0 {
+		return fmt.Errorf("no nodes provided for Kubernetes upgrade")
+	}
+
+	vlog.Info(fmt.Sprintf("Initiating Kubernetes upgrade: nodes=%d version=%s", len(nodes), targetVersion))
 
 	// Normalize version (ensure it has 'v' prefix for image tags)
 	if !strings.HasPrefix(targetVersion, "v") {
 		targetVersion = "v" + targetVersion
 	}
 
-	// Build the machine config patch for Kubernetes version upgrade
-	// This patches the cluster configuration with new image versions
-	patch := fmt.Sprintf(`machine:
-  kubelet:
-    image: ghcr.io/siderolabs/kubelet:%s
-cluster:
-  apiServer:
-    image: registry.k8s.io/kube-apiserver:%s
-  controllerManager:
-    image: registry.k8s.io/kube-controller-manager:%s
-  scheduler:
-    image: registry.k8s.io/kube-scheduler:%s
-  proxy:
-    image: registry.k8s.io/kube-proxy:%s
-`, targetVersion, targetVersion, targetVersion, targetVersion, targetVersion)
+	// Upgrade control plane nodes first, then workers
+	var controlPlanes, workers []NodeUpgradeInfo
+	for _, node := range nodes {
+		if node.IsControlPlane {
+			controlPlanes = append(controlPlanes, node)
+		} else {
+			workers = append(workers, node)
+		}
+	}
 
-	// Apply the patch to the control plane node
-	// The Talos controller will roll out the changes automatically
-	nodeCtx := talosclient.WithNodes(ctx, controlPlaneIP)
+	// Upgrade control plane nodes (all components)
+	for _, node := range controlPlanes {
+		if err := s.upgradeNodeKubernetes(ctx, tClient, node.IP, targetVersion, true); err != nil {
+			return fmt.Errorf("failed to upgrade control plane node %s: %w", node.IP, err)
+		}
+	}
 
+	// Upgrade worker nodes (kubelet only)
+	for _, node := range workers {
+		if err := s.upgradeNodeKubernetes(ctx, tClient, node.IP, targetVersion, false); err != nil {
+			return fmt.Errorf("failed to upgrade worker node %s: %w", node.IP, err)
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: controlplanes=%d workers=%d version=%s",
+		len(controlPlanes), len(workers), targetVersion))
+	return nil
+}
+
+// upgradeNodeKubernetes upgrades Kubernetes components on a single node
+func (s *TalosClientService) upgradeNodeKubernetes(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+	targetVersion string,
+	isControlPlane bool,
+) error {
+	nodeType := "worker"
+	if isControlPlane {
+		nodeType = "control-plane"
+	}
+	vlog.Info(fmt.Sprintf("Upgrading Kubernetes on node: ip=%s type=%s version=%s", nodeIP, nodeType, targetVersion))
+
+	// Use WithNode (singular) not WithNodes - COSI methods don't support one-to-many proxying
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
+
+	// Fetch the current full machine config from the node via COSI
+	mc, err := safe.StateGetByID[*config.MachineConfig](nodeCtx, tClient.COSI, config.ActiveID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch current machine config from node %s: %w", nodeIP, err)
+	}
+
+	provider := mc.Provider()
+
+	// Patch the config with new Kubernetes image versions
+	newProvider, err := provider.PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
+		return s.patchKubernetesImages(cfg, targetVersion, isControlPlane)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to patch machine config: %w", err)
+	}
+
+	// Serialize the full patched config
+	cfgBytes, err := newProvider.EncodeBytes(encoder.WithComments(encoder.CommentsDisabled))
+	if err != nil {
+		return fmt.Errorf("failed to serialize patched config: %w", err)
+	}
+
+	// Apply the patched config with NO_REBOOT mode
+	// Talos will automatically roll out the Kubernetes component changes
 	resp, err := tClient.ApplyConfiguration(nodeCtx, &machineapi.ApplyConfigurationRequest{
-		Data: []byte(patch),
-		Mode: machineapi.ApplyConfigurationRequest_AUTO,
+		Data: cfgBytes,
+		Mode: machineapi.ApplyConfigurationRequest_NO_REBOOT,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to apply Kubernetes upgrade configuration: %w", err)
@@ -648,13 +723,61 @@ cluster:
 
 	// Log response
 	for _, msg := range resp.Messages {
-		vlog.Info(fmt.Sprintf("Kubernetes upgrade config applied: node=%s mode_details=%s", controlPlaneIP, msg.ModeDetails))
+		vlog.Info(fmt.Sprintf("Kubernetes upgrade config applied: node=%s type=%s mode_details=%s", nodeIP, nodeType, msg.ModeDetails))
 		for _, warning := range msg.Warnings {
 			vlog.Warn(fmt.Sprintf("Kubernetes upgrade warning: %s", warning))
 		}
 	}
 
-	vlog.Info(fmt.Sprintf("Kubernetes upgrade initiated: endpoint=%s version=%s", controlPlaneIP, targetVersion))
+	return nil
+}
+
+// patchKubernetesImages patches the config with Kubernetes component images
+func (s *TalosClientService) patchKubernetesImages(cfg *v1alpha1config.Config, targetVersion string, isControlPlane bool) error {
+	// Ensure machine config exists
+	if cfg.MachineConfig == nil {
+		cfg.MachineConfig = &v1alpha1config.MachineConfig{}
+	}
+	// Ensure kubelet config exists
+	if cfg.MachineConfig.MachineKubelet == nil {
+		cfg.MachineConfig.MachineKubelet = &v1alpha1config.KubeletConfig{}
+	}
+
+	// Set kubelet image (all nodes)
+	cfg.MachineConfig.MachineKubelet.KubeletImage = fmt.Sprintf("ghcr.io/siderolabs/kubelet:%s", targetVersion)
+
+	// Control plane nodes also need the control plane component images
+	if isControlPlane {
+		// Ensure cluster config exists for control plane components
+		if cfg.ClusterConfig == nil {
+			cfg.ClusterConfig = &v1alpha1config.ClusterConfig{}
+		}
+
+		// Set API server image
+		if cfg.ClusterConfig.APIServerConfig == nil {
+			cfg.ClusterConfig.APIServerConfig = &v1alpha1config.APIServerConfig{}
+		}
+		cfg.ClusterConfig.APIServerConfig.ContainerImage = fmt.Sprintf("registry.k8s.io/kube-apiserver:%s", targetVersion)
+
+		// Set controller manager image
+		if cfg.ClusterConfig.ControllerManagerConfig == nil {
+			cfg.ClusterConfig.ControllerManagerConfig = &v1alpha1config.ControllerManagerConfig{}
+		}
+		cfg.ClusterConfig.ControllerManagerConfig.ContainerImage = fmt.Sprintf("registry.k8s.io/kube-controller-manager:%s", targetVersion)
+
+		// Set scheduler image
+		if cfg.ClusterConfig.SchedulerConfig == nil {
+			cfg.ClusterConfig.SchedulerConfig = &v1alpha1config.SchedulerConfig{}
+		}
+		cfg.ClusterConfig.SchedulerConfig.ContainerImage = fmt.Sprintf("registry.k8s.io/kube-scheduler:%s", targetVersion)
+
+		// Set proxy image
+		if cfg.ClusterConfig.ProxyConfig == nil {
+			cfg.ClusterConfig.ProxyConfig = &v1alpha1config.ProxyConfig{}
+		}
+		cfg.ClusterConfig.ProxyConfig.ContainerImage = fmt.Sprintf("registry.k8s.io/kube-proxy:%s", targetVersion)
+	}
+
 	return nil
 }
 
