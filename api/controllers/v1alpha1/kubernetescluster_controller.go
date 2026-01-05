@@ -888,10 +888,10 @@ func (r *KubernetesClusterReconciler) initializeUpgradeAnnotations(ctx context.C
 	// Get Talos version from cluster
 	talosVersion := ""
 	if state.TalosCurrent == "" {
-		client, err := r.TalosManager.GetClientService().CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIP})
+		c, err := r.TalosManager.GetClientService().CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIP})
 		if err == nil {
-			defer func() { _ = client.Close() }()
-			talosVersion, _ = r.TalosManager.GetClientService().GetTalosVersion(ctx, client, controlPlaneIP)
+			defer func() { _ = c.Close() }()
+			talosVersion, _ = r.TalosManager.GetClientService().GetTalosVersion(ctx, c, controlPlaneIP)
 		}
 	}
 

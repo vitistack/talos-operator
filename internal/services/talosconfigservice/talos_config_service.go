@@ -18,6 +18,7 @@ import (
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/networknamespaceservice"
+	"github.com/vitistack/talos-operator/internal/services/talosversion"
 	"github.com/vitistack/talos-operator/internal/services/vitistackservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	yaml "gopkg.in/yaml.v3"
@@ -48,10 +49,11 @@ func getKubernetesVersion(cluster *vitistackv1alpha1.KubernetesCluster) string {
 		version = viper.GetString(consts.DEFAULT_KUBERNETES_VERSION)
 		source = "config DEFAULT_KUBERNETES_VERSION"
 		if version == "" {
-			// Hardcoded safe default for Talos v1.11.x clusters
-			version = "1.34.1"
-			source = "hardcoded default"
-			vlog.Warn("No Kubernetes version configured, using hardcoded default: " + version)
+			// Use the version adapter's default for the configured Talos version
+			adapter := talosversion.GetCurrentTalosVersionAdapter()
+			version = adapter.DefaultKubernetesVersion()
+			source = fmt.Sprintf("adapter default for Talos %s", adapter.Version())
+			vlog.Warn(fmt.Sprintf("No Kubernetes version configured, using adapter default: %s", version))
 		}
 	}
 
@@ -291,19 +293,18 @@ func (s *TalosConfigService) PrepareNodeConfig(
 	installDisk string,
 	m *vitistackv1alpha1.Machine,
 	tenantOverrides map[string]any) ([]byte, error) {
+	// Get the version adapter for current Talos version
+	adapter := talosversion.GetCurrentTalosVersionAdapter()
+
 	// Build patches for per-node customization
 	var patches []string
 
-	// Patch install disk
-	installDiskPatch := fmt.Sprintf(`machine:
-  install:
-    disk: %s`, installDisk)
+	// Patch install disk using version-specific format
+	installDiskPatch := adapter.BuildInstallDiskPatch(installDisk)
 	patches = append(patches, installDiskPatch)
 
-	// Patch hostname
-	hostnamePatch := fmt.Sprintf(`machine:
-  network:
-    hostname: %s`, m.Name)
+	// Patch hostname using version-specific format
+	hostnamePatch := adapter.BuildHostnamePatch(m.Name)
 	patches = append(patches, hostnamePatch)
 
 	// Apply VM customizations if needed
@@ -486,9 +487,9 @@ func (s *TalosConfigService) PatchInstallDiskYAML(in []byte, disk string) ([]byt
 //
 // Deprecated: Use PrepareNodeConfig which handles this internally.
 func (s *TalosConfigService) PatchHostname(in []byte, hostname string) ([]byte, error) {
-	patch := fmt.Sprintf(`machine:
-  network:
-    hostname: %s`, hostname)
+	// Use version adapter for hostname patch
+	adapter := talosversion.GetCurrentTalosVersionAdapter()
+	patch := adapter.BuildHostnamePatch(hostname)
 
 	patches, err := configpatcher.LoadPatches([]string{patch})
 	if err != nil {
