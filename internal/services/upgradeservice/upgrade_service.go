@@ -396,8 +396,7 @@ func (s *UpgradeService) CheckForAvailableUpgrades(ctx context.Context, cluster 
 		}
 	}
 
-	// Check Kubernetes version only if Talos is already at the operator's version
-	// This ensures users upgrade Talos first before Kubernetes
+	// Check Kubernetes version - can be upgraded independently of Talos
 	if state.KubernetesCurrent != "" {
 		operatorK8sVersion := viper.GetString(consts.DEFAULT_KUBERNETES_VERSION)
 		clusterK8sVersion := state.KubernetesCurrent
@@ -412,12 +411,11 @@ func (s *UpgradeService) CheckForAvailableUpgrades(ctx context.Context, cluster 
 			return nil
 		}
 
-		// Only show K8s upgrade available if:
+		// Show K8s upgrade available if:
 		// 1. Operator K8s version is newer than cluster's
-		// 2. Talos is not being upgraded (in-progress)
-		// 3. Talos is already at the operator's version (no pending Talos upgrade)
-		talosUpToDate := !operatorVer.GreaterThan(clusterVer)
-		if operatorK8sVer.GreaterThan(clusterK8sVer) && state.TalosStatus != consts.UpgradeStatusInProgress && talosUpToDate {
+		// 2. Talos is not actively being upgraded (in-progress)
+		// Note: Kubernetes can be upgraded independently - no requirement to upgrade Talos first
+		if operatorK8sVer.GreaterThan(clusterK8sVer) && state.TalosStatus != consts.UpgradeStatusInProgress {
 			if err := s.SetKubernetesUpgradeAvailable(ctx, cluster, operatorK8sVersion); err != nil {
 				return err
 			}
@@ -822,18 +820,14 @@ func (s *UpgradeService) IsUpgradeInProgress(cluster *vitistackv1alpha1.Kubernet
 }
 
 // ShouldBlockKubernetesUpgrade checks if Kubernetes upgrade should be blocked
-// due to Talos version incompatibility or Talos upgrade in progress
+// due to Talos upgrade actively in progress (to prevent conflicts)
 func (s *UpgradeService) ShouldBlockKubernetesUpgrade(cluster *vitistackv1alpha1.KubernetesCluster) (bool, string) {
 	state := s.GetUpgradeState(cluster)
 
-	// Block if Talos upgrade is in progress
+	// Block only if Talos upgrade is actively in progress
+	// Note: Kubernetes can be upgraded independently of Talos - they don't need to be done in a specific order
 	if state.TalosStatus == consts.UpgradeStatusInProgress {
 		return true, "Talos upgrade is in progress. Complete Talos upgrade before upgrading Kubernetes."
-	}
-
-	// Block if Talos upgrade is pending/requested
-	if state.TalosTarget != "" && state.TalosStatus != consts.UpgradeStatusCompleted {
-		return true, fmt.Sprintf("Talos upgrade to %s is pending. Complete Talos upgrade before upgrading Kubernetes.", state.TalosTarget)
 	}
 
 	return false, ""

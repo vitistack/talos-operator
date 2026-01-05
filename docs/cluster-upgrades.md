@@ -9,7 +9,7 @@ The talos-operator uses an **annotation-based upgrade system** that is provider-
 1. **Talos OS Upgrade** - Upgrades the underlying Talos Linux operating system
 2. **Kubernetes Version Upgrade** - Upgrades Kubernetes components (API server, kubelet, etc.)
 
-> **Important:** Talos must be upgraded **before** Kubernetes if the new Kubernetes version requires a newer Talos version.
+> **Note:** Talos and Kubernetes can be upgraded independently. However, you cannot run both upgrades simultaneously - one must complete before the other can start.
 
 ## How Talos Upgrades Work
 
@@ -371,8 +371,7 @@ kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upg
 
 ### Prerequisites
 
-- Talos OS must be at a compatible version for the target Kubernetes version
-- No Talos upgrade should be in progress or pending
+- No upgrade (Talos or Kubernetes) should be actively in progress
 
 ### Step 1: Check Available Upgrades
 
@@ -389,8 +388,6 @@ Look for:
   "upgrade.vitistack.io/kubernetes-status": "idle"
 }
 ```
-
-> **Note:** The `kubernetes-available` annotation only appears after Talos is at a compatible version.
 
 ### Step 2: Trigger the Upgrade
 
@@ -420,14 +417,13 @@ kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upg
 Kubernetes upgrades may be blocked if:
 
 1. **Talos upgrade is in progress** - Wait for Talos upgrade to complete
-2. **Talos version is incompatible** - Upgrade Talos first
 
 When blocked, you'll see:
 
 ```json
 {
   "upgrade.vitistack.io/kubernetes-status": "blocked",
-  "upgrade.vitistack.io/kubernetes-message": "Talos 1.11.6 does not support K8s 1.35.0. Upgrade Talos first."
+  "upgrade.vitistack.io/kubernetes-message": "Talos upgrade is in progress. Complete Talos upgrade before upgrading Kubernetes."
 }
 ```
 
@@ -474,7 +470,7 @@ The cluster phase will be `UpgradeFailed`.
 
 2. **One node at a time** - Rolling upgrades are performed one node at a time with health checks between each node
 
-3. **Talos before Kubernetes** - Always upgrade Talos OS before upgrading Kubernetes version
+3. **One upgrade at a time** - Complete either Talos or Kubernetes upgrade before starting the other
 
 ### Version Constraints
 
