@@ -38,8 +38,9 @@ type TalosVersionAdapter interface {
 	// (HostnameConfig, ResolverConfig, TimeConfig, etc.)
 	SupportsMultiDocConfig() bool
 
-	// SupportsHostnameConfigDocument returns true if this version uses the HostnameConfig document
-	// Deprecated: Use SupportsMultiDocConfig instead
+	// SupportsHostnameConfigDocument returns true if this version uses the HostnameConfig document.
+	//
+	// Deprecated: Use SupportsMultiDocConfig instead.
 	SupportsHostnameConfigDocument() bool
 
 	// DefaultKubernetesVersion returns the recommended default Kubernetes version for this Talos version
