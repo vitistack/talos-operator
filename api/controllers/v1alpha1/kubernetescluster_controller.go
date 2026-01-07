@@ -844,6 +844,16 @@ func (r *KubernetesClusterReconciler) buildTalosInstallerImage(version string) s
 		return fmt.Sprintf("ghcr.io/siderolabs/installer:%s", version)
 	}
 
+	// Convert metal-installer to installer for upgrades
+	// metal-installer is used for initial installation (ISO/raw images)
+	// installer is used for upgrades via talosctl upgrade
+	baseImage = strings.Replace(baseImage, "factory.talos.dev/metal-installer/", "factory.talos.dev/installer/", 1)
+
+	// Ensure version has the 'v' prefix required by Talos images
+	if !strings.HasPrefix(version, "v") {
+		version = "v" + version
+	}
+
 	// Replace version in the base image
 	// Base image format: factory.talos.dev/installer/<schematic>:v1.x.x
 	// We need to replace the version tag

@@ -29,7 +29,7 @@ Talos uses an A/B partition layout for safe, atomic upgrades:
 │  (Talos 1.11.6)                        │
 ├────────────────────────────────────────┤
 │  SYSTEM-B  ◄── Upgrade target          │
-│  (Talos 1.12.0 written here)           │
+│  (Talos 1.12.1 written here)           │
 ├────────────────────────────────────────┤
 │  STATE (persistent data)               │
 │  - Machine config                      │
@@ -53,7 +53,7 @@ When each node is upgraded, it goes through these stages:
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. DOWNLOAD NEW IMAGE                                          │
 │     Node downloads the new Talos installer image                │
-│     (e.g., ghcr.io/siderolabs/installer:v1.12.0)               │
+│     (e.g., ghcr.io/siderolabs/installer:v1.12.1)               │
 │     Duration: ~30-60 seconds (depends on network)               │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -231,13 +231,13 @@ This ensures compatibility between control plane and kubelet versions.
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. Operator detects new Talos version available                │
-│     → Sets: upgrade.vitistack.io/talos-available: "1.12.0"      │
+│     → Sets: upgrade.vitistack.io/talos-available: "1.12.1"      │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  2. User triggers Talos upgrade                                 │
-│     → Sets: upgrade.vitistack.io/talos-target: "1.12.0"         │
+│     → Sets: upgrade.vitistack.io/talos-target: "1.12.1"         │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -312,10 +312,10 @@ Look for:
 
 ```json
 {
-  "upgrade.vitistack.io/talos-available": "1.12.0",
+  "upgrade.vitistack.io/talos-available": "1.12.1",
   "upgrade.vitistack.io/talos-current": "1.11.6",
   "upgrade.vitistack.io/talos-status": "idle",
-  "upgrade.vitistack.io/talos-message": "Upgrade available: 1.11.6 → 1.12.0"
+  "upgrade.vitistack.io/talos-message": "Upgrade available: 1.11.6 → 1.12.1"
 }
 ```
 
@@ -325,7 +325,7 @@ Set the target version annotation to trigger the upgrade:
 
 ```bash
 kubectl annotate kubernetescluster my-cluster \
-  upgrade.vitistack.io/talos-target="1.12.0"
+  upgrade.vitistack.io/talos-target="1.12.1"
 ```
 
 Or using `kubectl patch`:
@@ -334,7 +334,7 @@ Or using `kubectl patch`:
 kubectl patch kubernetescluster my-cluster --type=merge -p '
 metadata:
   annotations:
-    upgrade.vitistack.io/talos-target: "1.12.0"
+    upgrade.vitistack.io/talos-target: "1.12.1"
 '
 ```
 
@@ -361,7 +361,7 @@ Once complete, verify the upgrade:
 
 ```bash
 kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upgrade\.vitistack\.io/talos-current}'
-# Output: 1.12.0
+# Output: 1.12.1
 
 kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upgrade\.vitistack\.io/talos-status}'
 # Output: completed
@@ -459,7 +459,7 @@ The cluster phase will be `UpgradeFailed`.
 
    # Set it again to retry
    kubectl annotate kubernetescluster my-cluster \
-     upgrade.vitistack.io/talos-target="1.12.0"
+     upgrade.vitistack.io/talos-target="1.12.1"
    ```
 
 ## Upgrade Order and Best Practices
@@ -520,7 +520,7 @@ kubectl get kubernetescluster my-cluster -o yaml | grep -A5 "annotations:"
 
 # 2. Trigger Talos upgrade
 kubectl annotate kubernetescluster my-cluster \
-  upgrade.vitistack.io/talos-target="1.12.0"
+  upgrade.vitistack.io/talos-target="1.12.1"
 
 # 3. Wait for Talos upgrade to complete
 kubectl wait kubernetescluster my-cluster \

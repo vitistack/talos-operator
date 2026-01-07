@@ -60,7 +60,7 @@ type TalosVersionAdapter interface {
 }
 
 // GetTalosVersionAdapter returns the appropriate adapter for the given Talos version string.
-// Version can be in format "v1.11.6", "1.11.6", "v1.12.0", etc.
+// Version can be in format "v1.11.6", "1.11.6", "v1.12.1", etc.
 func GetTalosVersionAdapter(version string) TalosVersionAdapter {
 	// Strip leading 'v' if present
 	cleanVersion := strings.TrimPrefix(version, "v")

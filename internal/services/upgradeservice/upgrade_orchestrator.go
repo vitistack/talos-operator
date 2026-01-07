@@ -30,6 +30,15 @@ func isConnectionError(err error) bool {
 		strings.Contains(errStr, "context deadline exceeded")
 }
 
+// isUpgradeLockedError checks if an error indicates an upgrade is already in progress
+func isUpgradeLockedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "locked")
+}
+
 // UpgradeOrchestrator handles the actual execution of Talos and Kubernetes upgrades
 type UpgradeOrchestrator struct {
 	upgradeService *UpgradeService
@@ -229,6 +238,24 @@ func (o *UpgradeOrchestrator) executeNodeUpgrade(
 
 	// Perform the actual upgrade
 	if err := o.upgradeTalosNode(ctx, clientConfig, node.IP, talosInstallerImage); err != nil {
+		// If upgrade returns "locked", it means upgrade is already in progress on this node
+		// This is NOT an error - the node is actively upgrading, we should wait
+		if isUpgradeLockedError(err) {
+			vlog.Info(fmt.Sprintf("Node %s upgrade is locked (already in progress), will requeue to check status", node.Name))
+			// Mark as initiated so we track it
+			if o.upgradeService.stateService != nil {
+				_ = o.upgradeService.stateService.MarkNodeUpgraded(ctx, cluster, node.Name)
+			}
+			return &UpgradeResult{
+				Success:       true,
+				NodesUpgraded: state.nodesUpgraded,
+				TotalNodes:    state.totalNodes,
+				SkippedNodes:  state.skippedNodes,
+				NeedsRequeue:  true,
+				RequeueAfter:  15 * time.Second,
+			}
+		}
+
 		// If upgrade was already initiated and we get a connection error, node is likely rebooting
 		if alreadyInitiated && isConnectionError(err) {
 			vlog.Info(fmt.Sprintf("Node %s upgrade already initiated, connection error indicates reboot in progress", node.Name))
@@ -238,7 +265,7 @@ func (o *UpgradeOrchestrator) executeNodeUpgrade(
 				TotalNodes:    state.totalNodes,
 				SkippedNodes:  state.skippedNodes,
 				NeedsRequeue:  true,
-				RequeueAfter:  30 * time.Second,
+				RequeueAfter:  15 * time.Second,
 			}
 		}
 		vlog.Error(fmt.Sprintf("Failed to upgrade Talos on node %s: %v", node.Name, err), err)
@@ -400,7 +427,11 @@ func (o *UpgradeOrchestrator) CheckNodeUpgradeStatus(
 		return false, "", fmt.Errorf("failed to get version: %w", err)
 	}
 
-	return currentVersion == expectedVersion, currentVersion, nil
+	// Normalize versions for comparison (handle with/without 'v' prefix)
+	normalizedCurrent := strings.TrimPrefix(currentVersion, "v")
+	normalizedExpected := strings.TrimPrefix(expectedVersion, "v")
+
+	return normalizedCurrent == normalizedExpected, currentVersion, nil
 }
 
 // WaitForNodeReady waits for a node to be ready after upgrade
