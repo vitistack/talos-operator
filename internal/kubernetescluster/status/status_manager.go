@@ -9,6 +9,7 @@ import (
 	"github.com/vitistack/common/pkg/unstructuredutil"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
+	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,19 +28,29 @@ const (
 	phaseReady           = "Ready"
 	phaseRunning         = "Running"
 	PhaseValidationError = "ValidationError"
+
+	// Upgrade-related phases
+	PhaseUpgradingTalos      = "UpgradingTalos"
+	PhaseUpgradingKubernetes = "UpgradingKubernetes"
+	PhaseUpgradeFailed       = "UpgradeFailed"
+
+	// Exported phases for use by other packages
+	PhaseReady = phaseReady
 )
 
 // StatusManager handles machine status updates and monitoring
 type StatusManager struct {
 	client.Client
 	SecretService *secretservice.SecretService
+	StateService  *talosstateservice.TalosStateService
 }
 
 // NewManager creates a new status manager
-func NewManager(c client.Client, secretService *secretservice.SecretService) *StatusManager {
+func NewManager(c client.Client, secretService *secretservice.SecretService, stateService *talosstateservice.TalosStateService) *StatusManager {
 	return &StatusManager{
 		Client:        c,
 		SecretService: secretService,
+		StateService:  stateService,
 	}
 }
 
@@ -71,6 +82,21 @@ func (m *StatusManager) UpdateKubernetesClusterStatus(ctx context.Context, kuber
 			_ = m.SetPhase(ctx, kubernetesCluster, phaseReady)
 		} else if err != nil {
 			vlog.Debug("Failed to get kube-system creation time from target cluster: " + err.Error())
+		}
+
+		// Get and store kube-system namespace UID (only if not already stored)
+		// UID is immutable, so we only need to fetch it once
+		if m.shouldFetchKubeSystemUID(kubernetesCluster) {
+			if uid, err := getKubeSystemUID(ctx, kubeconfig); err == nil && uid != "" {
+				// Store in annotation
+				_ = m.SetKubeSystemUID(ctx, kubernetesCluster, uid)
+				// Store in secret
+				if m.StateService != nil {
+					_ = m.StateService.SetKubeSystemUID(ctx, kubernetesCluster, uid)
+				}
+			} else if err != nil {
+				vlog.Debug("Failed to get kube-system UID from target cluster: " + err.Error())
+			}
 		}
 	}
 	// Aggregate machine info into status (best effort)
@@ -196,6 +222,23 @@ func getKubeSystemCreated(ctx context.Context, kubeconfig []byte) (time.Time, er
 	return ns.CreationTimestamp.Time, nil
 }
 
+// getKubeSystemUID returns the UID of the kube-system namespace from the target cluster referenced by kubeconfig.
+func getKubeSystemUID(ctx context.Context, kubeconfig []byte) (string, error) {
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return "", err
+	}
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return "", err
+	}
+	ns, err := cs.CoreV1().Namespaces().Get(ctx, "kube-system", metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return string(ns.UID), nil
+}
+
 // ensureStatusMap creates an empty status map on the object if it doesn't exist yet.
 func ensureStatusMap(u *unstructured.Unstructured) error {
 	if err := ensureStatusRoot(u); err != nil {
@@ -319,6 +362,13 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 		}
 		return err
 	}
+
+	// Check if phase is already set to the desired value - skip update if unchanged
+	currentPhase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
+	if currentPhase == phase {
+		return nil // No change needed
+	}
+
 	if err := ensureStatusMap(u); err != nil {
 		vlog.Error("Failed to ensure status map exists: cluster="+kc.Name, err)
 		return err
@@ -376,9 +426,13 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 		return err
 	}
 
-	// Update conditions
-	if err := m.updateConditionInStatus(u, condType, status, reason, message, kc.Name); err != nil {
+	// Update conditions - returns changed=false if condition already exists with same values
+	changed, err := m.updateConditionInStatus(u, condType, status, reason, message, kc.Name)
+	if err != nil {
 		return err
+	}
+	if !changed {
+		return nil // No change needed, skip API update
 	}
 
 	// Touch state.lastUpdated and lastUpdatedBy
@@ -427,7 +481,8 @@ func (m *StatusManager) ClearValidationError(ctx context.Context, kc *vitistackv
 }
 
 // updateConditionInStatus updates the condition in the status.conditions slice
-func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, condType, status, reason, message, clusterName string) error {
+// Returns (changed bool, error). changed is false if the condition already exists with the same values.
+func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, condType, status, reason, message, clusterName string) (bool, error) {
 	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
 	if !found {
 		conds = []any{}
@@ -443,36 +498,38 @@ func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, co
 	}
 
 	// Replace existing condition of same type or append
-	conds = replaceOrAppendCondition(conds, newCond, condType)
+	conds, changed := replaceOrAppendCondition(conds, newCond, condType)
+	if !changed {
+		return false, nil // No change needed
+	}
 
 	// Sort conditions by lastTransitionTime (newest first)
 	conds = sortConditionsByTime(conds)
 
 	if err := unstructured.SetNestedSlice(u.Object, conds, "status", "conditions"); err != nil {
 		vlog.Error("Failed to set nested slice for conditions: cluster="+clusterName+" condition="+condType, err)
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
-// replaceOrAppendCondition replaces an existing condition or appends a new one
-func replaceOrAppendCondition(conds []any, newCond map[string]any, condType string) []any {
+// replaceOrAppendCondition replaces an existing condition or appends a new one.
+// Returns (conditions, changed). changed is false if the condition already exists with the same values.
+func replaceOrAppendCondition(conds []any, newCond map[string]any, condType string) ([]any, bool) {
 	for i, ci := range conds {
 		if cm, ok := ci.(map[string]any); ok {
 			if t, _ := cm["type"].(string); t == condType {
-				// Check if unchanged
+				// Check if unchanged - if status, reason, and message are the same, no update needed
 				if cm["status"] == newCond["status"] && cm["reason"] == newCond["reason"] && cm["message"] == newCond["message"] {
-					// Still bump lastTransitionTime
-					cm["lastTransitionTime"] = newCond["lastTransitionTime"]
-					conds[i] = cm
-					return conds
+					// No change needed - don't update lastTransitionTime
+					return conds, false
 				}
 				conds[i] = newCond
-				return conds
+				return conds, true
 			}
 		}
 	}
-	return append(conds, newCond)
+	return append(conds, newCond), true
 }
 
 // sortConditionsByTime sorts conditions by lastTransitionTime (newest first)
@@ -666,6 +723,44 @@ func setResourceUsage(u *unstructured.Unstructured, path []string, capacity, use
 	}
 	// Build full path for the object map
 	if err := unstructured.SetNestedMap(u.Object, usage, path...); err != nil {
+		return err
+	}
+	return nil
+}
+
+// shouldFetchKubeSystemUID checks if we need to fetch the kube-system UID
+// Returns true only if the UID is not already stored in the annotation
+func (m *StatusManager) shouldFetchKubeSystemUID(cluster *vitistackv1alpha1.KubernetesCluster) bool {
+	annotations := cluster.GetAnnotations()
+	if annotations == nil {
+		return true
+	}
+
+	// If annotation is already present and non-empty, no need to fetch
+	uid := annotations["vitistack.io/kube-system-uid"]
+	return uid == ""
+}
+
+// SetKubeSystemUID sets the kube-system namespace UID annotation on the cluster
+func (m *StatusManager) SetKubeSystemUID(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, uid string) error {
+	annotations := cluster.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	// Skip if value unchanged
+	if annotations["vitistack.io/kube-system-uid"] == uid {
+		return nil
+	}
+
+	annotations["vitistack.io/kube-system-uid"] = uid
+	cluster.SetAnnotations(annotations)
+
+	if err := m.Update(ctx, cluster); err != nil {
+		if apierrors.IsConflict(err) {
+			vlog.Debug("Update conflict when setting kube-system UID annotation, skipping")
+			return nil
+		}
 		return err
 	}
 	return nil

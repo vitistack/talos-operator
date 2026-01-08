@@ -1,11 +1,11 @@
 apiVersion: vitistack.io/v1alpha1
 kind: KubernetesCluster
 metadata:
-  name: t-test-003-6sd9
+  name: t-test-002-5tu8
 spec:
   data:
     clusterUid: "a30fbc8d-596f-48d0-8541-dbc23bca28a1"
-    clusterId: "t-test-003-6sd9"
+    clusterId: "t-test-002-5tu8"
     provider: talos
     environment: dev
     datacenter: test-south-az1
@@ -14,20 +14,21 @@ spec:
     workorder: "simple-workorder"
     zone: "az1"
     workspace: "simple-workspace"
-  # High-availability configuration with Talos recommended specifications:
-  # Control Plane: 4 GiB RAM, 4 CPUs, 100 GiB disk
-  # Workers: 2 GiB RAM, 2 CPUs, 100 GiB disk
+  # Empty spec will use defaults:
+  # - 1 control plane node
+  # - 1 worker nodes
   topology:
-    version: "1.34.1"
+    version: "1.34.3"
     controlplane:
+      # Defaults to 1 replica
       replicas: 3
-      version: "1.34.1"
-      machineClass: small # Should provide 4 vCPUs, 4 GiB RAM
+      version: "1.34.3"
+      machineClass: small
       provider: kubevirt
       storage:
         - class: "standard"
           path: "/var/lib/vitistack/kubevirt"
-          size: "50Gi" # Talos recommended for production
+          size: "20Gi"
       metadata:
         annotations:
           environment: development
@@ -39,9 +40,11 @@ spec:
       nodePools:
         - name: wp
           taint: []
-          version: "1.34.1"
-          replicas: 3
-          machineClass: medium # Should provide 2 vCPUs, 2 GiB RAM
+          version: "1.34.3"
+          # Defaults to 1 replica
+          replicas: 2
+          # Defaults to "standard" machine class
+          machineClass: large
           autoscaling:
             enabled: false
             minReplicas: 1
@@ -59,4 +62,4 @@ spec:
           storage:
             - class: "standard"
               path: "/var/lib/vitistack/kubevirt"
-              size: "50Gi" # Talos recommended for production
+              size: "20Gi"

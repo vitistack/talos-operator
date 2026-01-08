@@ -155,7 +155,7 @@ func parseFlags() *Flags {
 
 	// Configure zap logger
 	opts := zap.Options{
-		Development: true,
+		Development: viper.GetBool(consts.DEVELOPMENT),
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()

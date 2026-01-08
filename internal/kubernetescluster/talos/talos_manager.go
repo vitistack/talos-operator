@@ -144,6 +144,28 @@ func (t *TalosManager) loadTalosArtifacts(ctx context.Context, cluster *vitistac
 	return t.stateService.LoadTalosArtifacts(ctx, cluster)
 }
 
+// GetTalosClientConfig returns the Talos client config for a cluster (public wrapper for loadTalosArtifacts)
+func (t *TalosManager) GetTalosClientConfig(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*clientconfig.Config, error) {
+	clientConfig, found, err := t.loadTalosArtifacts(ctx, cluster)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load talos config: %w", err)
+	}
+	if !found {
+		return nil, fmt.Errorf("talos config not found for cluster %s", cluster.Name)
+	}
+	return clientConfig, nil
+}
+
+// GetClientService returns the Talos client service for upgrade operations
+func (t *TalosManager) GetClientService() *talosclientservice.TalosClientService {
+	return t.clientService
+}
+
+// GetStateService returns the Talos state service for version/upgrade state management
+func (t *TalosManager) GetStateService() *talosstateservice.TalosStateService {
+	return t.stateService
+}
+
 // talosSecretFlags is an alias to the state service's TalosSecretFlags type
 type talosSecretFlags = talosstateservice.TalosSecretFlags
 
@@ -259,7 +281,7 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 
 		// Choose role template
 		var roleYAML []byte
-		if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == "control-plane" {
+		if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == controlPlaneRole {
 			roleYAML = cpTemplate
 		} else {
 			roleYAML = wTemplate

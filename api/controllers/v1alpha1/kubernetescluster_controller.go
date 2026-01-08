@@ -8,11 +8,16 @@ import (
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/helpers/nodehelper"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
+	"github.com/vitistack/talos-operator/internal/services/machineservice"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
+	"github.com/vitistack/talos-operator/internal/services/talosconfigservice"
+	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
+	"github.com/vitistack/talos-operator/internal/services/upgradeservice"
 	"github.com/vitistack/talos-operator/internal/services/validationservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -29,10 +34,13 @@ type KubernetesClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	TalosManager     *talos.TalosManager                  // Manager for Talos clusters
-	MachineManager   *machine.MachineManager              // Manager for Machine resources
-	StatusManager    *status.StatusManager                // Manager for status updates
-	ValidatorService *validationservice.ValidationService // Service for validating resources
+	TalosManager        *talos.TalosManager                  // Manager for Talos clusters
+	MachineManager      *machine.MachineManager              // Manager for Machine resources
+	StatusManager       *status.StatusManager                // Manager for status updates
+	ValidatorService    *validationservice.ValidationService // Service for validating resources
+	UpgradeService      *upgradeservice.UpgradeService       // Service for managing upgrades
+	UpgradeOrchestrator *upgradeservice.UpgradeOrchestrator  // Orchestrator for executing upgrades (legacy)
+	UpgradeController   *upgradeservice.UpgradeController    // New upgrade controller with state management
 
 	SecretService *secretservice.SecretService
 }
@@ -40,6 +48,7 @@ type KubernetesClusterReconciler struct {
 const (
 	KubernetesClusterFinalizer               = "kubernetescluster.vitistack.io/finalizer"
 	ControllerRequeueDelay     time.Duration = 5 * time.Second
+	controlPlaneRole                         = "control-plane"
 )
 
 // +kubebuilder:rbac:groups=vitistack.io,resources=kubernetesclusters,verbs=get;list;watch;create;update;patch;delete
@@ -114,6 +123,11 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
+	// Handle upgrade requests (only for ready clusters)
+	if result, handled := r.handleUpgrades(ctx, kubernetesCluster); handled {
+		return result, nil
+	}
+
 	// Update KubernetesCluster status (skip if being deleted)
 	if kubernetesCluster.GetDeletionTimestamp() == nil {
 		if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, kubernetesCluster); err != nil {
@@ -121,7 +135,53 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 	}
 
+	// Initialize upgrade annotations for ready clusters (detects current versions)
+	if kubernetesCluster.Status.Phase == status.PhaseReady {
+		r.initializeUpgradeAnnotations(ctx, kubernetesCluster)
+		// Check for available upgrades (compares cluster version with operator's configured version)
+		_ = r.UpgradeService.CheckForAvailableUpgrades(ctx, kubernetesCluster)
+	}
+
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
+}
+
+// handleUpgrades checks for and processes upgrade requests via annotations.
+// Returns (result, true) if an upgrade was handled/in-progress, (_, false) if no upgrade action needed.
+func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, bool) {
+	// Only handle upgrades for clusters that are ready or in upgrade-related states
+	if cluster.Status.Phase != status.PhaseReady &&
+		cluster.Status.Phase != status.PhaseUpgradingTalos &&
+		cluster.Status.Phase != status.PhaseUpgradingKubernetes &&
+		cluster.Status.Phase != status.PhaseUpgradeFailed {
+		return ctrl.Result{}, false
+	}
+
+	// Get Talos client config
+	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to get Talos client config for upgrade: %v", err))
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, false
+	}
+
+	// Get machines for this cluster
+	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to list machines for upgrade: %v", err))
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, false
+	}
+
+	// Use the new upgrade controller
+	requeueAfter, handled, err := r.UpgradeController.HandleUpgrade(ctx, cluster, clientConfig, machines)
+	if err != nil {
+		vlog.Error(fmt.Sprintf("Upgrade error: %v", err), err)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+
+	if handled {
+		return ctrl.Result{RequeueAfter: requeueAfter}, true
+	}
+
+	return ctrl.Result{}, false
 }
 
 // handleScaleDown handles machine scale-down operations.
@@ -320,15 +380,25 @@ func (r *KubernetesClusterReconciler) getFreshCluster(ctx context.Context, kc *v
 // NewKubernetesClusterReconciler creates a new KubernetesClusterReconciler with initialized managers
 func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *KubernetesClusterReconciler {
 	secretService := secretservice.NewSecretService(c)
-	statusManager := status.NewManager(c, secretService)
+	stateService := talosstateservice.NewTalosStateService(secretService)
+	statusManager := status.NewManager(c, secretService, stateService)
+	clientService := talosclientservice.NewTalosClientService()
+	machineSvc := machineservice.NewMachineService(c)
+	talosManager := talos.NewTalosManager(c, statusManager)
+	configService := talosconfigservice.NewTalosConfigService()
+	upgradeService := upgradeservice.NewUpgradeService(c, statusManager, clientService, machineSvc, talosManager.GetStateService(), configService)
+	upgradeController := upgradeservice.NewUpgradeController(c, secretService, statusManager, clientService, upgradeService)
 	return &KubernetesClusterReconciler{
-		Client:           c,
-		Scheme:           scheme,
-		SecretService:    secretService,
-		TalosManager:     talos.NewTalosManager(c, statusManager),
-		MachineManager:   machine.NewMachineManager(c, scheme),
-		StatusManager:    statusManager,
-		ValidatorService: validationservice.NewValidationService(),
+		Client:              c,
+		Scheme:              scheme,
+		SecretService:       secretService,
+		TalosManager:        talosManager,
+		MachineManager:      machine.NewMachineManager(c, scheme),
+		StatusManager:       statusManager,
+		ValidatorService:    validationservice.NewValidationService(),
+		UpgradeService:      upgradeService,
+		UpgradeOrchestrator: upgradeservice.NewUpgradeOrchestrator(upgradeService, clientService, talosManager),
+		UpgradeController:   upgradeController,
 	}
 }
 
@@ -337,4 +407,83 @@ func (r *KubernetesClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&vitistackv1alpha1.KubernetesCluster{}).
 		Owns(&vitistackv1alpha1.Machine{}).
 		Complete(r)
+}
+
+// getFirstControlPlaneIP returns the IP of the first control plane machine
+func (r *KubernetesClusterReconciler) getFirstControlPlaneIP(machines []vitistackv1alpha1.Machine) string {
+	for i := range machines {
+		m := &machines[i]
+		if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == controlPlaneRole {
+			ip := nodehelper.GetFirstIPv4(m)
+			if ip != "" {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+// initializeUpgradeAnnotations detects and sets the current Talos and Kubernetes versions
+// on the cluster annotations when the cluster is ready
+func (r *KubernetesClusterReconciler) initializeUpgradeAnnotations(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) {
+	state := r.UpgradeService.GetUpgradeState(cluster)
+
+	// Skip if versions are already set
+	if state.TalosCurrent != "" && state.KubernetesCurrent != "" {
+		return
+	}
+
+	// Get Talos client config
+	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to get Talos config for version detection: %v", err))
+		return
+	}
+
+	// Get machines to find a control plane IP
+	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to list machines for version detection: %v", err))
+		return
+	}
+
+	controlPlaneIP := r.getFirstControlPlaneIP(machines)
+	if controlPlaneIP == "" {
+		vlog.Warn("No control plane IP available for version detection")
+		return
+	}
+
+	// Get Talos version from cluster
+	talosVersion := ""
+	if state.TalosCurrent == "" {
+		c, err := r.TalosManager.GetClientService().CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIP})
+		if err == nil {
+			defer func() { _ = c.Close() }()
+			talosVersion, _ = r.TalosManager.GetClientService().GetTalosVersion(ctx, c, controlPlaneIP)
+		}
+	}
+
+	// Get Kubernetes version from cluster spec (this is what was configured)
+	k8sVersion := ""
+	if state.KubernetesCurrent == "" {
+		// Use the version from the cluster spec (topology.version)
+		k8sVersion = cluster.Spec.Topology.Version
+	}
+
+	// Initialize the upgrade annotations
+	// Re-fetch the cluster to avoid conflict with status updates that may have occurred
+	if talosVersion != "" || k8sVersion != "" {
+		freshCluster := &vitistackv1alpha1.KubernetesCluster{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), freshCluster); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to re-fetch cluster for annotation update: %v", err))
+			return
+		}
+
+		if err := r.UpgradeService.InitializeCurrentVersions(ctx, freshCluster, talosVersion, k8sVersion); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to initialize upgrade annotations (will retry): %v", err))
+		} else {
+			vlog.Info(fmt.Sprintf("Initialized upgrade annotations: cluster=%s talos=%s k8s=%s",
+				cluster.Name, talosVersion, k8sVersion))
+		}
+	}
 }

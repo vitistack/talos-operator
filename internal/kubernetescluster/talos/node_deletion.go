@@ -466,6 +466,86 @@ func (t *TalosManager) deleteK8sNodeFromWorkloadCluster(ctx context.Context, clu
 	return nil
 }
 
+// CordonAndDrainNode cordons and drains a node in preparation for maintenance (like upgrades).
+// It does NOT delete the node from Kubernetes.
+func (t *TalosManager) CordonAndDrainNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to get workload cluster client: %w", err)
+	}
+	if clientset == nil {
+		return fmt.Errorf("kubeconfig not available for cluster %s", cluster.Name)
+	}
+
+	// Step 1: Cordon the node (mark as unschedulable)
+	if err := t.cordonNode(ctx, clientset, nodeName); err != nil {
+		return fmt.Errorf("failed to cordon node %s: %w", nodeName, err)
+	}
+
+	// Step 2: Drain the node (evict pods)
+	if err := t.drainNode(ctx, clientset, nodeName); err != nil {
+		// Log but don't fail - drain timeout shouldn't block upgrade
+		vlog.Warn(fmt.Sprintf("Drain completed with warnings for node %s: %v", nodeName, err))
+	}
+
+	return nil
+}
+
+// UncordonNode marks a node as schedulable again after maintenance.
+func (t *TalosManager) UncordonNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to get workload cluster client: %w", err)
+	}
+	if clientset == nil {
+		return fmt.Errorf("kubeconfig not available for cluster %s", cluster.Name)
+	}
+
+	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // Node doesn't exist
+		}
+		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+
+	if !node.Spec.Unschedulable {
+		vlog.Debug(fmt.Sprintf("Node %s is already schedulable", nodeName))
+		return nil
+	}
+
+	node.Spec.Unschedulable = false
+	_, err = clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to uncordon node %s: %w", nodeName, err)
+	}
+
+	vlog.Info(fmt.Sprintf("Uncordoned node: %s", nodeName))
+	return nil
+}
+
+// IsNodeSchedulable checks if a node is schedulable (not cordoned).
+func (t *TalosManager) IsNodeSchedulable(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) (bool, error) {
+	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
+	if err != nil {
+		return false, fmt.Errorf("failed to get workload cluster client: %w", err)
+	}
+	if clientset == nil {
+		return false, fmt.Errorf("kubeconfig not available for cluster %s", cluster.Name)
+	}
+
+	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil // Node doesn't exist
+		}
+		return false, fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+
+	// A node is schedulable if Unschedulable is false
+	return !node.Spec.Unschedulable, nil
+}
+
 // cordonNode marks a node as unschedulable
 func (t *TalosManager) cordonNode(ctx context.Context, clientset *kubernetes.Clientset, nodeName string) error {
 	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})

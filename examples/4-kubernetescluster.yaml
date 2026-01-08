@@ -18,10 +18,10 @@ spec:
   # Control Plane: 4 GiB RAM, 4 CPUs, 100 GiB disk
   # Workers: 2 GiB RAM, 2 CPUs, 100 GiB disk
   topology:
-    version: "1.34.1"
+    version: "1.35.0"
     controlplane:
       replicas: 1
-      version: "1.34.1"
+      version: "1.35.0"
       machineClass: small # Should provide 4 vCPUs, 4 GiB RAM
       provider: kubevirt
       storage:
@@ -39,7 +39,7 @@ spec:
       nodePools:
         - name: wp
           taint: []
-          version: "1.34.1"
+          version: "1.35.0"
           replicas: 1
           machineClass: large
           autoscaling:
