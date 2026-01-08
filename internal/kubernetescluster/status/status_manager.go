@@ -9,6 +9,7 @@ import (
 	"github.com/vitistack/common/pkg/unstructuredutil"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
+	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,13 +42,15 @@ const (
 type StatusManager struct {
 	client.Client
 	SecretService *secretservice.SecretService
+	StateService  *talosstateservice.TalosStateService
 }
 
 // NewManager creates a new status manager
-func NewManager(c client.Client, secretService *secretservice.SecretService) *StatusManager {
+func NewManager(c client.Client, secretService *secretservice.SecretService, stateService *talosstateservice.TalosStateService) *StatusManager {
 	return &StatusManager{
 		Client:        c,
 		SecretService: secretService,
+		StateService:  stateService,
 	}
 }
 
@@ -79,6 +82,21 @@ func (m *StatusManager) UpdateKubernetesClusterStatus(ctx context.Context, kuber
 			_ = m.SetPhase(ctx, kubernetesCluster, phaseReady)
 		} else if err != nil {
 			vlog.Debug("Failed to get kube-system creation time from target cluster: " + err.Error())
+		}
+
+		// Get and store kube-system namespace UID (only if not already stored)
+		// UID is immutable, so we only need to fetch it once
+		if m.shouldFetchKubeSystemUID(kubernetesCluster) {
+			if uid, err := getKubeSystemUID(ctx, kubeconfig); err == nil && uid != "" {
+				// Store in annotation
+				_ = m.SetKubeSystemUID(ctx, kubernetesCluster, uid)
+				// Store in secret
+				if m.StateService != nil {
+					_ = m.StateService.SetKubeSystemUID(ctx, kubernetesCluster, uid)
+				}
+			} else if err != nil {
+				vlog.Debug("Failed to get kube-system UID from target cluster: " + err.Error())
+			}
 		}
 	}
 	// Aggregate machine info into status (best effort)
@@ -202,6 +220,23 @@ func getKubeSystemCreated(ctx context.Context, kubeconfig []byte) (time.Time, er
 		return time.Time{}, err
 	}
 	return ns.CreationTimestamp.Time, nil
+}
+
+// getKubeSystemUID returns the UID of the kube-system namespace from the target cluster referenced by kubeconfig.
+func getKubeSystemUID(ctx context.Context, kubeconfig []byte) (string, error) {
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return "", err
+	}
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return "", err
+	}
+	ns, err := cs.CoreV1().Namespaces().Get(ctx, "kube-system", metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return string(ns.UID), nil
 }
 
 // ensureStatusMap creates an empty status map on the object if it doesn't exist yet.
@@ -688,6 +723,44 @@ func setResourceUsage(u *unstructured.Unstructured, path []string, capacity, use
 	}
 	// Build full path for the object map
 	if err := unstructured.SetNestedMap(u.Object, usage, path...); err != nil {
+		return err
+	}
+	return nil
+}
+
+// shouldFetchKubeSystemUID checks if we need to fetch the kube-system UID
+// Returns true only if the UID is not already stored in the annotation
+func (m *StatusManager) shouldFetchKubeSystemUID(cluster *vitistackv1alpha1.KubernetesCluster) bool {
+	annotations := cluster.GetAnnotations()
+	if annotations == nil {
+		return true
+	}
+
+	// If annotation is already present and non-empty, no need to fetch
+	uid := annotations["vitistack.io/kube-system-uid"]
+	return uid == ""
+}
+
+// SetKubeSystemUID sets the kube-system namespace UID annotation on the cluster
+func (m *StatusManager) SetKubeSystemUID(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, uid string) error {
+	annotations := cluster.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+
+	// Skip if value unchanged
+	if annotations["vitistack.io/kube-system-uid"] == uid {
+		return nil
+	}
+
+	annotations["vitistack.io/kube-system-uid"] = uid
+	cluster.SetAnnotations(annotations)
+
+	if err := m.Update(ctx, cluster); err != nil {
+		if apierrors.IsConflict(err) {
+			vlog.Debug("Update conflict when setting kube-system UID annotation, skipping")
+			return nil
+		}
 		return err
 	}
 	return nil

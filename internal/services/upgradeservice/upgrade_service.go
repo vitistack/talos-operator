@@ -20,8 +20,13 @@ import (
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/services/machineservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
+	"github.com/vitistack/talos-operator/internal/services/talosconfigservice"
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
+	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -35,6 +40,7 @@ type UpgradeService struct {
 	clientService  *talosclientservice.TalosClientService
 	machineService *machineservice.MachineService
 	stateService   *talosstateservice.TalosStateService
+	configService  *talosconfigservice.TalosConfigService
 }
 
 // NewUpgradeService creates a new UpgradeService instance
@@ -44,6 +50,7 @@ func NewUpgradeService(
 	clientService *talosclientservice.TalosClientService,
 	machineService *machineservice.MachineService,
 	stateService *talosstateservice.TalosStateService,
+	configService *talosconfigservice.TalosConfigService,
 ) *UpgradeService {
 	return &UpgradeService{
 		Client:         c,
@@ -51,6 +58,7 @@ func NewUpgradeService(
 		clientService:  clientService,
 		machineService: machineService,
 		stateService:   stateService,
+		configService:  configService,
 	}
 }
 
@@ -512,10 +520,14 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 		return err
 	}
 
-	// Persist completed version to secret
+	// Persist completed version to secret and clear upgrade tracking
 	if s.stateService != nil {
 		if err := s.stateService.CompleteUpgradeState(ctx, cluster, "talos", state.TalosTarget); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to persist completed upgrade to secret: %v", err))
+		}
+		// Clear workers ready time so it's fresh for next upgrade
+		if err := s.stateService.ClearWorkersReadyTime(ctx, cluster); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to clear workers ready time: %v", err))
 		}
 	}
 
@@ -541,6 +553,132 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 
 	vlog.Info(fmt.Sprintf("Talos upgrade completed: cluster=%s version=%s", cluster.Name, state.TalosTarget))
 	return nil
+}
+
+// RegenerateMachineConfigsAfterUpgrade regenerates the controlplane.yaml and worker.yaml
+// configs from the persisted secrets bundle after a Talos upgrade.
+// This preserves the multi-document format (from v1.12.x) and ensures configs are
+// properly updated with the new Talos version settings.
+// Tenant patches from the ConfigMap are also applied to produce the effective config.
+func (s *UpgradeService) RegenerateMachineConfigsAfterUpgrade(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	endpointIPs []string,
+	talosVersion string,
+) error {
+	if s.stateService == nil || s.configService == nil {
+		return fmt.Errorf("state service or config service not available")
+	}
+
+	// Get the persisted secrets bundle
+	secretsBundleYAML, err := s.stateService.GetSecretsBundle(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to get secrets bundle: %w", err)
+	}
+	if secretsBundleYAML == nil {
+		vlog.Warn("No secrets bundle found in cluster secret, skipping config regeneration")
+		return nil
+	}
+
+	// Load the secrets bundle
+	secretsBundle, err := s.configService.LoadSecretsBundle(secretsBundleYAML)
+	if err != nil {
+		return fmt.Errorf("failed to load secrets bundle: %w", err)
+	}
+
+	// Load tenant patches from ConfigMap
+	tenantPatches, err := s.loadTenantPatches(ctx, cluster)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to load tenant patches: %v, continuing without patches", err))
+		tenantPatches = nil
+	}
+
+	// Regenerate the config bundle using the existing secrets
+	// This preserves cluster identity (certs, keys, tokens) while generating
+	// configs compatible with the new Talos version
+	configBundle, err := s.configService.GenerateTalosConfigBundleWithSecrets(
+		cluster,
+		endpointIPs,
+		secretsBundle,
+		tenantPatches, // tenant patches loaded from ConfigMap
+		nil,           // control plane specific patches (not used)
+		nil,           // worker specific patches (not used)
+	)
+	if err != nil {
+		return fmt.Errorf("failed to regenerate config bundle: %w", err)
+	}
+
+	// Serialize the configs - bundle.Serialize properly handles multi-doc format
+	controlPlaneYAML, err := s.configService.SerializeControlPlaneConfig(configBundle.Bundle)
+	if err != nil {
+		return fmt.Errorf("failed to serialize control plane config: %w", err)
+	}
+
+	workerYAML, err := s.configService.SerializeWorkerConfig(configBundle.Bundle)
+	if err != nil {
+		return fmt.Errorf("failed to serialize worker config: %w", err)
+	}
+
+	// Update the stored configs in the secret
+	if err := s.stateService.UpdateMachineConfigTemplates(ctx, cluster, controlPlaneYAML, workerYAML, talosVersion); err != nil {
+		return fmt.Errorf("failed to update machine config templates: %w", err)
+	}
+
+	vlog.Info(fmt.Sprintf("Machine configs regenerated after upgrade: cluster=%s version=%s tenantPatches=%v",
+		cluster.Name, talosVersion, len(tenantPatches) > 0))
+	return nil
+}
+
+// loadTenantPatches loads tenant configuration patches from the ConfigMap.
+// Returns nil if no ConfigMap is configured or if the ConfigMap doesn't exist.
+func (s *UpgradeService) loadTenantPatches(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) ([]string, error) {
+	name := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAME))
+	if name == "" {
+		return nil, nil
+	}
+
+	namespace := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAMESPACE))
+	if namespace == "" {
+		namespace = cluster.Namespace
+	}
+
+	dataKey := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_DATA_KEY))
+	if dataKey == "" {
+		dataKey = "config.yaml"
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := s.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			vlog.Info(fmt.Sprintf("Tenant ConfigMap %s/%s not found, skipping tenant patches", namespace, name))
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read tenant ConfigMap %s/%s: %w", namespace, name, err)
+	}
+
+	raw, ok := cm.Data[dataKey]
+	if !ok || strings.TrimSpace(raw) == "" {
+		vlog.Warn(fmt.Sprintf("Tenant ConfigMap %s/%s missing data key %s, skipping tenant patches", namespace, name, dataKey))
+		return nil, nil
+	}
+
+	// Replace #CLUSTERID# placeholder with actual cluster ID
+	replaced := strings.ReplaceAll(raw, "#CLUSTERID#", cluster.Spec.Cluster.ClusterId)
+
+	// Validate that it's valid YAML
+	var overrides map[string]any
+	if err := yaml.Unmarshal([]byte(replaced), &overrides); err != nil {
+		return nil, fmt.Errorf("failed to parse tenant patches from ConfigMap %s/%s key %s: %w", namespace, name, dataKey, err)
+	}
+
+	// Convert back to YAML string for the patch
+	patchYAML, err := yaml.Marshal(overrides)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal tenant patches: %w", err)
+	}
+
+	vlog.Info(fmt.Sprintf("Loaded tenant patches from ConfigMap %s/%s", namespace, name))
+	return []string{string(patchYAML)}, nil
 }
 
 // FailTalosUpgrade marks a failed Talos upgrade
@@ -638,8 +776,9 @@ func (s *UpgradeService) StartKubernetesUpgrade(ctx context.Context, cluster *vi
 	state := s.GetUpgradeState(cluster)
 
 	updates := map[string]string{
-		consts.KubernetesStatusAnnotation:  string(consts.UpgradeStatusInProgress),
-		consts.KubernetesMessageAnnotation: fmt.Sprintf("Starting Kubernetes upgrade: %s → %s", state.KubernetesCurrent, state.KubernetesTarget),
+		consts.KubernetesStatusAnnotation:   string(consts.UpgradeStatusInProgress),
+		consts.KubernetesMessageAnnotation:  fmt.Sprintf("Starting Kubernetes upgrade: %s → %s", state.KubernetesCurrent, state.KubernetesTarget),
+		consts.KubernetesProgressAnnotation: "0/0", // Will be updated once we know total nodes
 	}
 
 	if err := s.SetUpgradeAnnotations(ctx, cluster, updates); err != nil {
@@ -666,14 +805,35 @@ func (s *UpgradeService) StartKubernetesUpgrade(ctx context.Context, cluster *vi
 	return nil
 }
 
+// UpdateKubernetesUpgradeProgress updates the progress during a rolling Kubernetes upgrade
+func (s *UpgradeService) UpdateKubernetesUpgradeProgress(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string, nodesUpgraded, totalNodes int) error {
+	updates := map[string]string{
+		consts.KubernetesMessageAnnotation:  fmt.Sprintf("Upgrading node %s (%d/%d)", nodeName, nodesUpgraded, totalNodes),
+		consts.KubernetesProgressAnnotation: fmt.Sprintf("%d/%d", nodesUpgraded, totalNodes),
+	}
+
+	if err := s.SetUpgradeAnnotations(ctx, cluster, updates); err != nil {
+		return err
+	}
+
+	// Update condition with progress
+	if err := s.statusManager.SetCondition(ctx, cluster, "KubernetesUpgrade", "True", "InProgress",
+		fmt.Sprintf("Upgrading node %s (%d/%d nodes completed)", nodeName, nodesUpgraded, totalNodes)); err != nil {
+		vlog.Error("Failed to update KubernetesUpgrade condition", err)
+	}
+
+	return nil
+}
+
 // CompleteKubernetesUpgrade marks a successful Kubernetes upgrade completion
 func (s *UpgradeService) CompleteKubernetesUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
 	state := s.GetUpgradeState(cluster)
 
 	updates := map[string]string{
-		consts.KubernetesCurrentAnnotation: state.KubernetesTarget,
-		consts.KubernetesStatusAnnotation:  string(consts.UpgradeStatusCompleted),
-		consts.KubernetesMessageAnnotation: fmt.Sprintf("Kubernetes upgrade completed: now running %s", state.KubernetesTarget),
+		consts.KubernetesCurrentAnnotation:  state.KubernetesTarget,
+		consts.KubernetesStatusAnnotation:   string(consts.UpgradeStatusCompleted),
+		consts.KubernetesMessageAnnotation:  fmt.Sprintf("Kubernetes upgrade completed: now running %s", state.KubernetesTarget),
+		consts.KubernetesProgressAnnotation: "",
 	}
 
 	if err := s.SetUpgradeAnnotations(ctx, cluster, updates); err != nil {
@@ -693,6 +853,9 @@ func (s *UpgradeService) CompleteKubernetesUpgrade(ctx context.Context, cluster 
 	}
 	if err := s.RemoveAnnotation(ctx, cluster, consts.KubernetesAvailableAnnotation); err != nil {
 		vlog.Warn(fmt.Sprintf("Failed to remove kubernetes-available annotation: %v", err))
+	}
+	if err := s.RemoveAnnotation(ctx, cluster, consts.KubernetesProgressAnnotation); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to remove kubernetes-progress annotation: %v", err))
 	}
 
 	// Update status phase and condition

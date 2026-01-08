@@ -193,6 +193,11 @@ const (
 	// Value: status message (e.g., "Upgrading Kubernetes components")
 	KubernetesMessageAnnotation = UpgradeAnnotationPrefix + "kubernetes-message"
 
+	// KubernetesProgressAnnotation tracks Kubernetes upgrade progress.
+	// Set by operator during rolling upgrades.
+	// Value: "nodesUpgraded/totalNodes" (e.g., "2/5")
+	KubernetesProgressAnnotation = UpgradeAnnotationPrefix + "kubernetes-progress"
+
 	// === UPGRADE CONTROL ANNOTATIONS ===
 
 	// ResumeUpgradeAnnotation triggers resume of a failed/interrupted upgrade.

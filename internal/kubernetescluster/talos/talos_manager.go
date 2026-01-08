@@ -281,7 +281,7 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 
 		// Choose role template
 		var roleYAML []byte
-		if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == "control-plane" {
+		if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == controlPlaneRole {
 			roleYAML = cpTemplate
 		} else {
 			roleYAML = wTemplate

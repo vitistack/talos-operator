@@ -612,6 +612,7 @@ func (s *TalosClientService) UpgradeNode(
 
 // NodeUpgradeInfo contains information about a node to upgrade
 type NodeUpgradeInfo struct {
+	Name           string
 	IP             string
 	IsControlPlane bool
 }
@@ -859,4 +860,33 @@ func (s *TalosClientService) IsEtcdHealthy(
 	}
 
 	return false, fmt.Errorf("etcd service not found on node %s", nodeIP)
+}
+
+// GetMachineConfigYAML fetches the current machine configuration from a node and returns it as YAML.
+// This is useful for syncing the stored config templates after upgrades.
+// The returned YAML contains only the machine and cluster config (v1alpha1.Config),
+// suitable for storage as controlplane.yaml or worker.yaml templates.
+func (s *TalosClientService) GetMachineConfigYAML(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+) ([]byte, error) {
+	// Use WithNode (singular) - COSI methods don't support one-to-many proxying
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
+
+	// Fetch the current full machine config from the node via COSI
+	mc, err := safe.StateGetByID[*config.MachineConfig](nodeCtx, tClient.COSI, config.ActiveID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch machine config from node %s: %w", nodeIP, err)
+	}
+
+	provider := mc.Provider()
+
+	// Serialize the config as YAML without comments for cleaner storage
+	cfgBytes, err := provider.EncodeBytes(encoder.WithComments(encoder.CommentsDisabled))
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize machine config: %w", err)
+	}
+
+	return cfgBytes, nil
 }

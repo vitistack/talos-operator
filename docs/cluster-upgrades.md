@@ -88,16 +88,27 @@ When each node is upgraded, it goes through these stages:
 The operator performs upgrades **one node at a time** to maintain cluster availability:
 
 ```
-1. WORKERS FIRST (less critical, can be drained)
-   ├── worker-0  ──► upgrade ──► wait for ready ──► ✓
-   ├── worker-1  ──► upgrade ──► wait for ready ──► ✓
-   └── worker-2  ──► upgrade ──► wait for ready ──► ✓
+1. CONTROL PLANES FIRST (critical, maintains etcd quorum)
+   ├── cp-0  ──► cordon/drain ──► upgrade ──► wait for ready ──► uncordon ──► ✓
+   ├── cp-1  ──► cordon/drain ──► upgrade ──► wait for ready ──► uncordon ──► ✓
+   └── cp-2  ──► cordon/drain ──► upgrade ──► wait for ready ──► uncordon ──► ✓
 
-2. CONTROL PLANES LAST (critical, maintains etcd quorum)
-   ├── cp-0  ──► upgrade ──► wait for etcd healthy ──► ✓
-   ├── cp-1  ──► upgrade ──► wait for etcd healthy ──► ✓
-   └── cp-2  ──► upgrade ──► wait for etcd healthy ──► ✓
+   ──► 60 second settling period (allow pods to reschedule)
+
+2. WORKERS AFTER (after all control planes are ready)
+   ├── worker-0  ──► cordon/drain ──► upgrade ──► wait for ready ──► uncordon ──► ✓
+   ├── worker-1  ──► cordon/drain ──► upgrade ──► wait for ready ──► uncordon ──► ✓
+   └── worker-2  ──► cordon/drain ──► upgrade ──► wait for ready ──► uncordon ──► ✓
 ```
+
+#### State Persistence
+
+The upgrade state is stored in the cluster's Kubernetes secret in the supervisor cluster. This allows:
+
+- **Resume on restart**: If the operator restarts, it can continue where it left off
+- **One node at a time**: Only one node is upgraded per reconciliation cycle
+- **Progress tracking**: The current node, completed nodes, and overall progress are tracked
+- **Failure recovery**: Failed upgrades can be resumed after fixing the issue
 
 **Why workers first?**
 

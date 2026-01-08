@@ -592,6 +592,144 @@ func (s *TalosStateService) ClearNodeFromFailed(ctx context.Context, cluster *vi
 	return fmt.Errorf("failed to clear node from failed list after %d retries", maxRetries)
 }
 
+// MarkWorkersReadyTime records the time when all workers became ready
+// markReadyTime is a generic helper to set a ready time in the secret
+func (s *TalosStateService) markReadyTime(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, key, nodeType string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		// Only set if not already set (to preserve the original time)
+		if existingTime := string(secret.Data[key]); existingTime != "" {
+			vlog.Info(fmt.Sprintf("%s ready time already set: %s", nodeType, existingTime))
+			return nil
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+		secret.Data[key] = []byte(now)
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("%s ready time marked: cluster=%s time=%s", nodeType, cluster.Name, now))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to mark %s ready time after %d retries", nodeType, maxRetries)
+}
+
+func (s *TalosStateService) MarkWorkersReadyTime(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	return s.markReadyTime(ctx, cluster, "upgrade_workers_ready_time", "Workers")
+}
+
+// GetWorkersReadyTime returns the time when all workers became ready, or zero time if not set
+func (s *TalosStateService) GetWorkersReadyTime(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (time.Time, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if secret.Data == nil {
+		return time.Time{}, nil
+	}
+
+	timeStr := string(secret.Data["upgrade_workers_ready_time"])
+	if timeStr == "" {
+		return time.Time{}, nil
+	}
+
+	return time.Parse(time.RFC3339, timeStr)
+}
+
+// ClearWorkersReadyTime clears the workers ready time (called when upgrade completes)
+func (s *TalosStateService) ClearWorkersReadyTime(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			return nil
+		}
+
+		delete(secret.Data, "upgrade_workers_ready_time")
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to clear workers ready time after %d retries", maxRetries)
+}
+
+// MarkControlPlanesReadyTime marks the time when all control planes became ready
+func (s *TalosStateService) MarkControlPlanesReadyTime(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	return s.markReadyTime(ctx, cluster, "upgrade_controlplanes_ready_time", "Control planes")
+}
+
+// GetControlPlanesReadyTime retrieves the time when all control planes became ready
+func (s *TalosStateService) GetControlPlanesReadyTime(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (time.Time, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if secret.Data == nil {
+		return time.Time{}, nil
+	}
+
+	timeStr := string(secret.Data["upgrade_controlplanes_ready_time"])
+	if timeStr == "" {
+		return time.Time{}, nil
+	}
+
+	return time.Parse(time.RFC3339, timeStr)
+}
+
+// ClearControlPlanesReadyTime clears the control planes ready time (called when upgrade completes)
+func (s *TalosStateService) ClearControlPlanesReadyTime(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			return nil
+		}
+
+		delete(secret.Data, "upgrade_controlplanes_ready_time")
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to clear control planes ready time after %d retries", maxRetries)
+}
+
 // CompleteUpgradeState marks an upgrade as complete and updates the version in the secret
 func (s *TalosStateService) CompleteUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, upgradeType, newVersion string) error {
 	maxRetries := 3
@@ -934,4 +1072,226 @@ func (s *TalosStateService) SetHealthCheckState(ctx context.Context, cluster *vi
 		return err
 	}
 	return fmt.Errorf("failed to set health check state after %d retries", maxRetries)
+}
+
+// UpdateMachineConfigTemplates updates the stored machine config templates (controlplane.yaml, worker.yaml)
+// in the cluster secret. This is typically called after a Talos upgrade to sync the stored configs
+// with the actual running configs on the nodes.
+// Only non-nil configs will be updated; nil configs will preserve existing values.
+// The talosVersion parameter records which version these configs were synced from.
+func (s *TalosStateService) UpdateMachineConfigTemplates(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	controlPlaneYAML, workerYAML []byte,
+	talosVersion string,
+) error {
+	if controlPlaneYAML == nil && workerYAML == nil {
+		return nil // Nothing to update
+	}
+
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		updated := false
+		if controlPlaneYAML != nil {
+			secret.Data["controlplane.yaml"] = controlPlaneYAML
+			secret.Data["controlplane_yaml_present"] = []byte(trueStr)
+			updated = true
+		}
+		if workerYAML != nil {
+			secret.Data["worker.yaml"] = workerYAML
+			secret.Data["worker_yaml_present"] = []byte(trueStr)
+			updated = true
+		}
+
+		if !updated {
+			return nil
+		}
+
+		// Add timestamp and version for when configs were synced
+		secret.Data["config_synced_at"] = []byte(time.Now().UTC().Format(time.RFC3339))
+		if talosVersion != "" {
+			secret.Data["config_talos_version"] = []byte(talosVersion)
+		}
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Machine config templates updated: cluster=%s cp=%v worker=%v version=%s",
+				cluster.Name, controlPlaneYAML != nil, workerYAML != nil, talosVersion))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to update machine config templates after %d retries", maxRetries)
+}
+
+// GetStoredConfigVersion returns the Talos version and sync timestamp for the stored configs.
+// This can be used to determine if configs need to be re-synced after an upgrade.
+func (s *TalosStateService) GetStoredConfigVersion(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+) (version string, syncedAt string, err error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return "", "", err
+	}
+	if secret.Data == nil {
+		return "", "", nil
+	}
+
+	return string(secret.Data["config_talos_version"]), string(secret.Data["config_synced_at"]), nil
+}
+
+// GetSecretsBundle retrieves the stored secrets bundle from the cluster secret.
+// This is used to regenerate configs after an upgrade while preserving cluster identity.
+func (s *TalosStateService) GetSecretsBundle(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+) ([]byte, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if secret.Data == nil {
+		return nil, nil
+	}
+
+	bundleData, ok := secret.Data["secrets.bundle"]
+	if !ok || len(bundleData) == 0 {
+		return nil, nil
+	}
+
+	return bundleData, nil
+}
+
+// SetKubeSystemUID stores the kube-system namespace UID in the secret
+func (s *TalosStateService) SetKubeSystemUID(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, uid string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		// Skip if value unchanged
+		if string(secret.Data["kube-system-uid"]) == uid {
+			return nil
+		}
+
+		secret.Data["kube-system-uid"] = []byte(uid)
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to set kube-system UID after %d retries", maxRetries)
+}
+
+// GetKubeSystemUID retrieves the kube-system namespace UID from the secret
+func (s *TalosStateService) GetKubeSystemUID(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (string, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return "", err
+	}
+	if secret.Data == nil {
+		return "", nil
+	}
+	return string(secret.Data["kube-system-uid"]), nil
+}
+
+// SetCurrentUpgradingNode sets which node is currently being upgraded
+func (s *TalosStateService) SetCurrentUpgradingNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		// Skip if value unchanged
+		if string(secret.Data["upgrade_current_node"]) == nodeName {
+			return nil
+		}
+
+		secret.Data["upgrade_current_node"] = []byte(nodeName)
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Current upgrading node set: cluster=%s node=%s", cluster.Name, nodeName))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to set current upgrading node after %d retries", maxRetries)
+}
+
+// GetCurrentUpgradingNode retrieves which node is currently being upgraded
+func (s *TalosStateService) GetCurrentUpgradingNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (string, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return "", err
+	}
+	if secret.Data == nil {
+		return "", nil
+	}
+	return string(secret.Data["upgrade_current_node"]), nil
+}
+
+// ClearCurrentUpgradingNode clears the current upgrading node
+func (s *TalosStateService) ClearCurrentUpgradingNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			return nil
+		}
+
+		secret.Data["upgrade_current_node"] = []byte("")
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Current upgrading node cleared: cluster=%s", cluster.Name))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to clear current upgrading node after %d retries", maxRetries)
 }

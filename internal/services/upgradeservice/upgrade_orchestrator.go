@@ -13,6 +13,12 @@ import (
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 )
 
+// Node role constants
+const (
+	roleWorker       = "worker"
+	roleControlPlane = "control-plane"
+)
+
 // isConnectionError checks if an error is due to connection issues (node rebooting/unreachable)
 func isConnectionError(err error) bool {
 	if err == nil {
@@ -39,17 +45,26 @@ func isUpgradeLockedError(err error) bool {
 	return strings.Contains(errStr, "locked")
 }
 
+// NodeDrainer interface for cordon/drain operations
+type NodeDrainer interface {
+	CordonAndDrainNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error
+	UncordonNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error
+	IsNodeSchedulable(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) (bool, error)
+}
+
 // UpgradeOrchestrator handles the actual execution of Talos and Kubernetes upgrades
 type UpgradeOrchestrator struct {
 	upgradeService *UpgradeService
 	clientService  *talosclientservice.TalosClientService
+	nodeDrainer    NodeDrainer
 }
 
 // NewUpgradeOrchestrator creates a new UpgradeOrchestrator
-func NewUpgradeOrchestrator(upgradeService *UpgradeService, clientService *talosclientservice.TalosClientService) *UpgradeOrchestrator {
+func NewUpgradeOrchestrator(upgradeService *UpgradeService, clientService *talosclientservice.TalosClientService, nodeDrainer NodeDrainer) *UpgradeOrchestrator {
 	return &UpgradeOrchestrator{
 		upgradeService: upgradeService,
 		clientService:  clientService,
+		nodeDrainer:    nodeDrainer,
 	}
 }
 
@@ -78,14 +93,15 @@ type UpgradeResult struct {
 
 // upgradeState holds the state during a rolling upgrade
 type upgradeState struct {
-	nodesUpgraded      int
-	skippedNodes       []string
-	totalNodes         int
-	lastUpgradedWorker *NodeUpgradeInfo
+	nodesUpgraded            int
+	skippedNodes             []string
+	totalNodes               int
+	lastUpgradedWorker       *NodeUpgradeInfo
+	lastUpgradedControlPlane *NodeUpgradeInfo
 }
 
 // PerformTalosUpgrade executes a rolling Talos upgrade across all nodes.
-// It upgrades workers first, then control planes (one at a time).
+// It upgrades ALL workers first, waits for them to be ready, then upgrades control planes.
 // Returns UpgradeResult indicating progress and whether a requeue is needed.
 func (o *UpgradeOrchestrator) PerformTalosUpgrade(
 	ctx context.Context,
@@ -103,35 +119,359 @@ func (o *UpgradeOrchestrator) PerformTalosUpgrade(
 		}
 	}
 
-	// Sort nodes: workers first, then control planes
-	orderedNodes := o.buildOrderedNodeList(nodes, targetVersion)
+	// Separate workers and control planes
+	workers, controlPlanes := o.sortNodesByRole(nodes)
 
 	state := &upgradeState{
 		totalNodes: totalNodes,
 	}
 
-	// Process each node
-	for i, node := range orderedNodes {
-		result := o.processNodeForUpgrade(ctx, cluster, clientConfig, node, i, state, talosInstallerImage)
+	// Check if there's a current upgrading node from previous reconciliation
+	var currentUpgradingNode string
+	if o.upgradeService.stateService != nil {
+		if node, err := o.upgradeService.stateService.GetCurrentUpgradingNode(ctx, cluster); err == nil {
+			currentUpgradingNode = node
+		}
+	}
+
+	// If there's a current upgrading node, ONLY process that node
+	if currentUpgradingNode != "" {
+		vlog.Info(fmt.Sprintf("Resuming upgrade of current node: %s", currentUpgradingNode))
+		return o.processCurrentUpgradingNode(ctx, cluster, clientConfig, currentUpgradingNode, controlPlanes, workers, state, targetVersion)
+	}
+
+	// Phase 1: Upgrade control planes first (one at a time)
+	for i, node := range controlPlanes {
+		result := o.processNodeForUpgrade(ctx, cluster, clientConfig, node, i, state, targetVersion, talosInstallerImage)
 		if result != nil {
 			return result
 		}
 	}
 
-	return o.buildCompletionResult(cluster, state)
+	// Phase 2: Before starting workers, verify ALL control planes are fully ready
+	if len(workers) > 0 && len(controlPlanes) > 0 {
+		if result := o.ensureAllControlPlanesReady(ctx, cluster, clientConfig, controlPlanes, state); result != nil {
+			return result
+		}
+	}
+
+	// Phase 3: Upgrade workers (one at a time)
+	for i, node := range workers {
+		result := o.processNodeForUpgrade(ctx, cluster, clientConfig, node, len(controlPlanes)+i, state, targetVersion, talosInstallerImage)
+		if result != nil {
+			return result
+		}
+	}
+
+	return o.buildCompletionResult(ctx, cluster, state)
 }
 
-// buildOrderedNodeList sorts nodes with workers first, then control planes
-func (o *UpgradeOrchestrator) buildOrderedNodeList(nodes []NodeUpgradeInfo, targetVersion string) []NodeUpgradeInfo {
-	workers, controlPlanes := o.sortNodesByRole(nodes)
-	orderedNodes := make([]NodeUpgradeInfo, 0, len(workers)+len(controlPlanes))
-	orderedNodes = append(orderedNodes, workers...)
-	orderedNodes = append(orderedNodes, controlPlanes...)
+// processCurrentUpgradingNode processes the node that is currently being upgraded
+// This is called when resuming an upgrade from a previous reconciliation
+func (o *UpgradeOrchestrator) processCurrentUpgradingNode(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	nodeName string,
+	controlPlanes []NodeUpgradeInfo,
+	workers []NodeUpgradeInfo,
+	state *upgradeState,
+	targetVersion string,
+) *UpgradeResult {
+	// Find the node in control planes or workers
+	var node *NodeUpgradeInfo
 
-	vlog.Info(fmt.Sprintf("Starting Talos upgrade: target=%s workers=%d controlPlanes=%d",
-		targetVersion, len(workers), len(controlPlanes)))
+	for _, cp := range controlPlanes {
+		if cp.Name == nodeName {
+			nodeCopy := cp
+			node = &nodeCopy
+			break
+		}
+	}
 
-	return orderedNodes
+	if node == nil {
+		for _, w := range workers {
+			if w.Name == nodeName {
+				nodeCopy := w
+				node = &nodeCopy
+				break
+			}
+		}
+	}
+
+	if node == nil {
+		// Node not found - clear the current upgrading node and continue
+		vlog.Warn(fmt.Sprintf("Current upgrading node %s not found in cluster nodes, clearing state", nodeName))
+		if o.upgradeService.stateService != nil {
+			_ = o.upgradeService.stateService.ClearCurrentUpgradingNode(ctx, cluster)
+		}
+		// Requeue to restart the upgrade process
+		return o.requeueResult(state, 5*time.Second)
+	}
+
+	// Process this specific node
+	vlog.Info(fmt.Sprintf("Processing current upgrading node: %s (role=%s)", nodeName, node.Role))
+	result := o.handleAlreadyInitiatedNode(ctx, cluster, clientConfig, *node, targetVersion, state)
+
+	// If the node is complete (result == nil), clear current upgrading node
+	if result == nil {
+		vlog.Info(fmt.Sprintf("Current upgrading node %s completed, clearing current node state", nodeName))
+		if o.upgradeService.stateService != nil {
+			if err := o.upgradeService.stateService.ClearCurrentUpgradingNode(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to clear current upgrading node: %v", err))
+			}
+		}
+		// Requeue to continue with the next node
+		return o.requeueResult(state, 5*time.Second)
+	}
+
+	return result
+}
+
+// settlingTimeAfterNodesReady is the time to wait after all nodes of one type are ready
+// before starting upgrades on the next type, allowing pods to fully reschedule
+const settlingTimeAfterNodesReady = 60 * time.Second
+
+// ensureAllControlPlanesReady verifies ALL control planes are fully upgraded and ready before worker upgrades.
+// Uses state service to track when all control planes became ready, and waits for settling time to pass.
+func (o *UpgradeOrchestrator) ensureAllControlPlanesReady(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	controlPlanes []NodeUpgradeInfo,
+	state *upgradeState,
+) *UpgradeResult {
+	vlog.Info("Checking that ALL control planes are ready before starting worker upgrades")
+
+	// First, check if all control planes are ready
+	if result := o.checkAllNodesReadyAndUncordon(ctx, cluster, clientConfig, controlPlanes, "control-plane", state); result != nil {
+		return result
+	}
+
+	// All control planes are ready - check if we need to start or continue settling time
+	return o.handleNodesSettlingTime(ctx, cluster, "control-plane", state)
+}
+
+// checkAllNodesReadyAndUncordon checks each node's readiness and uncordons them
+func (o *UpgradeOrchestrator) checkAllNodesReadyAndUncordon(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	nodes []NodeUpgradeInfo,
+	nodeType string, // "control-plane" or "worker"
+	state *upgradeState,
+) *UpgradeResult {
+	readyNodes := make([]string, 0, len(nodes))
+	notReadyNodes := make([]string, 0, len(nodes))
+
+	for _, node := range nodes {
+		if o.isNodeSkipped(node.Name, state.skippedNodes) {
+			continue
+		}
+
+		if !o.isNodeUpgradeInitiated(ctx, cluster, node.Name) {
+			vlog.Warn(fmt.Sprintf("%s %s upgrade not initiated, this is unexpected", nodeType, node.Name))
+			notReadyNodes = append(notReadyNodes, node.Name)
+			continue
+		}
+
+		// Check if node is Kubernetes-ready
+		ready, err := o.clientService.IsKubernetesNodeReady(ctx, clientConfig, node.IP, node.Name)
+		if err != nil {
+			vlog.Warn(fmt.Sprintf("Cannot check readiness of %s %s: %v, waiting", nodeType, node.Name, err))
+			return o.requeueResult(state, 30*time.Second)
+		}
+
+		if !ready {
+			notReadyNodes = append(notReadyNodes, node.Name)
+			vlog.Info(fmt.Sprintf("%s status: ready=[%s] notReady=[%s]",
+				nodeType,
+				strings.Join(readyNodes, ", "),
+				strings.Join(notReadyNodes, ", ")))
+			return o.requeueResult(state, 30*time.Second)
+		}
+
+		readyNodes = append(readyNodes, node.Name)
+
+		// Ensure node is uncordoned - always attempt to uncordon ready nodes
+		// to prevent nodes from being stuck in SchedulingDisabled state
+		if o.nodeDrainer != nil {
+			// First check if it needs uncordoning
+			schedulable, schedErr := o.nodeDrainer.IsNodeSchedulable(ctx, cluster, node.Name)
+			if schedErr != nil || !schedulable {
+				if schedErr != nil {
+					vlog.Info(fmt.Sprintf("Could not verify schedulable status for %s %s, attempting uncordon", nodeType, node.Name))
+				}
+				if err := o.nodeDrainer.UncordonNode(ctx, cluster, node.Name); err != nil {
+					vlog.Warn(fmt.Sprintf("Failed to uncordon %s %s: %v", nodeType, node.Name, err))
+				}
+				// Don't log success on every loop - reduces spam
+			}
+		}
+	}
+
+	// Don't log "All nodes ready" on every reconciliation loop during settling time
+	// It will be logged once when settling period starts
+
+	return nil
+}
+
+// isNodeSkipped checks if a node was skipped during upgrade
+func (o *UpgradeOrchestrator) isNodeSkipped(nodeName string, skippedNodes []string) bool {
+	for _, skipped := range skippedNodes {
+		if skipped == nodeName {
+			return true
+		}
+	}
+	return false
+}
+
+// isNodeUpgradeInitiated checks if a node's upgrade was initiated
+func (o *UpgradeOrchestrator) isNodeUpgradeInitiated(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) bool {
+	if o.upgradeService.stateService != nil {
+		return o.upgradeService.stateService.IsNodeUpgraded(ctx, cluster, nodeName)
+	}
+	return false
+}
+
+// handleNodesSettlingTime manages the settling time after all nodes of a type are ready
+func (o *UpgradeOrchestrator) handleNodesSettlingTime(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	nodeType string, // "control-plane" or "worker"
+	state *upgradeState,
+) *UpgradeResult {
+	if o.upgradeService.stateService == nil {
+		return nil
+	}
+
+	var nodesReadyTime time.Time
+	var err error
+	var nextPhase string
+
+	if nodeType == "control-plane" {
+		nodesReadyTime, err = o.upgradeService.stateService.GetControlPlanesReadyTime(ctx, cluster)
+		nextPhase = "worker"
+	} else {
+		nodesReadyTime, err = o.upgradeService.stateService.GetWorkersReadyTime(ctx, cluster)
+		nextPhase = "control plane"
+	}
+
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to get %s ready time: %v", nodeType, err))
+	}
+
+	if nodesReadyTime.IsZero() {
+		// First time all nodes are ready - mark the time and start settling
+		if nodeType == "control-plane" {
+			if err := o.upgradeService.stateService.MarkControlPlanesReadyTime(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to mark control planes ready time: %v", err))
+			}
+		} else {
+			if err := o.upgradeService.stateService.MarkWorkersReadyTime(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to mark workers ready time: %v", err))
+			}
+		}
+		vlog.Info(fmt.Sprintf("All %ss ready, starting settling period of %v before %s upgrades", nodeType, settlingTimeAfterNodesReady, nextPhase))
+		return o.requeueResult(state, settlingTimeAfterNodesReady)
+	}
+
+	// Check if settling time has passed
+	elapsed := time.Since(nodesReadyTime)
+	if elapsed < settlingTimeAfterNodesReady {
+		remaining := settlingTimeAfterNodesReady - elapsed
+		// Only log every 10 seconds to reduce log spam
+		if int(elapsed.Seconds())%10 == 0 || elapsed < 2*time.Second {
+			vlog.Info(fmt.Sprintf("%s settling time: %v elapsed, %v remaining before %s upgrades", nodeType, elapsed.Round(time.Second), remaining.Round(time.Second), nextPhase))
+		}
+		return o.requeueResult(state, remaining)
+	}
+
+	vlog.Info(fmt.Sprintf("%s settling time complete (%v elapsed), proceeding with %s upgrades", nodeType, elapsed.Round(time.Second), nextPhase))
+	return nil
+}
+
+// requeueResult creates a requeue result with the given delay
+func (o *UpgradeOrchestrator) requeueResult(state *upgradeState, delay time.Duration) *UpgradeResult {
+	return &UpgradeResult{
+		Success:       true,
+		NodesUpgraded: state.nodesUpgraded,
+		TotalNodes:    state.totalNodes,
+		SkippedNodes:  state.skippedNodes,
+		NeedsRequeue:  true,
+		RequeueAfter:  delay,
+	}
+}
+
+// handleAlreadyInitiatedNode processes a node whose upgrade was already initiated
+// Returns an UpgradeResult if the loop should exit, nil if the node is complete and we should continue
+func (o *UpgradeOrchestrator) handleAlreadyInitiatedNode(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	node NodeUpgradeInfo,
+	targetVersion string,
+	state *upgradeState,
+) *UpgradeResult {
+	// Check if node upgrade is complete (version matches target)
+	upgraded, currentVersion, err := o.CheckNodeUpgradeStatus(ctx, clientConfig, node.IP, targetVersion)
+	if err != nil {
+		// Can't check version - node might be rebooting
+		// Set this node as current upgrading node to ensure only it is processed
+		if o.upgradeService.stateService != nil {
+			if setErr := o.upgradeService.stateService.SetCurrentUpgradingNode(ctx, cluster, node.Name); setErr != nil {
+				vlog.Warn(fmt.Sprintf("Failed to set current upgrading node: %v", setErr))
+			}
+		}
+		vlog.Info(fmt.Sprintf("Waiting for node %s to complete upgrade (cannot verify version: %v)", node.Name, err))
+		return o.requeueResult(state, 30*time.Second)
+	}
+
+	if upgraded {
+		// Node upgrade complete - version matches target
+		// Ensure node is uncordoned to prevent stuck SchedulingDisabled state
+		if o.nodeDrainer != nil {
+			schedulable, schedErr := o.nodeDrainer.IsNodeSchedulable(ctx, cluster, node.Name)
+			if schedErr != nil || !schedulable {
+				if schedErr != nil {
+					vlog.Info(fmt.Sprintf("Could not verify schedulable status for node %s, attempting uncordon", node.Name))
+				}
+				if err := o.nodeDrainer.UncordonNode(ctx, cluster, node.Name); err != nil {
+					vlog.Warn(fmt.Sprintf("Failed to uncordon node %s: %v", node.Name, err))
+				}
+			}
+		}
+		state.nodesUpgraded++
+
+		// Update progress annotation
+		if err := o.upgradeService.UpdateTalosUpgradeProgress(ctx, cluster, node.Name, state.nodesUpgraded, state.totalNodes); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to update progress for completed node %s: %v", node.Name, err))
+		}
+
+		switch node.Role {
+		case roleWorker:
+			nodeCopy := node
+			state.lastUpgradedWorker = &nodeCopy
+		case roleControlPlane:
+			nodeCopy := node
+			state.lastUpgradedControlPlane = &nodeCopy
+		}
+
+		vlog.Info(fmt.Sprintf("Node %s upgrade complete: version=%s", node.Name, currentVersion))
+		// Continue to next node in the loop (this node is done)
+		return nil
+	}
+
+	// Node upgrade initiated but version doesn't match yet - still rebooting/upgrading
+	// STOP here and wait for it to complete before proceeding to next node
+	// Set this node as current upgrading node to ensure only it is processed
+	if o.upgradeService.stateService != nil {
+		if setErr := o.upgradeService.stateService.SetCurrentUpgradingNode(ctx, cluster, node.Name); setErr != nil {
+			vlog.Warn(fmt.Sprintf("Failed to set current upgrading node: %v", setErr))
+		}
+	}
+	vlog.Info(fmt.Sprintf("Waiting for node %s to complete upgrade (version not yet updated)", node.Name))
+	return o.requeueResult(state, 30*time.Second)
 }
 
 // processNodeForUpgrade handles upgrade logic for a single node
@@ -143,16 +483,18 @@ func (o *UpgradeOrchestrator) processNodeForUpgrade(
 	node NodeUpgradeInfo,
 	nodeIndex int,
 	state *upgradeState,
+	targetVersion string,
 	talosInstallerImage string,
 ) *UpgradeResult {
-	// Handle already upgraded nodes
-	if node.Upgraded {
-		state.nodesUpgraded++
-		if node.Role == "worker" {
-			nodeCopy := node
-			state.lastUpgradedWorker = &nodeCopy
-		}
-		return nil
+	// Check if this node's upgrade was already initiated (in state service)
+	alreadyInitiated := false
+	if o.upgradeService.stateService != nil {
+		alreadyInitiated = o.upgradeService.stateService.IsNodeUpgraded(ctx, cluster, node.Name)
+	}
+
+	// Handle nodes where upgrade was already initiated
+	if alreadyInitiated {
+		return o.handleAlreadyInitiatedNode(ctx, cluster, clientConfig, node, targetVersion, state)
 	}
 
 	// Handle skipped nodes
@@ -169,8 +511,8 @@ func (o *UpgradeOrchestrator) processNodeForUpgrade(
 		return nil
 	}
 
-	// Check worker readiness before proceeding
-	if result := o.checkWorkerReadiness(ctx, clientConfig, node, state); result != nil {
+	// This is a new node to upgrade - check that previous nodes of same role are ready
+	if result := o.checkPreviousNodesReady(ctx, cluster, clientConfig, node, state); result != nil {
 		return result
 	}
 
@@ -178,37 +520,94 @@ func (o *UpgradeOrchestrator) processNodeForUpgrade(
 	return o.executeNodeUpgrade(ctx, cluster, clientConfig, node, nodeIndex, state, talosInstallerImage)
 }
 
-// checkWorkerReadiness verifies the last upgraded worker is ready before upgrading the next
-func (o *UpgradeOrchestrator) checkWorkerReadiness(
+// settlingTimeAfterNodeReady is the time to wait after a single node becomes ready
+// before proceeding to the next upgrade, allowing pods to reschedule
+const settlingTimeAfterNodeReady = 30 * time.Second
+
+// checkPreviousNodesReady verifies the last upgraded node (worker or control plane) is ready
+// before upgrading the next. Also waits for settling time after uncordon.
+func (o *UpgradeOrchestrator) checkPreviousNodesReady(
 	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientConfig *clientconfig.Config,
 	node NodeUpgradeInfo,
 	state *upgradeState,
 ) *UpgradeResult {
-	if node.Role != "worker" || state.lastUpgradedWorker == nil {
+	var lastUpgraded *NodeUpgradeInfo
+	var nodeType string
+
+	// Determine which previous node to check based on current node role
+	if node.Role == roleWorker && state.lastUpgradedWorker != nil {
+		lastUpgraded = state.lastUpgradedWorker
+		nodeType = roleWorker
+	} else if node.Role == roleControlPlane && state.lastUpgradedControlPlane != nil {
+		lastUpgraded = state.lastUpgradedControlPlane
+		nodeType = roleControlPlane
+	}
+
+	if lastUpgraded == nil {
 		return nil
 	}
 
-	ready, err := o.clientService.IsKubernetesNodeReady(ctx, clientConfig, state.lastUpgradedWorker.IP, state.lastUpgradedWorker.Name)
+	// Check if Kubernetes node is Ready
+	ready, err := o.clientService.IsKubernetesNodeReady(ctx, clientConfig, lastUpgraded.IP, lastUpgraded.Name)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to check Kubernetes readiness for node %s: %v", state.lastUpgradedWorker.Name, err))
-		return nil // Continue anyway after warning
-	}
-
-	if !ready {
-		vlog.Info(fmt.Sprintf("Waiting for worker node %s to be Kubernetes-ready before upgrading next worker %s",
-			state.lastUpgradedWorker.Name, node.Name))
+		vlog.Warn(fmt.Sprintf("Failed to check Kubernetes readiness for %s node %s: %v", nodeType, lastUpgraded.Name, err))
+		// If we can't check readiness (e.g., API down), wait and retry
 		return &UpgradeResult{
 			Success:       true,
 			NodesUpgraded: state.nodesUpgraded,
 			TotalNodes:    state.totalNodes,
 			SkippedNodes:  state.skippedNodes,
 			NeedsRequeue:  true,
-			RequeueAfter:  15 * time.Second,
+			RequeueAfter:  20 * time.Second,
 		}
 	}
 
-	vlog.Info(fmt.Sprintf("Worker node %s is Kubernetes-ready, proceeding with next worker upgrade", state.lastUpgradedWorker.Name))
+	if !ready {
+		// Don't log on every reconciliation loop - already logged "Waiting for node to complete upgrade"
+		return &UpgradeResult{
+			Success:       true,
+			NodesUpgraded: state.nodesUpgraded,
+			TotalNodes:    state.totalNodes,
+			SkippedNodes:  state.skippedNodes,
+			NeedsRequeue:  true,
+			RequeueAfter:  20 * time.Second,
+		}
+	}
+
+	// Check if Kubernetes node is schedulable (not cordoned) and uncordon if needed
+	if o.nodeDrainer != nil {
+		schedulable, schedErr := o.nodeDrainer.IsNodeSchedulable(ctx, cluster, lastUpgraded.Name)
+
+		// If we can't check status or node is not schedulable, attempt to uncordon
+		// This ensures we don't leave nodes cordoned due to check failures
+		shouldUncordon := schedErr != nil || !schedulable
+
+		if shouldUncordon {
+			if schedErr != nil {
+				vlog.Warn(fmt.Sprintf("Could not verify schedulable status for %s node %s (err: %v), attempting uncordon", nodeType, lastUpgraded.Name, schedErr))
+			}
+
+			if err := o.nodeDrainer.UncordonNode(ctx, cluster, lastUpgraded.Name); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to uncordon %s node %s: %v", nodeType, lastUpgraded.Name, err))
+				// Don't block on uncordon failures - node is still ready
+			} else {
+				// Return a requeue to allow settling time for pods to reschedule to this node
+				// Don't log on every loop - reduces spam
+				return &UpgradeResult{
+					Success:       true,
+					NodesUpgraded: state.nodesUpgraded,
+					TotalNodes:    state.totalNodes,
+					SkippedNodes:  state.skippedNodes,
+					NeedsRequeue:  true,
+					RequeueAfter:  settlingTimeAfterNodeReady,
+				}
+			}
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("%s node %s is Kubernetes-ready and schedulable, proceeding with next %s upgrade", nodeType, lastUpgraded.Name, nodeType))
 	return nil
 }
 
@@ -225,15 +624,26 @@ func (o *UpgradeOrchestrator) executeNodeUpgrade(
 	vlog.Info(fmt.Sprintf("Upgrading Talos on node: cluster=%s node=%s ip=%s role=%s (%d/%d)",
 		cluster.Name, node.Name, node.IP, node.Role, nodeIndex+1, state.totalNodes))
 
+	// Set this node as the current upgrading node BEFORE starting the upgrade
+	// This ensures only this node will be processed on subsequent reconciliations
+	if o.upgradeService.stateService != nil {
+		if err := o.upgradeService.stateService.SetCurrentUpgradingNode(ctx, cluster, node.Name); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to set current upgrading node: %v", err))
+		}
+	}
+
 	// Update progress annotation
 	if err := o.upgradeService.UpdateTalosUpgradeProgress(ctx, cluster, node.Name, state.nodesUpgraded, state.totalNodes); err != nil {
 		vlog.Warn(fmt.Sprintf("Failed to update progress: %v", err))
 	}
 
-	// Check if node was already marked as having upgrade initiated
-	alreadyInitiated := false
-	if o.upgradeService.stateService != nil {
-		alreadyInitiated = o.upgradeService.stateService.IsNodeUpgraded(ctx, cluster, node.Name)
+	// Cordon and drain the node before upgrade
+	if o.nodeDrainer != nil {
+		vlog.Info(fmt.Sprintf("Cordoning and draining node %s before upgrade", node.Name))
+		if err := o.nodeDrainer.CordonAndDrainNode(ctx, cluster, node.Name); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to cordon/drain node %s: %v (continuing with upgrade)", node.Name, err))
+			// Don't fail the upgrade if drain fails - the node will reboot anyway
+		}
 	}
 
 	// Perform the actual upgrade
@@ -252,23 +662,31 @@ func (o *UpgradeOrchestrator) executeNodeUpgrade(
 				TotalNodes:    state.totalNodes,
 				SkippedNodes:  state.skippedNodes,
 				NeedsRequeue:  true,
-				RequeueAfter:  15 * time.Second,
+				RequeueAfter:  30 * time.Second,
 			}
 		}
 
-		// If upgrade was already initiated and we get a connection error, node is likely rebooting
-		if alreadyInitiated && isConnectionError(err) {
-			vlog.Info(fmt.Sprintf("Node %s upgrade already initiated, connection error indicates reboot in progress", node.Name))
+		// If we get a connection error, node may be rebooting already
+		if isConnectionError(err) {
+			vlog.Info(fmt.Sprintf("Node %s connection error during upgrade, may be rebooting", node.Name))
+			// Mark as initiated anyway since upgrade may have started
+			if o.upgradeService.stateService != nil {
+				_ = o.upgradeService.stateService.MarkNodeUpgraded(ctx, cluster, node.Name)
+			}
 			return &UpgradeResult{
 				Success:       true,
 				NodesUpgraded: state.nodesUpgraded,
 				TotalNodes:    state.totalNodes,
 				SkippedNodes:  state.skippedNodes,
 				NeedsRequeue:  true,
-				RequeueAfter:  15 * time.Second,
+				RequeueAfter:  30 * time.Second,
 			}
 		}
 		vlog.Error(fmt.Sprintf("Failed to upgrade Talos on node %s: %v", node.Name, err), err)
+		// Clear the current upgrading node on failure so we don't get stuck
+		if o.upgradeService.stateService != nil {
+			_ = o.upgradeService.stateService.ClearCurrentUpgradingNode(ctx, cluster)
+		}
 		return &UpgradeResult{
 			Success:       false,
 			NodesUpgraded: state.nodesUpgraded,
@@ -290,6 +708,9 @@ func (o *UpgradeOrchestrator) executeNodeUpgrade(
 	vlog.Info(fmt.Sprintf("Talos upgrade initiated on node: cluster=%s node=%s (%d/%d complete)",
 		cluster.Name, node.Name, state.nodesUpgraded, state.totalNodes))
 
+	// Return immediately after initiating upgrade on ONE node
+	// This ensures rolling upgrade - one node at a time
+	// Note: current_node is NOT cleared here - it will be cleared when the node completes
 	return &UpgradeResult{
 		Success:       true,
 		NodesUpgraded: state.nodesUpgraded,
@@ -301,7 +722,14 @@ func (o *UpgradeOrchestrator) executeNodeUpgrade(
 }
 
 // buildCompletionResult creates the result when all nodes have been processed
-func (o *UpgradeOrchestrator) buildCompletionResult(cluster *vitistackv1alpha1.KubernetesCluster, state *upgradeState) *UpgradeResult {
+func (o *UpgradeOrchestrator) buildCompletionResult(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, state *upgradeState) *UpgradeResult {
+	// Clear the current upgrading node since all upgrades are complete
+	if o.upgradeService.stateService != nil {
+		if err := o.upgradeService.stateService.ClearCurrentUpgradingNode(ctx, cluster); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to clear current upgrading node on completion: %v", err))
+		}
+	}
+
 	if len(state.skippedNodes) > 0 {
 		vlog.Warn(fmt.Sprintf("Upgrade completed with skipped nodes: cluster=%s upgraded=%d skipped=%d nodes=%v",
 			cluster.Name, state.nodesUpgraded, len(state.skippedNodes), state.skippedNodes))
@@ -390,6 +818,22 @@ func (o *UpgradeOrchestrator) PerformKubernetesUpgrade(
 		}
 	}
 
+	// Uncordon all nodes after successful Kubernetes upgrade
+	// Nodes may have been cordoned during Talos upgrade
+	if o.nodeDrainer != nil {
+		vlog.Info(fmt.Sprintf("Uncordoning all nodes after Kubernetes upgrade: cluster=%s", cluster.Name))
+		for _, node := range nodes {
+			if node.Name == "" {
+				vlog.Warn(fmt.Sprintf("Skipping uncordon for node with IP %s - no name available", node.IP))
+				continue
+			}
+			if err := o.nodeDrainer.UncordonNode(ctx, cluster, node.Name); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to uncordon node %s after Kubernetes upgrade: %v", node.Name, err))
+				// Don't fail the upgrade for uncordon errors - nodes are still upgraded
+			}
+		}
+	}
+
 	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: cluster=%s version=%s", cluster.Name, targetVersion))
 	return &UpgradeResult{
 		Success:      true,
@@ -400,7 +844,7 @@ func (o *UpgradeOrchestrator) PerformKubernetesUpgrade(
 // sortNodesByRole separates nodes into workers and control planes
 func (o *UpgradeOrchestrator) sortNodesByRole(nodes []NodeUpgradeInfo) (workers, controlPlanes []NodeUpgradeInfo) {
 	for _, node := range nodes {
-		if node.Role == "control-plane" {
+		if node.Role == roleControlPlane {
 			controlPlanes = append(controlPlanes, node)
 		} else {
 			workers = append(workers, node)
@@ -549,4 +993,84 @@ func (o *UpgradeOrchestrator) PreflightChecks(
 	}
 
 	return healthState, nil
+}
+
+// SyncMachineConfigsAfterUpgrade fetches the current machine configs from nodes
+// and updates the stored templates in the cluster secret. This should be called
+// after a successful Talos upgrade to ensure stored configs match the actual running configs.
+func (o *UpgradeOrchestrator) SyncMachineConfigsAfterUpgrade(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	controlPlaneIP string,
+	workerIP string,
+	talosVersion string,
+) error {
+	vlog.Info(fmt.Sprintf("Syncing machine configs after upgrade: cluster=%s version=%s", cluster.Name, talosVersion))
+
+	// Fetch configs from nodes
+	controlPlaneYAML, cpErr := o.fetchNodeConfig(ctx, clientConfig, controlPlaneIP, "control-plane")
+	workerYAML, wErr := o.fetchNodeConfig(ctx, clientConfig, workerIP, "worker")
+
+	// Update stored configs if we got any
+	if controlPlaneYAML != nil || workerYAML != nil {
+		if o.upgradeService != nil && o.upgradeService.stateService != nil {
+			if err := o.updateStoredConfigs(ctx, cluster, controlPlaneYAML, workerYAML, talosVersion); err != nil {
+				return fmt.Errorf("failed to update stored configs: %w", err)
+			}
+
+			vlog.Info(fmt.Sprintf("Machine configs synced after upgrade: cluster=%s cp=%v worker=%v version=%s",
+				cluster.Name, controlPlaneYAML != nil, workerYAML != nil, talosVersion))
+		}
+	}
+
+	// Return error only if both failed
+	if cpErr != nil && wErr != nil {
+		return fmt.Errorf("failed to sync any configs: cp error and worker error occurred")
+	}
+
+	return nil
+}
+
+// fetchNodeConfig fetches the machine config from a node, returning nil if the node IP is empty or on error
+func (o *UpgradeOrchestrator) fetchNodeConfig(
+	ctx context.Context,
+	clientConfig *clientconfig.Config,
+	nodeIP string,
+	nodeType string,
+) ([]byte, error) {
+	if nodeIP == "" {
+		return nil, nil
+	}
+
+	client, err := o.clientService.CreateTalosClient(ctx, false, clientConfig, []string{nodeIP})
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to create client for %s: %v", nodeType, err))
+		return nil, fmt.Errorf("failed to create client: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	configYAML, err := o.clientService.GetMachineConfigYAML(ctx, client, nodeIP)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to get %s config: %v", nodeType, err))
+		return nil, fmt.Errorf("failed to get config: %w", err)
+	}
+
+	return configYAML, nil
+}
+
+// updateStoredConfigs updates the stored config templates in the secret
+func (o *UpgradeOrchestrator) updateStoredConfigs(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	controlPlaneYAML, workerYAML []byte,
+	talosVersion string,
+) error {
+	if o.upgradeService == nil || o.upgradeService.stateService == nil {
+		return fmt.Errorf("state service not available")
+	}
+
+	// Only update configs that were provided (non-nil)
+	// This preserves existing configs if we couldn't fetch new ones
+	return o.upgradeService.stateService.UpdateMachineConfigTemplates(ctx, cluster, controlPlaneYAML, workerYAML, talosVersion)
 }
