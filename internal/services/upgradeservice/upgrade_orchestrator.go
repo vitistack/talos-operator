@@ -349,9 +349,9 @@ func (o *UpgradeOrchestrator) handleNodesSettlingTime(
 	var err error
 	var nextPhase string
 
-	if nodeType == "control-plane" {
+	if nodeType == controlPlaneRole {
 		nodesReadyTime, err = o.upgradeService.stateService.GetControlPlanesReadyTime(ctx, cluster)
-		nextPhase = "worker"
+		nextPhase = roleWorker
 	} else {
 		nodesReadyTime, err = o.upgradeService.stateService.GetWorkersReadyTime(ctx, cluster)
 		nextPhase = "control plane"

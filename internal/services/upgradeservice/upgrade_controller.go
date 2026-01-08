@@ -119,28 +119,30 @@ func (c *UpgradeController) handleCompletedUpgrade(
 	clientConfig *clientconfig.Config,
 	state *ClusterUpgradeState,
 ) (time.Duration, bool, error) {
-	vlog.Info(fmt.Sprintf("Upgrade completed: cluster=%s type=%s", cluster.Name, state.UpgradeType))
+	vlog.Info(fmt.Sprintf("Upgrade completed: cluster=%s type=%s targetVersion=%s", cluster.Name, state.UpgradeType, state.TargetVersion))
 
 	// Mark upgrade as complete and regenerate configs
 	if state.UpgradeType == UpgradeTypeTalos {
-		_ = c.upgradeService.CompleteTalosUpgrade(ctx, cluster)
+		_ = c.upgradeService.CompleteTalosUpgrade(ctx, cluster, state.TargetVersion)
 
-		// Regenerate machine configs after Talos upgrade
+		// Regenerate machine configs after Talos upgrade (no K8s version override needed)
 		if clientConfig != nil {
 			endpointIPs := clientConfig.Contexts[clientConfig.Context].Endpoints
-			if err := c.upgradeService.RegenerateMachineConfigsAfterUpgrade(ctx, cluster, endpointIPs, state.TargetVersion); err != nil {
+			if err := c.upgradeService.RegenerateMachineConfigsAfterUpgrade(ctx, cluster, endpointIPs, state.TargetVersion, ""); err != nil {
 				vlog.Warn(fmt.Sprintf("Failed to regenerate machine configs after upgrade: %v", err))
 			}
 		}
 	} else {
-		_ = c.upgradeService.CompleteKubernetesUpgrade(ctx, cluster)
+		_ = c.upgradeService.CompleteKubernetesUpgrade(ctx, cluster, state.TargetVersion)
 
-		// Regenerate machine configs after Kubernetes upgrade (for K8s version in configs)
+		// Regenerate machine configs after Kubernetes upgrade
+		// Pass the current Talos version (for installer image) and the NEW K8s version (for config)
 		if clientConfig != nil {
 			endpointIPs := clientConfig.Contexts[clientConfig.Context].Endpoints
-			// Use Talos version from the cluster for config regeneration
+			// Use current Talos version from annotations for config regeneration
 			talosVersion := c.upgradeService.GetUpgradeState(cluster).TalosCurrent
-			if err := c.upgradeService.RegenerateMachineConfigsAfterUpgrade(ctx, cluster, endpointIPs, talosVersion); err != nil {
+			// Pass the upgraded K8s version as override since the cluster spec hasn't been updated
+			if err := c.upgradeService.RegenerateMachineConfigsAfterUpgrade(ctx, cluster, endpointIPs, talosVersion, state.TargetVersion); err != nil {
 				vlog.Warn(fmt.Sprintf("Failed to regenerate machine configs after upgrade: %v", err))
 			}
 		}

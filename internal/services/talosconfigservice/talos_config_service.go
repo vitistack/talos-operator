@@ -159,6 +159,8 @@ func (s *TalosConfigService) GenerateTalosConfigBundle(
 
 // GenerateTalosConfigBundleWithSecrets generates a config bundle using an existing secrets bundle.
 // This is used when re-generating configs from persisted secrets.
+// kubernetesVersionOverride can be used to override the K8s version from the cluster spec
+// (useful after a Kubernetes upgrade when the spec hasn't been updated yet).
 func (s *TalosConfigService) GenerateTalosConfigBundleWithSecrets(
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	endpointIPs []string,
@@ -166,10 +168,19 @@ func (s *TalosConfigService) GenerateTalosConfigBundleWithSecrets(
 	tenantPatches []string,
 	tenantPatchesControlPlane []string,
 	tenantPatchesWorker []string,
+	kubernetesVersionOverride string,
 ) (*TalosConfigBundle, error) {
 	clusterId := cluster.Spec.Cluster.ClusterId
 	controlPlaneEndpoint := fmt.Sprintf("https://%s:6443", endpointIPs[0])
-	kubernetesVersion := getKubernetesVersion(cluster)
+
+	// Use override if provided, otherwise read from cluster spec
+	var kubernetesVersion string
+	if kubernetesVersionOverride != "" {
+		kubernetesVersion = strings.TrimPrefix(kubernetesVersionOverride, "v")
+		vlog.Info(fmt.Sprintf("Using Kubernetes version %s (source: override)", kubernetesVersion))
+	} else {
+		kubernetesVersion = getKubernetesVersion(cluster)
+	}
 	versionContract := getTalosVersionContract()
 
 	// Build generate options with existing secrets

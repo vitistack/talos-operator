@@ -506,13 +506,12 @@ func (s *UpgradeService) UpdateTalosUpgradeProgress(ctx context.Context, cluster
 }
 
 // CompleteTalosUpgrade marks a successful Talos upgrade completion
-func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	state := s.GetUpgradeState(cluster)
-
+// targetVersion is the version the cluster was upgraded to (from the persisted upgrade state)
+func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, targetVersion string) error {
 	updates := map[string]string{
-		consts.TalosCurrentAnnotation:  state.TalosTarget,
+		consts.TalosCurrentAnnotation:  targetVersion,
 		consts.TalosStatusAnnotation:   string(consts.UpgradeStatusCompleted),
-		consts.TalosMessageAnnotation:  fmt.Sprintf("Talos upgrade completed: now running %s", state.TalosTarget),
+		consts.TalosMessageAnnotation:  fmt.Sprintf("Talos upgrade completed: now running %s", targetVersion),
 		consts.TalosProgressAnnotation: "",
 	}
 
@@ -522,7 +521,7 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 
 	// Persist completed version to secret and clear upgrade tracking
 	if s.stateService != nil {
-		if err := s.stateService.CompleteUpgradeState(ctx, cluster, "talos", state.TalosTarget); err != nil {
+		if err := s.stateService.CompleteUpgradeState(ctx, cluster, "talos", targetVersion); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to persist completed upgrade to secret: %v", err))
 		}
 		// Clear workers ready time so it's fresh for next upgrade
@@ -547,24 +546,27 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 		vlog.Error("Failed to set phase to Ready", err)
 	}
 	if err := s.statusManager.SetCondition(ctx, cluster, "TalosUpgrade", "False", "Completed",
-		fmt.Sprintf("Talos successfully upgraded to %s", state.TalosTarget)); err != nil {
+		fmt.Sprintf("Talos successfully upgraded to %s", targetVersion)); err != nil {
 		vlog.Error("Failed to set TalosUpgrade condition", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Talos upgrade completed: cluster=%s version=%s", cluster.Name, state.TalosTarget))
+	vlog.Info(fmt.Sprintf("Talos upgrade completed: cluster=%s version=%s", cluster.Name, targetVersion))
 	return nil
 }
 
 // RegenerateMachineConfigsAfterUpgrade regenerates the controlplane.yaml and worker.yaml
-// configs from the persisted secrets bundle after a Talos upgrade.
+// configs from the persisted secrets bundle after a Talos or Kubernetes upgrade.
 // This preserves the multi-document format (from v1.12.x) and ensures configs are
-// properly updated with the new Talos version settings.
+// properly updated with the new version settings.
 // Tenant patches from the ConfigMap are also applied to produce the effective config.
+// kubernetesVersionOverride can be used after a K8s upgrade to use the new version
+// (since the cluster spec may not have been updated yet).
 func (s *UpgradeService) RegenerateMachineConfigsAfterUpgrade(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	endpointIPs []string,
 	talosVersion string,
+	kubernetesVersionOverride string,
 ) error {
 	if s.stateService == nil || s.configService == nil {
 		return fmt.Errorf("state service or config service not available")
@@ -600,9 +602,10 @@ func (s *UpgradeService) RegenerateMachineConfigsAfterUpgrade(
 		cluster,
 		endpointIPs,
 		secretsBundle,
-		tenantPatches, // tenant patches loaded from ConfigMap
-		nil,           // control plane specific patches (not used)
-		nil,           // worker specific patches (not used)
+		tenantPatches,             // tenant patches loaded from ConfigMap
+		nil,                       // control plane specific patches (not used)
+		nil,                       // worker specific patches (not used)
+		kubernetesVersionOverride, // K8s version override (used after K8s upgrade)
 	)
 	if err != nil {
 		return fmt.Errorf("failed to regenerate config bundle: %w", err)
@@ -826,13 +829,12 @@ func (s *UpgradeService) UpdateKubernetesUpgradeProgress(ctx context.Context, cl
 }
 
 // CompleteKubernetesUpgrade marks a successful Kubernetes upgrade completion
-func (s *UpgradeService) CompleteKubernetesUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	state := s.GetUpgradeState(cluster)
-
+// targetVersion is the version the cluster was upgraded to (from the persisted upgrade state)
+func (s *UpgradeService) CompleteKubernetesUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, targetVersion string) error {
 	updates := map[string]string{
-		consts.KubernetesCurrentAnnotation:  state.KubernetesTarget,
+		consts.KubernetesCurrentAnnotation:  targetVersion,
 		consts.KubernetesStatusAnnotation:   string(consts.UpgradeStatusCompleted),
-		consts.KubernetesMessageAnnotation:  fmt.Sprintf("Kubernetes upgrade completed: now running %s", state.KubernetesTarget),
+		consts.KubernetesMessageAnnotation:  fmt.Sprintf("Kubernetes upgrade completed: now running %s", targetVersion),
 		consts.KubernetesProgressAnnotation: "",
 	}
 
@@ -842,7 +844,7 @@ func (s *UpgradeService) CompleteKubernetesUpgrade(ctx context.Context, cluster 
 
 	// Persist completed version to secret
 	if s.stateService != nil {
-		if err := s.stateService.CompleteUpgradeState(ctx, cluster, "kubernetes", state.KubernetesTarget); err != nil {
+		if err := s.stateService.CompleteUpgradeState(ctx, cluster, "kubernetes", targetVersion); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to persist completed upgrade to secret: %v", err))
 		}
 	}
@@ -863,11 +865,11 @@ func (s *UpgradeService) CompleteKubernetesUpgrade(ctx context.Context, cluster 
 		vlog.Error("Failed to set phase to Ready", err)
 	}
 	if err := s.statusManager.SetCondition(ctx, cluster, "KubernetesUpgrade", "False", "Completed",
-		fmt.Sprintf("Kubernetes successfully upgraded to %s", state.KubernetesTarget)); err != nil {
+		fmt.Sprintf("Kubernetes successfully upgraded to %s", targetVersion)); err != nil {
 		vlog.Error("Failed to set KubernetesUpgrade condition", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: cluster=%s version=%s", cluster.Name, state.KubernetesTarget))
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: cluster=%s version=%s", cluster.Name, targetVersion))
 	return nil
 }
 

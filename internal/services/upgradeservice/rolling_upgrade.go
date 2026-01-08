@@ -68,6 +68,44 @@ func NewRollingUpgradeExecutor(
 	}
 }
 
+// getUpgradeStateOrResult retrieves and validates the upgrade state.
+// Returns (state, nil) if ready to continue, or (nil, result) if we should return early.
+func (e *RollingUpgradeExecutor) getUpgradeStateOrResult(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	upgradeType string,
+) (*ClusterUpgradeState, *RollingUpgradeResult) {
+	state, err := e.stateManager.GetUpgradeState(ctx, cluster)
+	if err != nil {
+		return nil, &RollingUpgradeResult{
+			Error:   fmt.Errorf("failed to get upgrade state: %w", err),
+			Message: "Failed to retrieve upgrade state",
+		}
+	}
+	if state == nil {
+		return nil, &RollingUpgradeResult{
+			Completed: true,
+			Message:   "No upgrade in progress",
+		}
+	}
+
+	// Check if upgrade is already complete or failed
+	if state.IsComplete() {
+		return nil, &RollingUpgradeResult{
+			Completed: true,
+			Message:   fmt.Sprintf("%s upgrade completed successfully", upgradeType),
+		}
+	}
+	if state.IsFailed() {
+		return nil, &RollingUpgradeResult{
+			Error:   fmt.Errorf("upgrade failed on node %s: %s", state.FailedNodeName, state.FailedReason),
+			Message: fmt.Sprintf("Upgrade failed on node %s", state.FailedNodeName),
+		}
+	}
+
+	return state, nil
+}
+
 // ExecuteTalosUpgradeStep executes one step of a Talos rolling upgrade.
 // This is designed to be called repeatedly during reconciliation.
 // It will upgrade one node at a time, waiting for each to be ready before continuing.
@@ -76,33 +114,9 @@ func (e *RollingUpgradeExecutor) ExecuteTalosUpgradeStep(
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientConfig *clientconfig.Config,
 ) *RollingUpgradeResult {
-	// Get current upgrade state
-	state, err := e.stateManager.GetUpgradeState(ctx, cluster)
-	if err != nil {
-		return &RollingUpgradeResult{
-			Error:   fmt.Errorf("failed to get upgrade state: %w", err),
-			Message: "Failed to retrieve upgrade state",
-		}
-	}
-	if state == nil {
-		return &RollingUpgradeResult{
-			Completed: true,
-			Message:   "No upgrade in progress",
-		}
-	}
-
-	// Check if upgrade is already complete or failed
-	if state.IsComplete() {
-		return &RollingUpgradeResult{
-			Completed: true,
-			Message:   "Upgrade completed successfully",
-		}
-	}
-	if state.IsFailed() {
-		return &RollingUpgradeResult{
-			Error:   fmt.Errorf("upgrade failed on node %s: %s", state.FailedNodeName, state.FailedReason),
-			Message: fmt.Sprintf("Upgrade failed on node %s", state.FailedNodeName),
-		}
+	state, result := e.getUpgradeStateOrResult(ctx, cluster, "Talos")
+	if result != nil {
+		return result
 	}
 
 	// Handle based on current phase
@@ -464,130 +478,203 @@ func (e *RollingUpgradeExecutor) waitForNodeReady(
 	}
 }
 
+// KubernetesSettlingDuration is the minimum time to wait after all control planes
+// are upgraded before starting worker upgrades for Kubernetes
+const KubernetesSettlingDuration = 30 * time.Second
+
 // ExecuteKubernetesUpgradeStep executes one step of a Kubernetes rolling upgrade.
-// For Kubernetes upgrades, we apply config changes to each node sequentially.
+// Uses the same phase-based approach as Talos upgrades:
+// ControlPlanes -> ControlPlanesWait -> Workers -> Completed
 func (e *RollingUpgradeExecutor) ExecuteKubernetesUpgradeStep(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientConfig *clientconfig.Config,
 ) *RollingUpgradeResult {
-	// Get current upgrade state
-	state, err := e.stateManager.GetUpgradeState(ctx, cluster)
-	if err != nil {
-		return &RollingUpgradeResult{
-			Error:   fmt.Errorf("failed to get upgrade state: %w", err),
-			Message: "Failed to retrieve upgrade state",
-		}
-	}
-	if state == nil {
-		return &RollingUpgradeResult{
-			Completed: true,
-			Message:   "No upgrade in progress",
-		}
+	state, result := e.getUpgradeStateOrResult(ctx, cluster, "Kubernetes")
+	if result != nil {
+		return result
 	}
 
-	if state.IsComplete() {
+	// Handle based on current phase (same as Talos upgrades)
+	switch state.Phase {
+	case UpgradePhaseControlPlanes:
+		return e.handleKubernetesControlPlaneUpgrade(ctx, cluster, clientConfig, state)
+	case UpgradePhaseControlPlanesWait:
+		return e.handleKubernetesControlPlaneWait(ctx, cluster, state)
+	case UpgradePhaseWorkers:
+		return e.handleKubernetesWorkerUpgrade(ctx, cluster, clientConfig, state)
+	default:
 		return &RollingUpgradeResult{
-			Completed: true,
-			Message:   "Kubernetes upgrade completed successfully",
+			Error:   fmt.Errorf("unknown upgrade phase: %s", state.Phase),
+			Message: "Invalid upgrade state",
 		}
 	}
-	if state.IsFailed() {
-		return &RollingUpgradeResult{
-			Error:   fmt.Errorf("upgrade failed on node %s: %s", state.FailedNodeName, state.FailedReason),
-			Message: fmt.Sprintf("Upgrade failed on node %s", state.FailedNodeName),
-		}
-	}
+}
 
+// handleKubernetesControlPlaneUpgrade handles upgrading a single control plane node for Kubernetes
+func (e *RollingUpgradeExecutor) handleKubernetesControlPlaneUpgrade(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	state *ClusterUpgradeState,
+) *RollingUpgradeResult {
 	node := state.GetCurrentNode()
 	if node == nil {
-		// All nodes processed
+		// No more control planes, transition to wait phase
+		vlog.Info(fmt.Sprintf("Kubernetes control plane upgrades complete: cluster=%s count=%d",
+			cluster.Name, state.ControlPlaneCount))
+		if err := e.stateManager.AdvanceToNextNode(ctx, cluster); err != nil {
+			return &RollingUpgradeResult{
+				Error:   fmt.Errorf("failed to advance to next phase: %w", err),
+				Message: "Failed to transition upgrade phase",
+			}
+		}
+		return &RollingUpgradeResult{
+			Continue:     true,
+			RequeueAfter: 5 * time.Second,
+			Message:      "Transitioning to control plane wait phase",
+		}
+	}
+
+	return e.processKubernetesNode(ctx, cluster, clientConfig, state, node)
+}
+
+// handleKubernetesControlPlaneWait handles the waiting period after control plane Kubernetes upgrades
+func (e *RollingUpgradeExecutor) handleKubernetesControlPlaneWait(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	state *ClusterUpgradeState,
+) *RollingUpgradeResult {
+	// First verify all control planes are actually ready
+	for i := range state.Nodes {
+		if i >= state.ControlPlaneCount {
+			break // Only check control planes
+		}
+		node := &state.Nodes[i]
+		if !node.NodeReady {
+			// Check if node is now ready
+			status, err := e.readinessChecker.IsNodeReady(ctx, cluster, node.NodeName)
+			if err != nil {
+				vlog.Warn(fmt.Sprintf("Error checking control plane readiness: node=%s error=%v", node.NodeName, err))
+				return &RollingUpgradeResult{
+					Continue:     true,
+					RequeueAfter: 30 * time.Second,
+					Message:      fmt.Sprintf("Waiting for control plane %s to become accessible", node.NodeName),
+				}
+			}
+			if !status.Ready {
+				return &RollingUpgradeResult{
+					Continue:     true,
+					RequeueAfter: 20 * time.Second,
+					Message:      fmt.Sprintf("Waiting for control plane %s to become ready", node.NodeName),
+				}
+			}
+			// Mark as ready
+			if err := e.stateManager.MarkNodeReady(ctx, cluster, node.NodeName); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to mark node ready: %v", err))
+			}
+		}
+	}
+
+	// Check if we should still wait (settling time)
+	if state.ShouldWaitForSettling(KubernetesSettlingDuration) {
+		remaining := state.GetRemainingSettlingTime(KubernetesSettlingDuration)
+		return &RollingUpgradeResult{
+			Continue:     true,
+			RequeueAfter: remaining,
+			Message:      fmt.Sprintf("Waiting for Kubernetes control planes to settle (%v remaining)", remaining.Round(time.Second)),
+		}
+	}
+
+	// Settling complete, transition to workers
+	if err := e.stateManager.TransitionToWorkers(ctx, cluster); err != nil {
+		return &RollingUpgradeResult{
+			Error:   fmt.Errorf("failed to transition to worker upgrades: %w", err),
+			Message: "Failed to start worker upgrades",
+		}
+	}
+
+	// Check if we're now complete (no workers)
+	state, _ = e.stateManager.GetUpgradeState(ctx, cluster)
+	if state != nil && state.IsComplete() {
+		vlog.Info(fmt.Sprintf("Kubernetes upgrade completed (no workers): cluster=%s", cluster.Name))
+		return &RollingUpgradeResult{
+			Completed: true,
+			Message:   "Kubernetes upgrade completed (no workers to upgrade)",
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("Starting Kubernetes worker upgrades: cluster=%s workers=%d",
+		cluster.Name, state.WorkerCount))
+	return &RollingUpgradeResult{
+		Continue:     true,
+		RequeueAfter: 5 * time.Second,
+		Message:      "Starting Kubernetes worker upgrades",
+	}
+}
+
+// handleKubernetesWorkerUpgrade handles upgrading a single worker node for Kubernetes
+func (e *RollingUpgradeExecutor) handleKubernetesWorkerUpgrade(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	state *ClusterUpgradeState,
+) *RollingUpgradeResult {
+	node := state.GetCurrentNode()
+	if node == nil {
+		// All workers done
 		state.Phase = UpgradePhaseCompleted
 		state.CompletedAt = time.Now().UTC()
 		if err := e.stateManager.SaveUpgradeState(ctx, cluster, state); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to save completion state: %v", err))
 		}
+		vlog.Info(fmt.Sprintf("All Kubernetes nodes upgraded successfully: cluster=%s", cluster.Name))
 		return &RollingUpgradeResult{
 			Completed: true,
-			Message:   "All nodes Kubernetes upgraded successfully",
+			Message:   "All Kubernetes nodes upgraded successfully",
 		}
 	}
 
-	return e.processKubernetesNodeUpgrade(ctx, cluster, clientConfig, state, node)
+	return e.processKubernetesNode(ctx, cluster, clientConfig, state, node)
 }
 
-// processKubernetesNodeUpgrade processes Kubernetes upgrade for a single node
-func (e *RollingUpgradeExecutor) processKubernetesNodeUpgrade(
+// processKubernetesNode processes Kubernetes upgrade for a single node
+// This follows the same pattern as Talos: initiate -> wait for completion -> wait for ready -> advance
+func (e *RollingUpgradeExecutor) processKubernetesNode(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientConfig *clientconfig.Config,
 	state *ClusterUpgradeState,
 	node *NodeUpgradeState,
 ) *RollingUpgradeResult {
-	// For Kubernetes upgrades, we need to:
-	// 1. Cordon the node
-	// 2. Apply updated machine config with new K8s version
-	// 3. Wait for node to be ready (kubelet will be updated)
-	// 4. Uncordon the node
-	// 5. Move to next node
-
+	// Step 1: If upgrade not initiated, initiate it
 	if !node.UpgradeInitiated {
-		vlog.Info(fmt.Sprintf("Upgrading Kubernetes on node: cluster=%s node=%s (%d/%d)",
-			cluster.Name, node.NodeName, state.CurrentNodeIndex+1, len(state.Nodes)))
-		// Cordon node
-		if err := e.readinessChecker.CordonNode(ctx, cluster, node.NodeName); err != nil {
-			vlog.Warn(fmt.Sprintf("Cordon failed (continuing anyway): node=%s error=%v", node.NodeName, err))
-		}
-
-		// Apply Kubernetes version upgrade via Talos
-		client, err := e.talosClientService.CreateTalosClient(ctx, false, clientConfig, []string{node.IP})
-		if err != nil {
-			_ = e.stateManager.MarkUpgradeFailed(ctx, cluster, node.NodeName, fmt.Sprintf("failed to create Talos client: %v", err))
-			return &RollingUpgradeResult{
-				Error:   fmt.Errorf("failed to create Talos client: %w", err),
-				Message: fmt.Sprintf("Cannot connect to node %s", node.NodeName),
-			}
-		}
-		defer func() { _ = client.Close() }()
-
-		// Upgrade Kubernetes on this node
-		isControlPlane := node.Role == controlPlaneRole
-		nodeInfo := []talosclientservice.NodeUpgradeInfo{{
-			Name:           node.NodeName,
-			IP:             node.IP,
-			IsControlPlane: isControlPlane,
-		}}
-		if err := e.talosClientService.UpgradeKubernetes(ctx, client, nodeInfo, state.TargetVersion); err != nil {
-			_ = e.stateManager.MarkUpgradeFailed(ctx, cluster, node.NodeName, fmt.Sprintf("kubernetes upgrade failed: %v", err))
-			return &RollingUpgradeResult{
-				Error:   fmt.Errorf("kubernetes upgrade failed: %w", err),
-				Message: fmt.Sprintf("Kubernetes upgrade failed on node %s", node.NodeName),
-			}
-		}
-
-		if err := e.stateManager.MarkNodeUpgradeInitiated(ctx, cluster, node.NodeName); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to mark node as initiated: %v", err))
-		}
-
-		vlog.Info(fmt.Sprintf("Kubernetes upgrade applied: node=%s version=%s", node.NodeName, state.TargetVersion))
+		return e.initiateKubernetesNodeUpgrade(ctx, cluster, clientConfig, state, node)
 	}
 
-	// Wait for node to be ready
-	status, err := e.readinessChecker.IsNodeReady(ctx, cluster, node.NodeName)
-	if err != nil || !status.Ready {
+	// Step 2: If upgrade initiated but not completed, mark as completed
+	// (Kubernetes config apply is synchronous, so once initiated it's effectively done)
+	if !node.UpgradeCompleted {
+		if err := e.stateManager.MarkNodeUpgradeCompleted(ctx, cluster, node.NodeName); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to mark node upgrade completed: %v", err))
+		}
+		vlog.Info(fmt.Sprintf("Kubernetes config applied to node: cluster=%s node=%s version=%s",
+			cluster.Name, node.NodeName, state.TargetVersion))
 		return &RollingUpgradeResult{
 			Continue:     true,
-			RequeueAfter: 20 * time.Second,
-			Message:      fmt.Sprintf("Waiting for node %s to become ready after Kubernetes upgrade", node.NodeName),
+			RequeueAfter: 5 * time.Second,
+			Message:      fmt.Sprintf("Kubernetes config applied to %s, waiting for node ready", node.NodeName),
 		}
 	}
 
-	// Mark as completed and ready
-	if err := e.stateManager.MarkNodeUpgradeCompleted(ctx, cluster, node.NodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to mark node as completed: %v", err))
+	// Step 3: If upgraded but not ready, wait for ready
+	if !node.NodeReady {
+		return e.waitForKubernetesNodeReady(ctx, cluster, node)
 	}
-	if err := e.stateManager.MarkNodeReady(ctx, cluster, node.NodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to mark node as ready: %v", err))
+
+	// Step 4: Node is fully done, uncordon and advance
+	if err := e.readinessChecker.UncordonNode(ctx, cluster, node.NodeName); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to uncordon node %s: %v", node.NodeName, err))
 	}
 
 	// Update progress annotations
@@ -596,10 +683,8 @@ func (e *RollingUpgradeExecutor) processKubernetesNodeUpgrade(
 		_ = e.upgradeService.UpdateKubernetesUpgradeProgress(ctx, cluster, node.NodeName, completedCount, len(state.Nodes))
 	}
 
-	// Uncordon the node
-	if err := e.readinessChecker.UncordonNode(ctx, cluster, node.NodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to uncordon node %s: %v", node.NodeName, err))
-	}
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed on node: cluster=%s node=%s (%d/%d)",
+		cluster.Name, node.NodeName, completedCount, len(state.Nodes)))
 
 	// Advance to next node
 	if err := e.stateManager.AdvanceToNextNode(ctx, cluster); err != nil {
@@ -609,11 +694,120 @@ func (e *RollingUpgradeExecutor) processKubernetesNodeUpgrade(
 		}
 	}
 
-	vlog.Info(fmt.Sprintf("Node Kubernetes upgraded: cluster=%s node=%s", cluster.Name, node.NodeName))
-
 	return &RollingUpgradeResult{
 		Continue:     true,
 		RequeueAfter: 5 * time.Second,
 		Message:      fmt.Sprintf("Node %s Kubernetes upgrade complete, proceeding to next", node.NodeName),
+	}
+}
+
+// initiateKubernetesNodeUpgrade initiates the Kubernetes upgrade on a node
+func (e *RollingUpgradeExecutor) initiateKubernetesNodeUpgrade(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	state *ClusterUpgradeState,
+	node *NodeUpgradeState,
+) *RollingUpgradeResult {
+	nodePosition := state.CurrentNodeIndex + 1
+	totalNodes := len(state.Nodes)
+	isControlPlane := node.Role == controlPlaneRole
+	nodeType := roleWorker
+	if isControlPlane {
+		nodeType = controlPlaneRole
+	}
+
+	vlog.Info(fmt.Sprintf("Upgrading Kubernetes on %s: cluster=%s node=%s (%d/%d) target=%s",
+		nodeType, cluster.Name, node.NodeName, nodePosition, totalNodes, state.TargetVersion))
+
+	// Update progress annotation
+	if e.upgradeService != nil {
+		_ = e.upgradeService.UpdateKubernetesUpgradeProgress(ctx, cluster, node.NodeName, nodePosition-1, totalNodes)
+	}
+
+	// Cordon node to prevent new workloads
+	if err := e.readinessChecker.CordonNode(ctx, cluster, node.NodeName); err != nil {
+		vlog.Warn(fmt.Sprintf("Cordon failed (continuing anyway): node=%s error=%v", node.NodeName, err))
+	}
+
+	// Create Talos client for this node
+	client, err := e.talosClientService.CreateTalosClient(ctx, false, clientConfig, []string{node.IP})
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to create Talos client: %v", err)
+		vlog.Error(fmt.Sprintf("Kubernetes upgrade failed: cluster=%s node=%s error=%s", cluster.Name, node.NodeName, errMsg), err)
+		_ = e.stateManager.MarkUpgradeFailed(ctx, cluster, node.NodeName, errMsg)
+		return &RollingUpgradeResult{
+			Error:   fmt.Errorf("failed to create Talos client: %w", err),
+			Message: fmt.Sprintf("Cannot connect to node %s", node.NodeName),
+		}
+	}
+	defer func() { _ = client.Close() }()
+
+	// Upgrade Kubernetes on this node via Talos machine config
+	nodeInfo := []talosclientservice.NodeUpgradeInfo{{
+		Name:           node.NodeName,
+		IP:             node.IP,
+		IsControlPlane: isControlPlane,
+	}}
+	if err := e.talosClientService.UpgradeKubernetes(ctx, client, nodeInfo, state.TargetVersion); err != nil {
+		errMsg := fmt.Sprintf("kubernetes upgrade failed: %v", err)
+		vlog.Error(fmt.Sprintf("Kubernetes upgrade failed: cluster=%s node=%s error=%s", cluster.Name, node.NodeName, errMsg), err)
+		_ = e.stateManager.MarkUpgradeFailed(ctx, cluster, node.NodeName, errMsg)
+		return &RollingUpgradeResult{
+			Error:   fmt.Errorf("kubernetes upgrade failed: %w", err),
+			Message: fmt.Sprintf("Kubernetes upgrade failed on node %s", node.NodeName),
+		}
+	}
+
+	// Mark upgrade as initiated
+	if err := e.stateManager.MarkNodeUpgradeInitiated(ctx, cluster, node.NodeName); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to mark node as initiated: %v", err))
+	}
+
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade initiated: cluster=%s node=%s type=%s version=%s",
+		cluster.Name, node.NodeName, nodeType, state.TargetVersion))
+
+	return &RollingUpgradeResult{
+		Continue:     true,
+		RequeueAfter: 10 * time.Second,
+		Message:      fmt.Sprintf("Kubernetes upgrade initiated on %s, waiting for completion", node.NodeName),
+	}
+}
+
+// waitForKubernetesNodeReady waits for a node to become ready after Kubernetes upgrade
+func (e *RollingUpgradeExecutor) waitForKubernetesNodeReady(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	node *NodeUpgradeState,
+) *RollingUpgradeResult {
+	status, err := e.readinessChecker.IsNodeReady(ctx, cluster, node.NodeName)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Error checking node readiness: node=%s error=%v", node.NodeName, err))
+		return &RollingUpgradeResult{
+			Continue:     true,
+			RequeueAfter: 30 * time.Second,
+			Message:      fmt.Sprintf("Waiting for node %s to register with Kubernetes", node.NodeName),
+		}
+	}
+
+	if !status.Ready {
+		return &RollingUpgradeResult{
+			Continue:     true,
+			RequeueAfter: 20 * time.Second,
+			Message:      fmt.Sprintf("Waiting for node %s to become ready after Kubernetes upgrade", node.NodeName),
+		}
+	}
+
+	// Node is ready, mark it
+	if err := e.stateManager.MarkNodeReady(ctx, cluster, node.NodeName); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to mark node as ready: %v", err))
+	}
+
+	vlog.Info(fmt.Sprintf("Node ready after Kubernetes upgrade: cluster=%s node=%s", cluster.Name, node.NodeName))
+
+	return &RollingUpgradeResult{
+		Continue:     true,
+		RequeueAfter: 5 * time.Second,
+		Message:      fmt.Sprintf("Node %s is ready", node.NodeName),
 	}
 }
