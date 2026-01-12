@@ -8,7 +8,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/cosi-project/runtime v1.13.0
 	github.com/onsi/ginkgo/v2 v2.27.4
-	github.com/onsi/gomega v1.38.3
+	github.com/onsi/gomega v1.39.0
 	github.com/siderolabs/talos/pkg/machinery v1.12.1
 	github.com/spf13/viper v1.21.0
 	github.com/vitistack/common v0.8.28
