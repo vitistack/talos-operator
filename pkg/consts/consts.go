@@ -32,6 +32,23 @@ var (
 	BOOT_IMAGE_SOURCE = "BOOT_IMAGE_SOURCE"
 
 	BOOT_IMAGE = "BOOT_IMAGE"
+
+	// BOOT_IMAGE_ARM64 is the boot image URL for ARM64 architecture.
+	// Used when machines specify arm64 architecture.
+	BOOT_IMAGE_ARM64 = "BOOT_IMAGE_ARM64"
+
+	// TALOS_VM_INSTALL_IMAGE_KUBEVIRT_ARM64 is the installer image for KubeVirt on ARM64.
+	TALOS_VM_INSTALL_IMAGE_KUBEVIRT_ARM64 = "TALOS_VM_INSTALL_IMAGE_KUBEVIRT_ARM64"
+
+	// TALOS_VM_INSTALL_IMAGE_DEFAULT_ARM64 is the default installer image for ARM64.
+	TALOS_VM_INSTALL_IMAGE_DEFAULT_ARM64 = "TALOS_VM_INSTALL_IMAGE_DEFAULT_ARM64"
+)
+
+// Architecture constants
+const (
+	ArchAMD64 = "amd64"
+	ArchARM64 = "arm64"
+	ArchX86_64 = "x86_64" // alias for amd64
 )
 
 // EndpointMode represents the mode for determining control plane endpoints

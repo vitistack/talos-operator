@@ -25,8 +25,16 @@ func Init() {
 	viper.SetDefault(consts.TENANT_CONFIGMAP_DATA_KEY, "config.yaml")
 	viper.SetDefault(consts.TALOS_VERSION, "v1.12.1")
 	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.35.0")
+
+	// AMD64 install images (default architecture)
 	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/metal-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.12.1")
 	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/metal-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.12.1")
+
+	// ARM64 install images
+	// Note: ARM64 images use a different factory hash. The hash below is an example - replace with your actual ARM64 image hash.
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT_ARM64, "factory.talos.dev/metal-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.12.1")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT_ARM64, "factory.talos.dev/metal-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.12.1")
+
 	viper.SetDefault(consts.TALOS_PREDICTABLE_NETWORK_NAMES, true)
 
 	// Endpoint mode configuration
@@ -40,7 +48,12 @@ func Init() {
 	// Default: "pxe" (uses PXE boot for machine provisioning)
 	// When set to "bootimage", BOOT_IMAGE must also be set with the URL to the Talos ISO
 	viper.SetDefault(consts.BOOT_IMAGE_SOURCE, string(consts.DefaultBootImageSource))
+
+	// Boot images for AMD64 (default)
 	viper.SetDefault(consts.BOOT_IMAGE, "https://factory.talos.dev/image/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515/v1.12.1/metal-amd64.iso")
+
+	// Boot images for ARM64
+	viper.SetDefault(consts.BOOT_IMAGE_ARM64, "https://factory.talos.dev/image/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515/v1.12.1/metal-arm64.iso")
 
 	dotenv.LoadDotEnv()
 	viper.AutomaticEnv()

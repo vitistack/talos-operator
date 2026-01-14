@@ -30,22 +30,52 @@ type MachineManager struct {
 // getMachineOS returns the MachineOS configuration based on BOOT_IMAGE_SOURCE setting.
 // When BOOT_IMAGE_SOURCE is set to "bootimage", it populates the OS with the Talos image URL.
 // When BOOT_IMAGE_SOURCE is "pxe" (default), returns an empty MachineOS (PXE boot is used).
-func getMachineOS() vitistackv1alpha1.MachineOS {
+// The architecture parameter determines which boot image to use (amd64 or arm64).
+func getMachineOS(architecture string) vitistackv1alpha1.MachineOS {
 	bootImageSource := viper.GetString(consts.BOOT_IMAGE_SOURCE)
+
+	// Normalize architecture
+	arch := normalizeArchitecture(architecture)
 
 	// If boot image source is "bootimage", set the imageID from BOOT_IMAGE
 	if consts.BootImageSource(bootImageSource) == consts.BootImageSourceBootImage {
-		bootImage := viper.GetString(consts.BOOT_IMAGE)
+		bootImage := getBootImageForArchitecture(arch)
 		return vitistackv1alpha1.MachineOS{
 			Family:       "linux",
 			Distribution: "talos",
-			Architecture: "amd64",
+			Architecture: arch,
 			ImageID:      bootImage,
 		}
 	}
 
 	// Default: PXE boot, no OS configuration needed
 	return vitistackv1alpha1.MachineOS{}
+}
+
+// normalizeArchitecture normalizes architecture strings to standard values.
+// Returns "arm64" for arm64/aarch64, "amd64" for everything else (including empty).
+func normalizeArchitecture(arch string) string {
+	switch arch {
+	case consts.ArchARM64, "aarch64":
+		return consts.ArchARM64
+	case consts.ArchAMD64, consts.ArchX86_64, "":
+		return consts.ArchAMD64
+	default:
+		return consts.ArchAMD64
+	}
+}
+
+// getBootImageForArchitecture returns the appropriate boot image URL for the given architecture.
+func getBootImageForArchitecture(arch string) string {
+	if arch == consts.ArchARM64 {
+		bootImage := viper.GetString(consts.BOOT_IMAGE_ARM64)
+		if bootImage != "" {
+			return bootImage
+		}
+		// Fallback: no ARM64 image configured, log warning
+		vlog.Warn("No ARM64 boot image configured (BOOT_IMAGE_ARM64), using default BOOT_IMAGE")
+	}
+	return viper.GetString(consts.BOOT_IMAGE)
 }
 
 // getBootImageAnnotations returns the annotations required for boot image source.
@@ -253,8 +283,14 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 		controlPlaneMachineClass = "large"
 	}
 
-	// Get OS configuration based on boot image source setting
-	machineOS := getMachineOS()
+	// Get architecture from control plane spec, default to amd64
+	controlPlaneArchitecture := cluster.Spec.Topology.ControlPlane.Architecture
+	if controlPlaneArchitecture == "" {
+		controlPlaneArchitecture = consts.ArchAMD64
+	}
+
+	// Get OS configuration based on boot image source setting and architecture
+	machineOS := getMachineOS(controlPlaneArchitecture)
 
 	for i := 0; i < controlPlaneReplicas; i++ {
 		machine := &vitistackv1alpha1.Machine{
@@ -330,9 +366,9 @@ func buildWorkerIndexContext(existingMachines []vitistackv1alpha1.Machine, clust
 }
 
 // createWorkerMachine creates a worker Machine object with the given parameters
-func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass string, provider vitistackv1alpha1.MachineProviderType, disks []vitistackv1alpha1.MachineSpecDisk) *vitistackv1alpha1.Machine {
-	// Get OS configuration based on boot image source setting
-	machineOS := getMachineOS()
+func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass string, provider vitistackv1alpha1.MachineProviderType, disks []vitistackv1alpha1.MachineSpecDisk, architecture string) *vitistackv1alpha1.Machine {
+	// Get OS configuration based on boot image source setting and architecture
+	machineOS := getMachineOS(architecture)
 
 	// Build annotations: start with nodepool annotation, then add boot image annotations if needed
 	annotations := map[string]string{
@@ -373,8 +409,9 @@ func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1a
 	// Create worker nodes based on node pools if available
 	if len(cluster.Spec.Topology.Workers.NodePools) == 0 {
 		// Create default worker node if no node pools are specified
+		// Default to amd64 architecture when no node pools are defined
 		return []*vitistackv1alpha1.Machine{
-			createWorkerMachine(fmt.Sprintf("%s-wrk0", clusterId), namespace, clusterId, "", "medium", "", nil),
+			createWorkerMachine(fmt.Sprintf("%s-wrk0", clusterId), namespace, clusterId, "", "medium", "", nil, consts.ArchAMD64),
 		}
 	}
 
@@ -400,6 +437,12 @@ func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1
 	}
 	provider := vitistackv1alpha1.MachineProviderType(nodePool.Provider.String())
 
+	// Get architecture from node pool, default to amd64
+	architecture := nodePool.Architecture
+	if architecture == "" {
+		architecture = consts.ArchAMD64
+	}
+
 	// Get existing machines for this nodepool
 	existingForPool := indexCtx.existingByNodePool[nodePool.Name]
 	existingCount := len(existingForPool)
@@ -419,7 +462,7 @@ func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1
 	// Add existing machines that we want to keep
 	for i := 0; i < keepCount; i++ {
 		existing := existingForPool[i]
-		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks)
+		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, architecture)
 		machines = append(machines, machine)
 	}
 
@@ -431,7 +474,7 @@ func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1
 		indexCtx.usedIndices[newIndex] = true
 
 		machineName := fmt.Sprintf("%s-wrk%d", clusterId, newIndex)
-		machine := createWorkerMachine(machineName, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks)
+		machine := createWorkerMachine(machineName, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, architecture)
 		machines = append(machines, machine)
 	}
 

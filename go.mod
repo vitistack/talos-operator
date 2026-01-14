@@ -155,3 +155,7 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+// Local development replace directive - remove before committing
+// This allows using local changes to common package
+replace github.com/vitistack/common => ../common
