@@ -46,8 +46,8 @@ var (
 
 // Architecture constants
 const (
-	ArchAMD64 = "amd64"
-	ArchARM64 = "arm64"
+	ArchAMD64  = "amd64"
+	ArchARM64  = "arm64"
 	ArchX86_64 = "x86_64" // alias for amd64
 )
 
