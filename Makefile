@@ -121,6 +121,40 @@ go-security-scan-docker: ## Run gosec scan using official container (alternative
 	@echo "Running gosec via Docker container..."; \
 	$(CONTAINER_TOOL) run --rm -v $(PWD):/workspace -w /workspace securego/gosec/gosec:latest ./...
 
+##@ SBOM (Software Bill of Materials)
+SYFT ?= $(LOCALBIN)/syft
+SYFT_VERSION ?= latest
+SBOM_OUTPUT_DIR ?= sbom
+SBOM_PROJECT_NAME ?= talos-operator
+
+.PHONY: install-syft
+install-syft: $(SYFT) ## Install syft SBOM generator locally
+$(SYFT): $(LOCALBIN)
+	@set -e; echo "Installing syft $(SYFT_VERSION)"; \
+	curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b $(LOCALBIN)
+
+.PHONY: sbom-source
+sbom-source: install-syft ## Generate SBOMs for Go source code (CycloneDX + SPDX)
+	@mkdir -p $(SBOM_OUTPUT_DIR)
+	@echo "Generating source code SBOMs..."
+	$(SYFT) dir:. --source-name=$(SBOM_PROJECT_NAME) -o cyclonedx-json=$(SBOM_OUTPUT_DIR)/sbom-source.cdx.json
+	$(SYFT) dir:. --source-name=$(SBOM_PROJECT_NAME) -o spdx-json=$(SBOM_OUTPUT_DIR)/sbom-source.spdx.json
+	@echo "SBOMs generated: $(SBOM_OUTPUT_DIR)/sbom-source.{cdx,spdx}.json"
+
+.PHONY: sbom-container
+sbom-container: install-syft ## Generate SBOMs for container image (CycloneDX + SPDX, requires IMG)
+	@mkdir -p $(SBOM_OUTPUT_DIR)
+	@echo "Generating container SBOMs for $(IMG)..."
+	$(SYFT) $(IMG) -o cyclonedx-json=$(SBOM_OUTPUT_DIR)/sbom-container.cdx.json
+	$(SYFT) $(IMG) -o spdx-json=$(SBOM_OUTPUT_DIR)/sbom-container.spdx.json
+	@echo "SBOMs generated: $(SBOM_OUTPUT_DIR)/sbom-container.{cdx,spdx}.json"
+
+.PHONY: sbom
+sbom: sbom-source ## Alias for sbom-source
+
+.PHONY: sbom-all
+sbom-all: sbom-source sbom-container ## Generate all SBOMs (source + container)
+
 ##@ Dependencies
 
 deps: ## Download and verify dependencies

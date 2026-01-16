@@ -110,12 +110,24 @@ jobs:
       - name: Package Helm chart
         run: helm package charts/talos-operator
 
+      - name: Generate source code SBOM
+        run: make sbom-source SBOM_OUTPUT_DIR=.
+
       - name: Upload chart artifact
         uses: actions/upload-artifact@v6
         with:
           name: helm-chart
           path: talos-operator-*.tgz
           retention-days: 1
+
+      - name: Upload source SBOM artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: sbom-source
+          path: |
+            sbom-source.cdx.json
+            sbom-source.spdx.json
+          retention-days: 90
 
   # Merge multi-arch manifests and sign everything
   publish-and-sign:
@@ -169,10 +181,62 @@ jobs:
           helm push /tmp/helm/talos-operator-*.tgz oci://${{ env.HELM_REGISTRY }}
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4
 
       - name: Sign container image
         run: cosign sign --yes ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
 
       - name: Sign Helm chart
         run: cosign sign --yes ${{ env.HELM_REGISTRY }}/talos-operator:${{ needs.package-helm.outputs.version }}
+
+      - name: Checkout code for Makefile
+        uses: actions/checkout@v6
+
+      - name: Generate container SBOM
+        run: make sbom-container IMG=${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }} SBOM_OUTPUT_DIR=.
+
+      - name: Attach SBOM to container image
+        run: |
+          cosign attach sbom --sbom sbom-container.cdx.json ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: sbom-container
+          path: |
+            sbom-container.cdx.json
+            sbom-container.spdx.json
+          retention-days: 90
+
+  # Create GitHub Release with SBOMs
+  create-release:
+    name: Create GitHub Release
+    needs: [publish-and-sign, package-helm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download source SBOM
+        uses: actions/download-artifact@v7
+        with:
+          name: sbom-source
+          path: sbom
+
+      - name: Download container SBOM
+        uses: actions/download-artifact@v7
+        with:
+          name: sbom-container
+          path: sbom
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --generate-notes \
+            --latest \
+            sbom/sbom-source.cdx.json \
+            sbom/sbom-source.spdx.json \
+            sbom/sbom-container.cdx.json \
+            sbom/sbom-container.spdx.json
