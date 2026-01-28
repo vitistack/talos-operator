@@ -42,7 +42,7 @@ spec:
           taint: []
           version: "1.35.0"
           # Defaults to 1 replica
-          replicas: 1
+          replicas: 2
           # Defaults to "standard" machine class
           machineClass: medium
           autoscaling:
