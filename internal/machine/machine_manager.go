@@ -212,7 +212,7 @@ func (m *MachineManager) DeleteMachine(ctx context.Context, machine *vitistackv1
 // When existingMachines is provided, it uses smart index allocation to preserve existing machines
 // and fill gaps when adding new workers
 func (m *MachineManager) GenerateMachinesFromClusterWithContext(cluster *vitistackv1alpha1.KubernetesCluster, existingMachines []vitistackv1alpha1.Machine) ([]*vitistackv1alpha1.Machine, error) {
-	var machines []*vitistackv1alpha1.Machine
+	machines := make([]*vitistackv1alpha1.Machine, 0, 2)
 
 	// Extract basic information from cluster
 	clusterId := cluster.Spec.Cluster.ClusterId
