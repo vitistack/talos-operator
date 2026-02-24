@@ -53,7 +53,7 @@ When each node is upgraded, it goes through these stages:
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. DOWNLOAD NEW IMAGE                                          │
 │     Node downloads the new Talos installer image                │
-│     (e.g., ghcr.io/siderolabs/installer:v1.12.2)               │
+│     (e.g., ghcr.io/siderolabs/installer:v1.12.3)               │
 │     Duration: ~30-60 seconds (depends on network)               │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -242,13 +242,13 @@ This ensures compatibility between control plane and kubelet versions.
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. Operator detects new Talos version available                │
-│     → Sets: upgrade.vitistack.io/talos-available: "1.12.2"      │
+│     → Sets: upgrade.vitistack.io/talos-available: "1.12.3"      │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  2. User triggers Talos upgrade                                 │
-│     → Sets: upgrade.vitistack.io/talos-target: "1.12.2"         │
+│     → Sets: upgrade.vitistack.io/talos-target: "1.12.3"         │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -323,10 +323,10 @@ Look for:
 
 ```json
 {
-  "upgrade.vitistack.io/talos-available": "1.12.2",
+  "upgrade.vitistack.io/talos-available": "1.12.3",
   "upgrade.vitistack.io/talos-current": "1.11.6",
   "upgrade.vitistack.io/talos-status": "idle",
-  "upgrade.vitistack.io/talos-message": "Upgrade available: 1.11.6 → 1.12.2"
+  "upgrade.vitistack.io/talos-message": "Upgrade available: 1.11.6 → 1.12.3"
 }
 ```
 
@@ -336,7 +336,7 @@ Set the target version annotation to trigger the upgrade:
 
 ```bash
 kubectl annotate kubernetescluster my-cluster \
-  upgrade.vitistack.io/talos-target="1.12.2"
+  upgrade.vitistack.io/talos-target="1.12.3"
 ```
 
 Or using `kubectl patch`:
@@ -345,7 +345,7 @@ Or using `kubectl patch`:
 kubectl patch kubernetescluster my-cluster --type=merge -p '
 metadata:
   annotations:
-    upgrade.vitistack.io/talos-target: "1.12.2"
+    upgrade.vitistack.io/talos-target: "1.12.3"
 '
 ```
 
@@ -372,7 +372,7 @@ Once complete, verify the upgrade:
 
 ```bash
 kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upgrade\.vitistack\.io/talos-current}'
-# Output: 1.12.2
+# Output: 1.12.3
 
 kubectl get kubernetescluster my-cluster -o jsonpath='{.metadata.annotations.upgrade\.vitistack\.io/talos-status}'
 # Output: completed
@@ -470,7 +470,7 @@ The cluster phase will be `UpgradeFailed`.
 
    # Set it again to retry
    kubectl annotate kubernetescluster my-cluster \
-     upgrade.vitistack.io/talos-target="1.12.2"
+     upgrade.vitistack.io/talos-target="1.12.3"
    ```
 
 ## Upgrade Order and Best Practices
@@ -531,7 +531,7 @@ kubectl get kubernetescluster my-cluster -o yaml | grep -A5 "annotations:"
 
 # 2. Trigger Talos upgrade
 kubectl annotate kubernetescluster my-cluster \
-  upgrade.vitistack.io/talos-target="1.12.2"
+  upgrade.vitistack.io/talos-target="1.12.3"
 
 # 3. Wait for Talos upgrade to complete
 kubectl wait kubernetescluster my-cluster \

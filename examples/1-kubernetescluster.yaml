@@ -14,13 +14,9 @@ spec:
     workorder: "simple-workorder"
     zone: "az1"
     workspace: "simple-workspace"
-  # Empty spec will use defaults:
-  # - 1 control plane node
-  # - 1 worker nodes
   topology:
     version: "1.35.0"
     controlplane:
-      # Defaults to 1 replica
       replicas: 1
       version: "1.35.0"
       machineClass: small
@@ -32,18 +28,39 @@ spec:
       metadata:
         annotations:
           environment: development
-          region: west-trondelag
+          region: south
         labels:
           environment: development
-          region: west-trondelag
+          region: south
     workers:
       nodePools:
-        - name: wp
+        # - name: wp
+        #   taint: []
+        #   version: "1.35.0"
+        #   replicas: 2
+        #   machineClass: small
+        #   autoscaling:
+        #     enabled: false
+        #     minReplicas: 1
+        #     maxReplicas: 5
+        #     scalingRules:
+        #       - "cpu"
+        #   metadata:
+        #     annotations:
+        #       environment: development
+        #       region: south
+        #     labels:
+        #       environment: development
+        #       region: south
+        #   provider: kubevirt
+        #   storage:
+        #     - class: "standard"
+        #       path: "/var/lib/vitistack/kubevirt"
+        #       size: "20Gi"
+        - name: wp2
           taint: []
           version: "1.35.0"
-          # Defaults to 1 replica
           replicas: 2
-          # Defaults to "standard" machine class
           machineClass: medium
           autoscaling:
             enabled: false
@@ -54,37 +71,12 @@ spec:
           metadata:
             annotations:
               environment: development
-              region: west-trondelag
+              region: south
             labels:
               environment: development
-              region: west-trondelag
+              region: south
           provider: kubevirt
           storage:
             - class: "standard"
               path: "/var/lib/vitistack/kubevirt"
               size: "20Gi"
-        # - name: wp2
-        #   taint: []
-        #   version: "1.35.0"
-        #   # Defaults to 1 replica
-        #   replicas: 1
-        #   # Defaults to "standard" machine class
-        #   machineClass: medium
-        #   autoscaling:
-        #     enabled: false
-        #     minReplicas: 1
-        #     maxReplicas: 5
-        #     scalingRules:
-        #       - "cpu"
-        #   metadata:
-        #     annotations:
-        #       environment: development
-        #       region: west-trondelag
-        #     labels:
-        #       environment: development
-        #       region: west-trondelag
-        #   provider: kubevirt
-        #   storage:
-        #     - class: "standard"
-        #       path: "/var/lib/vitistack/kubevirt"
-        #       size: "20Gi"

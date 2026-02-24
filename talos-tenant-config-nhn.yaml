@@ -1,0 +1,127 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: talos-tenant-config-nhn
+data:
+  config.yaml: |
+    machine:
+      sysctls:
+        user.max_user_namespaces: "11255"
+      network:
+        nameservers:
+          - 10.246.196.76
+          - 10.245.248.76
+      time:
+        disabled: false
+        servers:
+          - ntp.nhn.no
+        bootTimeout: 2m0s
+      kubelet:
+        extraArgs:
+          rotate-server-certificates: true
+      features:
+        hostDNS:
+          enabled: true
+          forwardKubeDNSToHost: true
+        kubePrism:
+          enabled: true
+          port: 7445
+    cluster:
+      apiServer:
+        extraArgs:
+          oidc-client-id: clusterauth
+          oidc-groups-claim: groups
+          oidc-groups-prefix: "sso:"
+          oidc-issuer-url: https://auth.ror.nhn.no
+          oidc-signing-algs: RS512
+          oidc-username-claim: email
+          oidc-username-prefix: "sso:"
+          oidc-required-claim: clusterID=#CLUSTERID#
+        admissionControl:
+          - name: PodSecurity
+            configuration:
+              exemptions:
+                namespaces:
+                  - argocd
+                  - falco
+      network:
+        cni:
+          name: custom
+          urls:
+            - https://helsegitlab.nhn.no/ossplattformen/bootstrap/-/raw/main/cni/cilium/cilium-vxlan-1-18-6.yaml
+        podSubnets:
+          - 100.124.0.0/16
+          - 2001:db8:124::/56
+        serviceSubnets:
+          - 100.120.0.0/16
+          - 2001:db8:120::/112
+      proxy:
+        disabled: true
+      discovery:
+        enabled: false
+      extraManifests:
+        - https://raw.githubusercontent.com/alex1989hu/kubelet-serving-cert-approver/main/deploy/standalone-install.yaml
+        - https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+        - https://helsegitlab.nhn.no/ossplattformen/bootstrap/-/raw/main/guestCluster/nhn-container-admin.yaml
+        - https://helsegitlab.nhn.no/ossplattformen/clusterbootstrap/-/raw/master/manifests/argocdinstaller.yaml
+        - https://helsegitlab.nhn.no/ossplattformen/clusterbootstrap/-/raw/master/manifests/argocdtemplated.yaml
+        - https://helsegitlab.nhn.no/ossplattformen/clusterbootstrap/-/raw/master/manifests/toolinginstaller.yaml
+      inlineManifests:
+        - name: splunk-secret-bootstrap # Name of the manifest.
+          contents: |-
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: splunk-secret-boostrap
+              namespace: cluster-install
+            stringData:
+              splunkTest: b18f770d-6d97-4e9f-8f2f-b8c6519e87a8
+              splunkProd: 3e8fd440-30cd-418a-b928-8737ec46e1a1
+            type: Opaque
+        - name: trivy-secret-bootstrap
+          contents: |-
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: trivy-operator-trivy-config
+              namespace: trivy-system
+            data:
+              trivy.serverToken: bllYZjI2OXFGTkhXaHp5YktoZ0tTZkdiZTlIQmxWUFdiWVpSWXBBSFl4WVE4ZVowTUxJVGFHMmVqUjVBdGxEWQ==
+            type: Opaque
+        - name: slack-secret-bootstrap
+          contents: |-
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: slack-config-tooling
+              namespace: prometheus-operator
+            data:
+              apiSecret: aHR0cHM6Ly9ob29rcy5zbGFjay5jb20vc2VydmljZXMvVEY1Uk5VVE1XL0IwNUJDSEFFSlIxL2xlU3JYRWFXdTl6RzYzd050SFVnUzlxVAo=
+            type: Opaque
+        - name: argocd-repo-secret-bootstrap
+          contents: |-
+            apiVersion: v1
+            kind: Secret
+            stringData:
+              password: fuECWhE4TpxLC7MN
+              url: "https://helsegitlab.nhn.no/containerplattformen/"
+              username: argocdsdi
+            metadata:
+              name: argocd-repo-creds-helsegitlab-sdi-creds
+              namespace: argocd
+              labels:
+                argocd.argoproj.io/secret-type: repo-creds
+            type: Opaque
+        - name: demo-roleBinding
+          contents: |-
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRoleBinding
+            metadata:
+              name: nhn:container:admin:r-nhn-container-demo
+            roleRef:
+              apiGroup: rbac.authorization.k8s.io
+              kind: ClusterRole
+              name: cluster-admin
+            subjects:
+            - kind: Group
+              name: sso:R-NHN-ROR-Developer@nhn.no

@@ -18,11 +18,11 @@ spec:
   # - 1 control plane node
   # - 1 worker nodes
   topology:
-    version: "1.34.3"
+    version: "1.35.0"
     controlplane:
       # Defaults to 1 replica
-      replicas: 3
-      version: "1.34.3"
+      replicas: 1
+      version: "1.35.0"
       machineClass: small
       provider: kubevirt
       storage:
@@ -40,7 +40,7 @@ spec:
       nodePools:
         - name: wp
           taint: []
-          version: "1.34.3"
+          version: "1.35.0"
           # Defaults to 1 replica
           replicas: 2
           # Defaults to "standard" machine class

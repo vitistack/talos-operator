@@ -126,11 +126,6 @@ func (t *TalosManager) loadNewNodeConfigContext(ctx context.Context, cluster *vi
 		return nil, fmt.Errorf("failed to load talos artifacts for new node configuration: %w", err)
 	}
 
-	tenantOverrides, err := t.loadTenantOverrides(ctx, cluster)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load tenant overrides: %w", err)
-	}
-
 	// Determine endpoint IP based on endpoint mode
 	endpointIP, err := t.getEndpointIPForNewNodes(ctx, cluster)
 	if err != nil {
@@ -138,9 +133,8 @@ func (t *TalosManager) loadNewNodeConfigContext(ctx context.Context, cluster *vi
 	}
 
 	return &newNodeConfigContext{
-		clientConfig:    clientConfig,
-		tenantOverrides: tenantOverrides,
-		endpointIP:      endpointIP,
+		clientConfig: clientConfig,
+		endpointIP:   endpointIP,
 	}, nil
 }
 
