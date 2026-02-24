@@ -302,8 +302,7 @@ func (s *TalosConfigService) PrepareNodeConfig(
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	roleYAML []byte,
 	installDisk string,
-	m *vitistackv1alpha1.Machine,
-	tenantOverrides map[string]any) ([]byte, error) {
+	m *vitistackv1alpha1.Machine) ([]byte, error) {
 	// Get the version adapter for current Talos version
 	adapter := talosversion.GetCurrentTalosVersionAdapter()
 
@@ -340,12 +339,9 @@ func (s *TalosConfigService) PrepareNodeConfig(
 		patches = append(patches, annotationsPatch)
 	}
 
-	// NOTE: tenantOverrides are intentionally NOT applied here.
-	// They are already applied during bundle generation in GenerateTalosConfigBundle()
-	// via bundle.WithPatch(). Applying them again here would cause duplicate list entries
+	// NOTE: tenant patches are applied during bundle generation in GenerateTalosConfigBundle()
+	// via bundle.WithPatch(). They are NOT applied here to avoid duplicate list entries
 	// (e.g., duplicate namespaces in admissionControl.exemptions).
-	// The tenantOverrides parameter is kept for backward compatibility but is ignored.
-	_ = tenantOverrides // Explicitly mark as intentionally unused
 
 	// Load all patches using configpatcher
 	loadedPatches, err := configpatcher.LoadPatches(patches)

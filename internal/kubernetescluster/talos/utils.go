@@ -28,9 +28,8 @@ type nodeGroupConfig struct {
 
 // newNodeConfigContext holds configuration context for adding new nodes
 type newNodeConfigContext struct {
-	clientConfig    *clientconfig.Config
-	tenantOverrides map[string]any
-	endpointIP      string
+	clientConfig *clientconfig.Config
+	endpointIP   string
 }
 
 // filterNonControlPlanes returns machines that are not control planes

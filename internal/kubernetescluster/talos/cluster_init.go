@@ -11,7 +11,6 @@ import (
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
-	yaml "gopkg.in/yaml.v3"
 )
 
 // initializeTalosCluster handles the staged initialization of a Talos cluster.
@@ -136,7 +135,6 @@ type clusterInitPrep struct {
 	workers         []*vitistackv1alpha1.Machine
 	controlPlaneIPs []string
 	endpointIPs     []string
-	tenantOverrides map[string]any
 	tenantPatches   []string
 }
 
@@ -201,20 +199,10 @@ func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster
 	_ = t.statusManager.SetPhase(ctx, cluster, "ControlPlaneIPsPending")
 	_ = t.statusManager.SetCondition(ctx, cluster, "", "True", "Generated", "Talos client and role configs generated")
 
-	// Load tenant overrides
-	tenantOverrides, err := t.loadTenantOverrides(ctx, cluster)
+	// Load tenant patches (supports multi-doc YAML from ConfigMap)
+	tenantPatches, err := t.loadTenantPatches(ctx, cluster)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load tenant overrides: %w", err)
-	}
-
-	// Convert tenant overrides to YAML patches
-	var tenantPatches []string
-	if len(tenantOverrides) > 0 {
-		tenantYAML, err := yaml.Marshal(tenantOverrides)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal tenant overrides: %w", err)
-		}
-		tenantPatches = []string{string(tenantYAML)}
+		return nil, fmt.Errorf("failed to load tenant patches: %w", err)
 	}
 
 	return &clusterInitPrep{
@@ -223,7 +211,6 @@ func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster
 		workers:         workers,
 		controlPlaneIPs: controlPlaneIPs,
 		endpointIPs:     endpointIPs,
-		tenantOverrides: tenantOverrides,
 		tenantPatches:   tenantPatches,
 	}, nil
 }
@@ -271,7 +258,7 @@ func (t *TalosManager) stageApplyFirstControlPlane(
 	_ = t.statusManager.SetPhase(ctx, cluster, "ConfiguringFirstControlPlane")
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "Applying", "Applying config to first control plane")
 
-	if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{firstControlPlane}, insecure, prep.tenantOverrides, prep.endpointIPs[0]); err != nil {
+	if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{firstControlPlane}, insecure, prep.endpointIPs[0]); err != nil {
 		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "ApplyError", err.Error())
 		return fmt.Errorf("failed to apply config to first control plane: %w", err)
 	}
@@ -431,7 +418,7 @@ func (t *TalosManager) stageApplyRemainingControlPlanes(
 		return nil
 	}
 
-	if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, remainingControlPlanes, true, prep.tenantOverrides, prep.endpointIPs[0], &nodeGroupConfig{
+	if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, remainingControlPlanes, true, prep.endpointIPs[0], &nodeGroupConfig{
 		stageNum:      3,
 		nodeType:      "control plane",
 		phase:         "ConfiguringRemainingControlPlanes",
@@ -515,7 +502,7 @@ func (t *TalosManager) stageApplyWorkers(
 		return nil
 	}
 
-	if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, workers, true, prep.tenantOverrides, prep.endpointIPs[0], &nodeGroupConfig{
+	if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, workers, true, prep.endpointIPs[0], &nodeGroupConfig{
 		stageNum:      4,
 		nodeType:      "worker",
 		phase:         "ConfiguringWorkers",

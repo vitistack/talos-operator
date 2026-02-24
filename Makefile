@@ -72,6 +72,10 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+.PHONY: fix
+fix: ## Run go fix against code.
+	go fix ./...
+
 .PHONY: test-setup
 test-setup: manifests generate fmt vet setup-envtest ## Set up the environment for testing.
 

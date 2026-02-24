@@ -204,8 +204,12 @@ func (t *TalosManager) determineControlPlaneEndpoints(ctx context.Context, clust
 	return t.endpointService.DetermineControlPlaneEndpoints(ctx, cluster, controlPlaneIPs)
 }
 
-// loadTenantOverrides loads tenant-specific configuration overrides from a ConfigMap
-func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (map[string]any, error) {
+// loadTenantPatches loads tenant-specific configuration patches from a ConfigMap.
+// The ConfigMap data key may contain multiple YAML documents separated by "---".
+// Each document is returned as a separate patch string so that configpatcher can
+// handle both legacy single-doc (machine/cluster) and multi-doc Talos config
+// documents (e.g. v1alpha1 HostnameConfig, NetworkConfig, etc.).
+func (t *TalosManager) loadTenantPatches(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) ([]string, error) {
 	name := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAME))
 	if name == "" {
 		return nil, nil
@@ -224,7 +228,7 @@ func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitista
 	cm := &corev1.ConfigMap{}
 	if err := t.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cm); err != nil {
 		if apierrors.IsNotFound(err) {
-			vlog.Info(fmt.Sprintf("Tenant overrides ConfigMap %s/%s not found, skipping overrides", namespace, name))
+			vlog.Info(fmt.Sprintf("Tenant overrides ConfigMap %s/%s not found, skipping tenant patches", namespace, name))
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to read tenant overrides ConfigMap %s/%s: %w", namespace, name, err)
@@ -232,17 +236,45 @@ func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitista
 
 	raw, ok := cm.Data[dataKey]
 	if !ok || strings.TrimSpace(raw) == "" {
-		vlog.Warn(fmt.Sprintf("Tenant overrides ConfigMap %s/%s missing data key %s, skipping overrides", namespace, name, dataKey))
+		vlog.Warn(fmt.Sprintf("Tenant overrides ConfigMap %s/%s missing data key %s, skipping tenant patches", namespace, name, dataKey))
 		return nil, nil
 	}
 
 	replaced := strings.ReplaceAll(raw, "#CLUSTERID#", cluster.Spec.Cluster.ClusterId)
-	overrides := map[string]any{}
-	if err := yaml.Unmarshal([]byte(replaced), &overrides); err != nil {
-		return nil, fmt.Errorf("failed to parse tenant overrides from ConfigMap %s/%s key %s: %w", namespace, name, dataKey, err)
+
+	// Split multi-doc YAML into individual documents
+	patches := splitYAMLDocuments(replaced)
+	if len(patches) == 0 {
+		return nil, nil
 	}
 
-	return overrides, nil
+	// Validate each document is valid YAML
+	for i, patch := range patches {
+		var doc map[string]any
+		if err := yaml.Unmarshal([]byte(patch), &doc); err != nil {
+			return nil, fmt.Errorf("failed to parse tenant patch document %d from ConfigMap %s/%s key %s: %w", i+1, namespace, name, dataKey, err)
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("Loaded %d tenant patch document(s) from ConfigMap %s/%s", len(patches), namespace, name))
+	return patches, nil
+}
+
+// splitYAMLDocuments splits a multi-document YAML string (separated by "---")
+// into individual document strings, discarding empty documents.
+func splitYAMLDocuments(raw string) []string {
+	docs := strings.Split(raw, "\n---")
+	var result []string
+	for _, doc := range docs {
+		trimmed := strings.TrimSpace(doc)
+		// Skip separators that are just "---" with optional whitespace
+		trimmed = strings.TrimPrefix(trimmed, "---")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 // applyPerNodeConfiguration applies Talos configuration to a set of machines
@@ -251,7 +283,6 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 	clientConfig *clientconfig.Config,
 	machines []*vitistackv1alpha1.Machine,
 	insecure bool,
-	tenantOverrides map[string]any,
 	endpointIP string) error {
 	// Load role templates from persistent Secret
 	secret, err := t.secretService.GetTalosSecret(ctx, cluster)
@@ -292,7 +323,7 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 
 		// Select install disk and prepare configuration
 		installDisk := t.configService.SelectInstallDisk(m)
-		nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides)
+		nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m)
 		if err != nil {
 			return fmt.Errorf("failed to prepare config for node %s: %w", m.Name, err)
 		}
@@ -319,7 +350,6 @@ func (t *TalosManager) applyConfigToMachineGroup(
 	clientConfig *clientconfig.Config,
 	machines []*vitistackv1alpha1.Machine,
 	insecure bool,
-	tenantOverrides map[string]any,
 	endpointIP string,
 	grpCfg *nodeGroupConfig,
 ) error {
@@ -329,7 +359,7 @@ func (t *TalosManager) applyConfigToMachineGroup(
 		_ = t.statusManager.SetCondition(ctx, cluster, grpCfg.conditionName, "False", "Applying", fmt.Sprintf("Applying config to %ss", grpCfg.nodeType))
 
 		for _, m := range machines {
-			if err := t.applyConfigToSingleMachine(ctx, cluster, clientConfig, m, insecure, tenantOverrides, endpointIP, grpCfg); err != nil {
+			if err := t.applyConfigToSingleMachine(ctx, cluster, clientConfig, m, insecure, endpointIP, grpCfg); err != nil {
 				if grpCfg.stopOnError {
 					return err
 				}
@@ -356,7 +386,6 @@ func (t *TalosManager) applyConfigToSingleMachine(
 	clientConfig *clientconfig.Config,
 	m *vitistackv1alpha1.Machine,
 	insecure bool,
-	tenantOverrides map[string]any,
 	endpointIP string,
 	grpCfg *nodeGroupConfig,
 ) error {
@@ -372,7 +401,7 @@ func (t *TalosManager) applyConfigToSingleMachine(
 	}
 
 	vlog.Info(fmt.Sprintf("Applying config to %s: node=%s ip=%s", grpCfg.nodeType, m.Name, nodeIP))
-	if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{m}, insecure, tenantOverrides, endpointIP); err != nil {
+	if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{m}, insecure, endpointIP); err != nil {
 		_ = t.statusManager.SetCondition(ctx, cluster, grpCfg.conditionName, "False", "ApplyError", fmt.Sprintf("Failed on node %s: %s", m.Name, err.Error()))
 		vlog.Error(fmt.Sprintf("Failed to apply config to %s %s", grpCfg.nodeType, m.Name), err)
 		return fmt.Errorf("failed to apply config to %s %s: %w", grpCfg.nodeType, m.Name, err)
@@ -464,7 +493,7 @@ func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv
 
 	vlog.Info(fmt.Sprintf("Applying config to new %s: node=%s ip=%s", nodeType, node.Name, ip))
 	// Use insecure mode for new nodes - they don't have the cluster CA yet
-	if err := t.applyPerNodeConfiguration(ctx, cluster, configCtx.clientConfig, []*vitistackv1alpha1.Machine{node}, true, configCtx.tenantOverrides, configCtx.endpointIP); err != nil {
+	if err := t.applyPerNodeConfiguration(ctx, cluster, configCtx.clientConfig, []*vitistackv1alpha1.Machine{node}, true, configCtx.endpointIP); err != nil {
 		return fmt.Errorf("failed to apply config: %w", err)
 	}
 	if err := t.addConfiguredNode(ctx, cluster, node.Name); err != nil {

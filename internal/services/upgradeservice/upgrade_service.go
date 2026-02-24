@@ -633,6 +633,10 @@ func (s *UpgradeService) RegenerateMachineConfigsAfterUpgrade(
 }
 
 // loadTenantPatches loads tenant configuration patches from the ConfigMap.
+// The ConfigMap data key may contain multiple YAML documents separated by "---".
+// Each document is returned as a separate patch string so that configpatcher can
+// handle both legacy single-doc (machine/cluster) and multi-doc Talos config
+// documents (e.g. v1alpha1 HostnameConfig, NetworkConfig, etc.).
 // Returns nil if no ConfigMap is configured or if the ConfigMap doesn't exist.
 func (s *UpgradeService) loadTenantPatches(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) ([]string, error) {
 	name := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAME))
@@ -668,20 +672,39 @@ func (s *UpgradeService) loadTenantPatches(ctx context.Context, cluster *vitista
 	// Replace #CLUSTERID# placeholder with actual cluster ID
 	replaced := strings.ReplaceAll(raw, "#CLUSTERID#", cluster.Spec.Cluster.ClusterId)
 
-	// Validate that it's valid YAML
-	var overrides map[string]any
-	if err := yaml.Unmarshal([]byte(replaced), &overrides); err != nil {
-		return nil, fmt.Errorf("failed to parse tenant patches from ConfigMap %s/%s key %s: %w", namespace, name, dataKey, err)
+	// Split multi-doc YAML into individual documents
+	patches := splitYAMLDocuments(replaced)
+	if len(patches) == 0 {
+		return nil, nil
 	}
 
-	// Convert back to YAML string for the patch
-	patchYAML, err := yaml.Marshal(overrides)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal tenant patches: %w", err)
+	// Validate each document is valid YAML
+	for i, patch := range patches {
+		var doc map[string]any
+		if err := yaml.Unmarshal([]byte(patch), &doc); err != nil {
+			return nil, fmt.Errorf("failed to parse tenant patch document %d from ConfigMap %s/%s key %s: %w", i+1, namespace, name, dataKey, err)
+		}
 	}
 
-	vlog.Info(fmt.Sprintf("Loaded tenant patches from ConfigMap %s/%s", namespace, name))
-	return []string{string(patchYAML)}, nil
+	vlog.Info(fmt.Sprintf("Loaded %d tenant patch document(s) from ConfigMap %s/%s", len(patches), namespace, name))
+	return patches, nil
+}
+
+// splitYAMLDocuments splits a multi-document YAML string (separated by "---")
+// into individual document strings, discarding empty documents.
+func splitYAMLDocuments(raw string) []string {
+	docs := strings.Split(raw, "\n---")
+	var result []string
+	for _, doc := range docs {
+		trimmed := strings.TrimSpace(doc)
+		// Skip separators that are just "---" with optional whitespace
+		trimmed = strings.TrimPrefix(trimmed, "---")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }
 
 // FailTalosUpgrade marks a failed Talos upgrade
