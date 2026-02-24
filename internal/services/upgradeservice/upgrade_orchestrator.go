@@ -3,6 +3,7 @@ package upgradeservice
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -318,12 +319,7 @@ func (o *UpgradeOrchestrator) checkAllNodesReadyAndUncordon(
 
 // isNodeSkipped checks if a node was skipped during upgrade
 func (o *UpgradeOrchestrator) isNodeSkipped(nodeName string, skippedNodes []string) bool {
-	for _, skipped := range skippedNodes {
-		if skipped == nodeName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(skippedNodes, nodeName)
 }
 
 // isNodeUpgradeInitiated checks if a node's upgrade was initiated

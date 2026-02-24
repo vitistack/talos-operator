@@ -376,12 +376,12 @@ func (s *TalosConfigService) buildVMCustomizationPatch(installImage string) stri
 	var patch strings.Builder
 	patch.WriteString("machine:\n  install:\n")
 	if installImage != "" {
-		patch.WriteString(fmt.Sprintf("    image: %s\n", installImage))
+		fmt.Fprintf(&patch, "    image: %s\n", installImage)
 	}
 	if len(extraKernelArgs) > 0 {
 		patch.WriteString("    extraKernelArgs:\n")
 		for _, arg := range extraKernelArgs {
-			patch.WriteString(fmt.Sprintf("      - %s\n", arg))
+			fmt.Fprintf(&patch, "      - %s\n", arg)
 		}
 	}
 	return patch.String()
@@ -432,7 +432,7 @@ func (s *TalosConfigService) buildNodeAnnotationsPatch(cluster *vitistackv1alpha
 	var patch strings.Builder
 	patch.WriteString("machine:\n  nodeAnnotations:\n")
 	for key, value := range annotations {
-		patch.WriteString(fmt.Sprintf("    %s: %q\n", key, value))
+		fmt.Fprintf(&patch, "    %s: %q\n", key, value)
 	}
 	return patch.String()
 }

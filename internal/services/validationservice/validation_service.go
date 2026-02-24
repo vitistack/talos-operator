@@ -2,6 +2,7 @@ package validationservice
 
 import (
 	"fmt"
+	"strings"
 
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 )
@@ -34,11 +35,12 @@ func (e ValidationErrors) Error() string {
 	if len(e) == 1 {
 		return e[0].Error()
 	}
-	msg := "multiple validation errors:"
+	var msg strings.Builder
+	msg.WriteString("multiple validation errors:")
 	for _, err := range e {
-		msg += "\n  - " + err.Error()
+		msg.WriteString("\n  - " + err.Error())
 	}
-	return msg
+	return msg.String()
 }
 
 // ValidateKubernetesCluster validates a KubernetesCluster resource

@@ -42,8 +42,8 @@ type NodeUpgradeState struct {
 	UpgradeCompleted bool      `json:"upgradeCompleted"` // Version verified
 	NodeReady        bool      `json:"nodeReady"`        // Kubernetes Ready condition
 	Error            string    `json:"error,omitempty"`  // Error message if failed
-	InitiatedAt      time.Time `json:"initiatedAt,omitempty"`
-	CompletedAt      time.Time `json:"completedAt,omitempty"`
+	InitiatedAt      time.Time `json:"initiatedAt"`
+	CompletedAt      time.Time `json:"completedAt"`
 }
 
 // ClusterUpgradeState tracks the overall upgrade state for a cluster
@@ -64,12 +64,12 @@ type ClusterUpgradeState struct {
 	WorkerCount       int                `json:"workerCount"`
 
 	// Timestamps
-	StartedAt     time.Time `json:"startedAt,omitempty"`
-	CompletedAt   time.Time `json:"completedAt,omitempty"`
+	StartedAt     time.Time `json:"startedAt"`
+	CompletedAt   time.Time `json:"completedAt"`
 	LastUpdatedAt time.Time `json:"lastUpdatedAt"`
 
 	// Settling time tracking (wait after all CPs ready before workers)
-	ControlPlanesReadyAt time.Time `json:"controlPlanesReadyAt,omitempty"`
+	ControlPlanesReadyAt time.Time `json:"controlPlanesReadyAt"`
 
 	// Error tracking
 	FailedNodeName string `json:"failedNodeName,omitempty"`

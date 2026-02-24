@@ -246,7 +246,7 @@ func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *v
 
 	// Retry logic to handle concurrent modifications
 	maxRetries := 3
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		// Get fresh copy if retrying
 		if attempt > 0 {
 			freshKC := &vitistackv1alpha1.KubernetesCluster{}
@@ -325,7 +325,7 @@ func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vi
 // removeFinalizer removes the finalizer with retry logic
 func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, error) {
 	maxRetries := 3
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt := range maxRetries {
 		if attempt > 0 {
 			freshKC, err := r.getFreshCluster(ctx, kc)
 			if err != nil {

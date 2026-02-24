@@ -3,6 +3,7 @@ package talosstateservice
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -369,7 +370,7 @@ func (s *TalosStateService) StartUpgradeState(ctx context.Context, cluster *viti
 		secret.Data["upgrade_started_at"] = []byte(now)
 		secret.Data["upgrade_last_node"] = []byte("")
 		secret.Data["upgrade_nodes_done"] = []byte("0")
-		secret.Data["upgrade_nodes_total"] = []byte(fmt.Sprintf("%d", totalNodes))
+		secret.Data["upgrade_nodes_total"] = fmt.Appendf(nil, "%d", totalNodes)
 		// Clear node tracking lists for fresh upgrade
 		secret.Data["upgrade_upgraded_nodes"] = []byte("")
 		secret.Data["upgrade_failed_nodes"] = []byte("")
@@ -404,7 +405,7 @@ func (s *TalosStateService) UpdateUpgradeProgress(ctx context.Context, cluster *
 		}
 
 		secret.Data["upgrade_last_node"] = []byte(nodeName)
-		secret.Data["upgrade_nodes_done"] = []byte(fmt.Sprintf("%d", nodesDone))
+		secret.Data["upgrade_nodes_done"] = fmt.Appendf(nil, "%d", nodesDone)
 
 		err = s.secretService.UpdateTalosSecret(ctx, secret)
 		if err == nil {
@@ -440,10 +441,8 @@ func (s *TalosStateService) MarkNodeUpgraded(ctx context.Context, cluster *vitis
 		}
 
 		// Check if already in list
-		for _, n := range nodes {
-			if n == nodeName {
-				return nil // Already marked
-			}
+		if slices.Contains(nodes, nodeName) {
+			return nil // Already marked
 		}
 
 		nodes = append(nodes, nodeName)
@@ -451,7 +450,7 @@ func (s *TalosStateService) MarkNodeUpgraded(ctx context.Context, cluster *vitis
 
 		// Also update nodes done count
 		nodesDone := len(nodes)
-		secret.Data["upgrade_nodes_done"] = []byte(fmt.Sprintf("%d", nodesDone))
+		secret.Data["upgrade_nodes_done"] = fmt.Appendf(nil, "%d", nodesDone)
 
 		err = s.secretService.UpdateTalosSecret(ctx, secret)
 		if err == nil {
@@ -488,12 +487,10 @@ func (s *TalosStateService) MarkNodeFailed(ctx context.Context, cluster *vitista
 		}
 
 		// Check if already in list
-		for _, n := range nodes {
-			if n == nodeName {
-				// Update reason only
-				secret.Data["upgrade_failed_reason"] = []byte(reason)
-				return s.secretService.UpdateTalosSecret(ctx, secret)
-			}
+		if slices.Contains(nodes, nodeName) {
+			// Update reason only
+			secret.Data["upgrade_failed_reason"] = []byte(reason)
+			return s.secretService.UpdateTalosSecret(ctx, secret)
 		}
 
 		nodes = append(nodes, nodeName)
@@ -521,12 +518,7 @@ func (s *TalosStateService) IsNodeUpgraded(ctx context.Context, cluster *vitista
 	if err != nil {
 		return false
 	}
-	for _, n := range state.UpgradedNodes {
-		if n == nodeName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(state.UpgradedNodes, nodeName)
 }
 
 // IsNodeFailed checks if a node is in the failed list
@@ -535,12 +527,7 @@ func (s *TalosStateService) IsNodeFailed(ctx context.Context, cluster *vitistack
 	if err != nil {
 		return false
 	}
-	for _, n := range state.FailedNodes {
-		if n == nodeName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(state.FailedNodes, nodeName)
 }
 
 // ClearNodeFromFailed removes a node from the failed list (for retry)
@@ -858,12 +845,7 @@ func (s *TalosStateService) IsNodeConfigured(ctx context.Context, cluster *vitis
 	if err != nil {
 		return false
 	}
-	for _, n := range nodes {
-		if n == nodeName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(nodes, nodeName)
 }
 
 // AddConfiguredNode adds a node name to the list of configured nodes in the secret
@@ -885,10 +867,8 @@ func (s *TalosStateService) AddConfiguredNode(ctx context.Context, cluster *viti
 		}
 
 		// Check if already exists
-		for _, n := range nodes {
-			if n == nodeName {
-				return nil // Already configured
-			}
+		if slices.Contains(nodes, nodeName) {
+			return nil // Already configured
 		}
 
 		nodes = append(nodes, nodeName)

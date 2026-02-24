@@ -762,8 +762,8 @@ func (s *UpgradeService) ClearFailedNodesForRetry(ctx context.Context, cluster *
 
 	// Clear from secret
 	if s.stateService != nil {
-		nodes := strings.Split(state.FailedNodes, ",")
-		for _, node := range nodes {
+		nodes := strings.SplitSeq(state.FailedNodes, ",")
+		for node := range nodes {
 			if err := s.stateService.ClearNodeFromFailed(ctx, cluster, node); err != nil {
 				vlog.Warn(fmt.Sprintf("Failed to clear node %s from failed list: %v", node, err))
 			}

@@ -42,7 +42,7 @@ func (a *V1_11Adapter) BuildResolverPatch(nameservers []string) string {
 	_, _ = sb.WriteString("  network:\n")
 	_, _ = sb.WriteString("    nameservers:\n")
 	for _, ns := range nameservers {
-		_, _ = sb.WriteString(fmt.Sprintf("      - %s\n", ns))
+		_, _ = fmt.Fprintf(&sb, "      - %s\n", ns)
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
 }
@@ -51,15 +51,15 @@ func (a *V1_11Adapter) BuildTimePatch(servers []string, disabled bool, bootTimeo
 	var sb strings.Builder
 	_, _ = sb.WriteString("machine:\n")
 	_, _ = sb.WriteString("  time:\n")
-	_, _ = sb.WriteString(fmt.Sprintf("    disabled: %t\n", disabled))
+	_, _ = fmt.Fprintf(&sb, "    disabled: %t\n", disabled)
 	if len(servers) > 0 {
 		_, _ = sb.WriteString("    servers:\n")
 		for _, s := range servers {
-			_, _ = sb.WriteString(fmt.Sprintf("      - %s\n", s))
+			_, _ = fmt.Fprintf(&sb, "      - %s\n", s)
 		}
 	}
 	if bootTimeout != "" {
-		_, _ = sb.WriteString(fmt.Sprintf("    bootTimeout: %s\n", bootTimeout))
+		_, _ = fmt.Fprintf(&sb, "    bootTimeout: %s\n", bootTimeout)
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
 }

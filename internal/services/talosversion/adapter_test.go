@@ -1,6 +1,7 @@
 package talosversion
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -346,13 +347,7 @@ func TestListSupportedVersions(t *testing.T) {
 	// Check that expected versions are present
 	expected := []string{"1.11.x", "1.12.x", "1.13.x"}
 	for _, v := range expected {
-		found := false
-		for _, got := range versions {
-			if got == v {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(versions, v)
 		if !found {
 			t.Errorf("ListSupportedVersions() missing version %q", v)
 		}

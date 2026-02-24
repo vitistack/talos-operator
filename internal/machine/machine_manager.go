@@ -417,7 +417,7 @@ func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1
 	})
 
 	// Add existing machines that we want to keep
-	for i := 0; i < keepCount; i++ {
+	for i := range keepCount {
 		existing := existingForPool[i]
 		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks)
 		machines = append(machines, machine)
