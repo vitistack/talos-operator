@@ -382,8 +382,8 @@ func (s *UpgradeService) CheckForAvailableUpgrades(ctx context.Context, cluster 
 	}
 
 	// Get the operator's configured Talos version
-	operatorTalosVersion := strings.TrimPrefix(viper.GetString(consts.TALOS_VERSION), "v")
-	clusterTalosVersion := strings.TrimPrefix(state.TalosCurrent, "v")
+	operatorTalosVersion := consts.StripVersionPrefix(viper.GetString(consts.TALOS_VERSION))
+	clusterTalosVersion := consts.StripVersionPrefix(state.TalosCurrent)
 
 	// Compare versions using semver
 	operatorVer, err := semver.NewVersion(operatorTalosVersion)
@@ -406,8 +406,8 @@ func (s *UpgradeService) CheckForAvailableUpgrades(ctx context.Context, cluster 
 
 	// Check Kubernetes version - can be upgraded independently of Talos
 	if state.KubernetesCurrent != "" {
-		operatorK8sVersion := viper.GetString(consts.DEFAULT_KUBERNETES_VERSION)
-		clusterK8sVersion := state.KubernetesCurrent
+		operatorK8sVersion := consts.NormalizeKubernetesVersion(viper.GetString(consts.DEFAULT_KUBERNETES_VERSION))
+		clusterK8sVersion := consts.NormalizeKubernetesVersion(state.KubernetesCurrent)
 
 		operatorK8sVer, err := semver.NewVersion(operatorK8sVersion)
 		if err != nil {
@@ -913,12 +913,12 @@ func (s *UpgradeService) ValidateUpgradeTarget(currentVersion, targetVersion str
 	}
 
 	// Parse versions (strip 'v' prefix if present)
-	current, err := semver.NewVersion(strings.TrimPrefix(currentVersion, "v"))
+	current, err := semver.NewVersion(consts.StripVersionPrefix(currentVersion))
 	if err != nil {
 		return fmt.Errorf("invalid current version %s: %w", currentVersion, err)
 	}
 
-	target, err := semver.NewVersion(strings.TrimPrefix(targetVersion, "v"))
+	target, err := semver.NewVersion(consts.StripVersionPrefix(targetVersion))
 	if err != nil {
 		return fmt.Errorf("invalid target version %s: %w", targetVersion, err)
 	}
@@ -949,12 +949,12 @@ func (s *UpgradeService) ValidateKubernetesUpgradeTarget(currentVersion, targetV
 	}
 
 	// Parse versions (strip 'v' prefix if present)
-	current, err := semver.NewVersion(strings.TrimPrefix(currentVersion, "v"))
+	current, err := semver.NewVersion(consts.StripVersionPrefix(currentVersion))
 	if err != nil {
 		return fmt.Errorf("invalid current version %s: %w", currentVersion, err)
 	}
 
-	target, err := semver.NewVersion(strings.TrimPrefix(targetVersion, "v"))
+	target, err := semver.NewVersion(consts.StripVersionPrefix(targetVersion))
 	if err != nil {
 		return fmt.Errorf("invalid target version %s: %w", targetVersion, err)
 	}

@@ -222,7 +222,7 @@ func createDefaultKubernetesProvider(ctx context.Context) error {
 		Spec: vitistackv1alpha1.KubernetesProviderSpec{
 			ProviderType: TalosProviderType,
 			DisplayName:  "Talos Operator Provider",
-			Version:      viper.GetString(consts.DEFAULT_KUBERNETES_VERSION),
+			Version:      consts.NormalizeKubernetesVersion(viper.GetString(consts.DEFAULT_KUBERNETES_VERSION)),
 			Region:       region,
 		},
 	}

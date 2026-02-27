@@ -1,5 +1,7 @@
 package consts
 
+import "strings"
+
 var (
 	DEVELOPMENT                     = "DEVELOPMENT"
 	LOG_LEVEL                       = "LOG_LEVEL"
@@ -249,3 +251,29 @@ const (
 	// UpgradeStatusRollingBack indicates a rollback is in progress
 	UpgradeStatusRollingBack UpgradeStatus = "rolling-back"
 )
+
+// StripVersionPrefix removes any "v" prefix from a version string.
+// Accepts both "v1.35.0" and "1.35.0", always returns without prefix (e.g., "1.35.0").
+func StripVersionPrefix(version string) string {
+	return strings.TrimPrefix(version, "v")
+}
+
+// EnsureVersionPrefix ensures a version string has a "v" prefix.
+// Accepts both "v1.12.4" and "1.12.4", always returns with prefix (e.g., "v1.12.4").
+func EnsureVersionPrefix(version string) string {
+	return "v" + strings.TrimPrefix(version, "v")
+}
+
+// NormalizeKubernetesVersion normalizes a Kubernetes version string by removing any "v" prefix.
+// This matches the convention used by talosctl (e.g., "1.35.0" not "v1.35.0").
+// Accepts both "v1.35.0" and "1.35.0" as input.
+func NormalizeKubernetesVersion(version string) string {
+	return StripVersionPrefix(version)
+}
+
+// NormalizeTalosVersion normalizes a Talos version string by ensuring it has a "v" prefix.
+// This matches the convention used by talosctl (e.g., "v1.12.4" not "1.12.4").
+// Accepts both "v1.12.4" and "1.12.4" as input.
+func NormalizeTalosVersion(version string) string {
+	return EnsureVersionPrefix(version)
+}

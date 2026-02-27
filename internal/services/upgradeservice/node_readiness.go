@@ -253,7 +253,7 @@ func (c *NodeReadinessChecker) DrainNode(ctx context.Context, cluster *vitistack
 
 		// Delete the pod (eviction policy honored by PodDisruptionBudget)
 		err := targetClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
-			GracePeriodSeconds: int64Ptr(30),
+			GracePeriodSeconds: new(int64(30)),
 		})
 		if err != nil {
 			continue

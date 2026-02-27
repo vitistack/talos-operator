@@ -57,7 +57,7 @@ func getKubernetesVersion(cluster *vitistackv1alpha1.KubernetesCluster) string {
 		}
 	}
 
-	normalizedVersion := strings.TrimPrefix(version, "v")
+	normalizedVersion := consts.NormalizeKubernetesVersion(version)
 	vlog.Info(fmt.Sprintf("Using Kubernetes version %s (source: %s)", normalizedVersion, source))
 	return normalizedVersion
 }
@@ -70,7 +70,7 @@ func getTalosVersionContract() *config.VersionContract {
 		return config.TalosVersionCurrent
 	}
 
-	contract, err := config.ParseContractFromVersion(talosVersion)
+	contract, err := config.ParseContractFromVersion(consts.NormalizeTalosVersion(talosVersion))
 	if err != nil {
 		vlog.Warn(fmt.Sprintf("Failed to parse Talos version %q, using current: %v", talosVersion, err))
 		return config.TalosVersionCurrent
@@ -176,7 +176,7 @@ func (s *TalosConfigService) GenerateTalosConfigBundleWithSecrets(
 	// Use override if provided, otherwise read from cluster spec
 	var kubernetesVersion string
 	if kubernetesVersionOverride != "" {
-		kubernetesVersion = strings.TrimPrefix(kubernetesVersionOverride, "v")
+		kubernetesVersion = consts.NormalizeKubernetesVersion(kubernetesVersionOverride)
 		vlog.Info(fmt.Sprintf("Using Kubernetes version %s (source: override)", kubernetesVersion))
 	} else {
 		kubernetesVersion = getKubernetesVersion(cluster)
