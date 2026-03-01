@@ -327,10 +327,3 @@ func isCriticalPod(pod *corev1.Pod) bool {
 	}
 	return false
 }
-
-// int64Ptr returns a pointer to an int64.
-//
-//go:fix inline
-func int64Ptr(i int64) *int64 {
-	return new(i)
-}
