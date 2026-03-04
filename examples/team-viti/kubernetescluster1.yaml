@@ -1,31 +1,31 @@
 apiVersion: vitistack.io/v1alpha1
 kind: KubernetesCluster
 metadata:
-  name: t-test-001-4y8e
+  name: team-viti-001-sdj3
 spec:
   data:
-    clusterUid: "a30fbc8d-596f-48d0-8541-dbc23bca28a1"
-    clusterId: "t-test-001-4y8e"
+    clusterUid: "b74f880a-8a35-4f13-a70a-0dd53d708781"
+    clusterId: "team-viti-001-sdj3"
     provider: talos
     environment: dev
-    datacenter: test-south-az1
+    datacenter: no-south-az1
     project: simple-project
     region: south
     workorder: "simple-workorder"
     zone: "az1"
     workspace: "simple-workspace"
-    networkNamespaceName: t-test001
+    networkNamespaceName: team-viti
   topology:
     version: "1.35.0"
     controlplane:
       replicas: 1
       version: "1.35.0"
-      machineClass: small
+      machineClass: small # Should provide 4 vCPUs, 4 GiB RAM
       provider: kubevirt
       storage:
         - class: "standard"
           path: "/var/lib/vitistack/kubevirt"
-          size: "20Gi"
+          size: "20Gi" # Talos recommended for production
       metadata:
         annotations:
           environment: development
@@ -39,7 +39,7 @@ spec:
           taint: []
           version: "1.35.0"
           replicas: 2
-          machineClass: medium
+          machineClass: medium # Should provide 2 vCPUs, 2 GiB RAM
           autoscaling:
             enabled: false
             minReplicas: 1
@@ -57,27 +57,4 @@ spec:
           storage:
             - class: "standard"
               path: "/var/lib/vitistack/kubevirt"
-              size: "20Gi"
-        - name: wp2
-          taint: []
-          version: "1.35.0"
-          replicas: 1
-          machineClass: medium
-          autoscaling:
-            enabled: false
-            minReplicas: 1
-            maxReplicas: 5
-            scalingRules:
-              - "cpu"
-          metadata:
-            annotations:
-              environment: development
-              region: south
-            labels:
-              environment: development
-              region: south
-          provider: kubevirt
-          storage:
-            - class: "standard"
-              path: "/var/lib/vitistack/kubevirt"
-              size: "20Gi"
+              size: "20Gi" # Talos recommended for production

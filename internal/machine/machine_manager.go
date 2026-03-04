@@ -273,6 +273,9 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 				Provider:     vitistackv1alpha1.MachineProviderType(cluster.Spec.Topology.ControlPlane.Provider.String()),
 				Disks:        controlPlaneDisks,
 				OS:           machineOS,
+				Network: vitistackv1alpha1.MachineNetwork{
+					NetworkNamespaceName: cluster.Spec.Cluster.NetworkNamespaceName,
+				},
 				Tags: map[string]string{
 					"cluster": clusterId,
 					"role":    "control-plane",
@@ -330,7 +333,7 @@ func buildWorkerIndexContext(existingMachines []vitistackv1alpha1.Machine, clust
 }
 
 // createWorkerMachine creates a worker Machine object with the given parameters
-func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass string, provider vitistackv1alpha1.MachineProviderType, disks []vitistackv1alpha1.MachineSpecDisk) *vitistackv1alpha1.Machine {
+func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass string, provider vitistackv1alpha1.MachineProviderType, disks []vitistackv1alpha1.MachineSpecDisk, networkNamespaceName string) *vitistackv1alpha1.Machine {
 	// Get OS configuration based on boot image source setting
 	machineOS := getMachineOS()
 
@@ -356,6 +359,9 @@ func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass 
 			Provider:     provider,
 			Disks:        disks,
 			OS:           machineOS,
+			Network: vitistackv1alpha1.MachineNetwork{
+				NetworkNamespaceName: networkNamespaceName,
+			},
 			Tags: map[string]string{
 				"cluster":  clusterId,
 				"role":     "worker",
@@ -370,11 +376,13 @@ func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass 
 func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string, existingMachines []vitistackv1alpha1.Machine) []*vitistackv1alpha1.Machine {
 	var machines []*vitistackv1alpha1.Machine
 
+	networkNamespaceName := cluster.Spec.Cluster.NetworkNamespaceName
+
 	// Create worker nodes based on node pools if available
 	if len(cluster.Spec.Topology.Workers.NodePools) == 0 {
 		// Create default worker node if no node pools are specified
 		return []*vitistackv1alpha1.Machine{
-			createWorkerMachine(fmt.Sprintf("%s-wrk0", clusterId), namespace, clusterId, "", "medium", "", nil),
+			createWorkerMachine(fmt.Sprintf("%s-wrk0", clusterId), namespace, clusterId, "", "medium", "", nil, networkNamespaceName),
 		}
 	}
 
@@ -384,7 +392,7 @@ func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1a
 	// Process each nodepool
 	for idx := range cluster.Spec.Topology.Workers.NodePools {
 		nodePool := &cluster.Spec.Topology.Workers.NodePools[idx]
-		poolMachines := m.generateMachinesForNodePool(nodePool, clusterId, namespace, indexCtx)
+		poolMachines := m.generateMachinesForNodePool(nodePool, clusterId, namespace, indexCtx, networkNamespaceName)
 		machines = append(machines, poolMachines...)
 	}
 
@@ -392,7 +400,7 @@ func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1a
 }
 
 // generateMachinesForNodePool generates machines for a single nodepool
-func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1.KubernetesClusterNodePool, clusterId, namespace string, indexCtx *workerIndexContext) []*vitistackv1alpha1.Machine {
+func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1.KubernetesClusterNodePool, clusterId, namespace string, indexCtx *workerIndexContext, networkNamespaceName string) []*vitistackv1alpha1.Machine {
 	workerDisks := convertStorageToDisks(nodePool.Storage)
 	machineClass := nodePool.MachineClass
 	if machineClass == "" {
@@ -419,7 +427,7 @@ func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1
 	// Add existing machines that we want to keep
 	for i := range keepCount {
 		existing := existingForPool[i]
-		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks)
+		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName)
 		machines = append(machines, machine)
 	}
 
@@ -431,7 +439,7 @@ func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1
 		indexCtx.usedIndices[newIndex] = true
 
 		machineName := fmt.Sprintf("%s-wrk%d", clusterId, newIndex)
-		machine := createWorkerMachine(machineName, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks)
+		machine := createWorkerMachine(machineName, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName)
 		machines = append(machines, machine)
 	}
 

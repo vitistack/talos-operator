@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -23,6 +24,10 @@ import (
 	"github.com/vitistack/talos-operator/pkg/consts"
 	yaml "gopkg.in/yaml.v3"
 )
+
+// deprecationWarned tracks namespaces for which the deprecation warning has already been logged,
+// so we don't spam the logs on every reconcile loop.
+var deprecationWarned sync.Map
 
 type TalosConfigService struct{}
 
@@ -404,12 +409,22 @@ func (s *TalosConfigService) buildNodeAnnotationsPatch(cluster *vitistackv1alpha
 	networkNamespaceName := ""
 	infrastructure := ""
 
-	networknamespace, err := networknamespaceservice.FetchFirstNetworkNamespaceByNamespace(context.TODO(), cluster.GetNamespace())
-	if err != nil {
-		vlog.Warn(fmt.Sprintf("failed to fetch NetworkNamespaces for namespace %q: %v", cluster.GetNamespace(), err))
-	}
-	if networknamespace != nil {
-		networkNamespaceName = networknamespace.Name
+	// Use the explicit networkNamespaceName from the cluster spec if set
+	if cluster.Spec.Cluster.NetworkNamespaceName != "" {
+		networkNamespaceName = cluster.Spec.Cluster.NetworkNamespaceName
+	} else {
+		// Fallback: list NetworkNamespaces and use the first one (legacy behavior)
+		if _, alreadyWarned := deprecationWarned.LoadOrStore(cluster.GetNamespace(), true); !alreadyWarned {
+			vlog.Warn(fmt.Sprintf("NetworkNamespaceName not set on KubernetesCluster %q in namespace %q, falling back to listing NetworkNamespaces. "+
+				"Please set spec.data.networkNamespaceName on the KubernetesCluster resource.", cluster.Name, cluster.GetNamespace()))
+		}
+		networknamespace, err := networknamespaceservice.FetchFirstNetworkNamespaceByNamespace(context.TODO(), cluster.GetNamespace())
+		if err != nil {
+			vlog.Warn(fmt.Sprintf("failed to fetch NetworkNamespaces for namespace %q: %v", cluster.GetNamespace(), err))
+		}
+		if networknamespace != nil {
+			networkNamespaceName = networknamespace.Name
+		}
 	}
 
 	vitistack, err := vitistackservice.FetchVitistackByName(context.TODO(), viper.GetString(consts.VITISTACK_NAME))

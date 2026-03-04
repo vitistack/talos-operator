@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -15,6 +16,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// deprecationWarned tracks namespaces for which the deprecation warning has already been logged,
+// so we don't spam the logs on every reconcile loop.
+var deprecationWarned sync.Map
 
 // EndpointService handles VIP and endpoint management for Talos clusters
 type EndpointService struct {
@@ -76,7 +81,7 @@ func (s *EndpointService) getEndpointsNone(controlPlaneIPs []string) ([]string, 
 // getEndpointsNetworkConfiguration uses the NetworkNamespace's ControlPlaneVirtualSharedIP
 // to obtain load balancer IPs. This is the default and recommended mode.
 func (s *EndpointService) getEndpointsNetworkConfiguration(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
-	networkNamespace, err := s.findNetworkNamespace(ctx, cluster.GetNamespace())
+	networkNamespace, err := s.findNetworkNamespace(ctx, cluster.GetNamespace(), cluster.Spec.Cluster.NetworkNamespaceName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find network namespace: %w", err)
 	}
@@ -317,8 +322,24 @@ func (s *EndpointService) UpdateVIPPoolMembers(ctx context.Context, cluster *vit
 	return nil
 }
 
-// findNetworkNamespace finds the NetworkNamespace in the given namespace
-func (s *EndpointService) findNetworkNamespace(ctx context.Context, namespace string) (*vitistackv1alpha1.NetworkNamespace, error) {
+// findNetworkNamespace finds the NetworkNamespace in the given namespace.
+// If networkNamespaceName is set, it looks up that specific NetworkNamespace by name.
+// Otherwise, it falls back to listing all NetworkNamespaces and using the first one (legacy behavior).
+func (s *EndpointService) findNetworkNamespace(ctx context.Context, namespace, networkNamespaceName string) (*vitistackv1alpha1.NetworkNamespace, error) {
+	// If a specific NetworkNamespace name is provided, look it up directly
+	if networkNamespaceName != "" {
+		nn := &vitistackv1alpha1.NetworkNamespace{}
+		if err := s.Get(ctx, client.ObjectKey{Name: networkNamespaceName, Namespace: namespace}, nn); err != nil {
+			return nil, fmt.Errorf("failed to get NetworkNamespace %q in namespace %q: %w", networkNamespaceName, namespace, err)
+		}
+		return nn, nil
+	}
+
+	// Fallback: list all NetworkNamespaces and use the first one (legacy behavior)
+	if _, alreadyWarned := deprecationWarned.LoadOrStore(namespace, true); !alreadyWarned {
+		vlog.Warn(fmt.Sprintf("NetworkNamespaceName not set on KubernetesCluster in namespace %q, falling back to listing NetworkNamespaces. "+
+			"Please set spec.data.networkNamespaceName on the KubernetesCluster resource.", namespace))
+	}
 	list := &vitistackv1alpha1.NetworkNamespaceList{}
 	if err := s.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil, err

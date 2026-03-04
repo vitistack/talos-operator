@@ -239,6 +239,8 @@ func (r *KubernetesClusterReconciler) isTalosProvider(kc *vitistackv1alpha1.Kube
 }
 
 // ensureFinalizer adds the finalizer if not present. Returns requeue=true when an update was made.
+// Uses Patch instead of Update to avoid triggering full spec validation on existing resources
+// that may not yet conform to newer CRD field requirements (e.g. networkNamespaceName).
 func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (bool, error) {
 	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
 		return false, nil
@@ -259,8 +261,9 @@ func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *v
 			}
 		}
 
+		patch := client.MergeFrom(kc.DeepCopy())
 		controllerutil.AddFinalizer(kc, KubernetesClusterFinalizer)
-		err := r.Update(ctx, kc)
+		err := r.Patch(ctx, kc, patch)
 		if err == nil {
 			return true, nil
 		}
@@ -322,7 +325,9 @@ func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vi
 	return nil
 }
 
-// removeFinalizer removes the finalizer with retry logic
+// removeFinalizer removes the finalizer with retry logic.
+// Uses Patch instead of Update to avoid triggering full spec validation on existing resources
+// that may not yet conform to newer CRD field requirements (e.g. networkNamespaceName).
 func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, error) {
 	maxRetries := 3
 	for attempt := range maxRetries {
@@ -338,8 +343,9 @@ func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *v
 			kc = freshKC
 		}
 
+		patch := client.MergeFrom(kc.DeepCopy())
 		controllerutil.RemoveFinalizer(kc, KubernetesClusterFinalizer)
-		err := r.Update(ctx, kc)
+		err := r.Patch(ctx, kc, patch)
 		if err == nil {
 			vlog.Info("Successfully deleted KubernetesCluster: cluster=" + kc.GetName())
 			return ctrl.Result{}, nil
