@@ -239,8 +239,6 @@ func (r *KubernetesClusterReconciler) isTalosProvider(kc *vitistackv1alpha1.Kube
 }
 
 // ensureFinalizer adds the finalizer if not present. Returns requeue=true when an update was made.
-// Uses Patch instead of Update to avoid triggering full spec validation on existing resources
-// that may not yet conform to newer CRD field requirements (e.g. networkNamespaceName).
 func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (bool, error) {
 	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
 		return false, nil
@@ -261,9 +259,8 @@ func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *v
 			}
 		}
 
-		patch := client.MergeFrom(kc.DeepCopy())
 		controllerutil.AddFinalizer(kc, KubernetesClusterFinalizer)
-		err := r.Patch(ctx, kc, patch)
+		err := r.Update(ctx, kc)
 		if err == nil {
 			return true, nil
 		}
