@@ -9,7 +9,7 @@ require (
 	github.com/cosi-project/runtime v1.14.0
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
-	github.com/siderolabs/talos/pkg/machinery v1.12.4
+	github.com/siderolabs/talos/pkg/machinery v1.12.5
 	github.com/spf13/viper v1.21.0
 	github.com/vitistack/common v0.8.45
 	gopkg.in/yaml.v3 v3.0.1
