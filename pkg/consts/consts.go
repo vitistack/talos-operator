@@ -259,7 +259,7 @@ func StripVersionPrefix(version string) string {
 }
 
 // EnsureVersionPrefix ensures a version string has a "v" prefix.
-// Accepts both "v1.12.4" and "1.12.4", always returns with prefix (e.g., "v1.12.4").
+// Accepts both "v1.25.5" and "1.25.5", always returns with prefix (e.g., "v1.25.5").
 func EnsureVersionPrefix(version string) string {
 	return "v" + strings.TrimPrefix(version, "v")
 }
@@ -272,8 +272,8 @@ func NormalizeKubernetesVersion(version string) string {
 }
 
 // NormalizeTalosVersion normalizes a Talos version string by ensuring it has a "v" prefix.
-// This matches the convention used by talosctl (e.g., "v1.12.4" not "1.12.4").
-// Accepts both "v1.12.4" and "1.12.4" as input.
+// This matches the convention used by talosctl (e.g., "v1.25.5" not "1.25.5").
+// Accepts both "v1.25.5" and "1.25.5" as input.
 func NormalizeTalosVersion(version string) string {
 	return EnsureVersionPrefix(version)
 }
