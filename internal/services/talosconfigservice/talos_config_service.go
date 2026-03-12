@@ -308,7 +308,15 @@ func (s *TalosConfigService) PrepareNodeConfig(
 	roleYAML []byte,
 	installDisk string,
 	m *vitistackv1alpha1.Machine,
-	tenantOverrides map[string]any) ([]byte, error) {
+	tenantOverrides map[string]any,
+	macAddress string) ([]byte, error) {
+	// Replace per-node placeholders in the role template before applying patches.
+	// #MACADDRESS# is used in LinkAliasConfig selectors to match the node's physical
+	// interface by its MAC address (reserved in DHCP via NetworkConfiguration CRD).
+	if macAddress != "" {
+		roleYAML = []byte(strings.ReplaceAll(string(roleYAML), "#MACADDRESS#", macAddress))
+	}
+
 	// Get the version adapter for current Talos version
 	adapter := talosversion.GetCurrentTalosVersionAdapter()
 
@@ -650,6 +658,30 @@ func (s *TalosConfigService) MarshalTalosClientConfig(clientCfg *clientconfig.Co
 		return nil, fmt.Errorf("failed to marshal talos client config: %w", err)
 	}
 	return b, nil
+}
+
+// ValidateTenantConfigYAML validates that the tenant config YAML can be parsed
+// by configpatcher.LoadPatches. This catches issues like incorrect indentation
+// of multi-document YAML (---) separators before they cause runtime failures.
+// Placeholders like #CLUSTERID# and #MACADDRESS# are replaced with dummy values
+// before validation since they are substituted at runtime.
+func ValidateTenantConfigYAML(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	// Replace known placeholders with dummy values for validation.
+	sanitized := strings.ReplaceAll(raw, "#CLUSTERID#", "validation-cluster")
+	sanitized = strings.ReplaceAll(sanitized, "#MACADDRESS#", "00:00:00:00:00:00")
+
+	// Validate that all YAML documents can be parsed by the same code path
+	// used at runtime (configpatcher.LoadPatches → configloader.NewFromBytes).
+	_, err := configpatcher.LoadPatches([]string{sanitized})
+	if err != nil {
+		return fmt.Errorf("invalid tenant config YAML: %w", err)
+	}
+
+	return nil
 }
 
 func extractDatacenterInfo(datacenter string) (country string, az string) {

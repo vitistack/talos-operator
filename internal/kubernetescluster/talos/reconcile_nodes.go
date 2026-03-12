@@ -126,7 +126,7 @@ func (t *TalosManager) loadNewNodeConfigContext(ctx context.Context, cluster *vi
 		return nil, fmt.Errorf("failed to load talos artifacts for new node configuration: %w", err)
 	}
 
-	tenantOverrides, err := t.loadTenantOverrides(ctx, cluster)
+	tenantOverrides, _, err := t.loadTenantOverrides(ctx, cluster)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load tenant overrides: %w", err)
 	}

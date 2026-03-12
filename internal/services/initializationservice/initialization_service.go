@@ -2,13 +2,18 @@ package initializationservice
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/viper"
+	"github.com/vitistack/common/pkg/clients/k8sclient"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	"github.com/vitistack/common/pkg/operator/crdcheck"
 	"github.com/vitistack/talos-operator/internal/services/kubernetesproviderservice"
+	"github.com/vitistack/talos-operator/internal/services/talosconfigservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // CheckPrerequisites verifies that required CRDs are installed before starting.
@@ -28,6 +33,7 @@ func CheckPrerequisites() {
 	)
 
 	ValidateBootImageConfiguration()
+	ValidateTenantConfig()
 
 	vlog.Info("✅ Prerequisite checks passed")
 }
@@ -81,4 +87,49 @@ func ValidateBootImageConfiguration() {
 	}
 
 	vlog.Info("✅ Boot image configuration check completed")
+}
+
+// ValidateTenantConfig validates that the tenant config ConfigMap (if configured)
+// contains valid multi-document YAML that can be parsed by configpatcher.
+// This catches issues like incorrect indentation of --- document separators early at startup.
+// Logs an error but does not exit, since the ConfigMap is optional.
+func ValidateTenantConfig() {
+	vlog.Info("Validating tenant config...")
+
+	name := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAME))
+	if name == "" {
+		vlog.Info("No tenant config ConfigMap configured, skipping validation")
+		return
+	}
+
+	namespace := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAMESPACE))
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	dataKey := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_DATA_KEY))
+	if dataKey == "" {
+		dataKey = "config.yaml"
+	}
+
+	ctx := context.TODO()
+	cm, err := k8sclient.Kubernetes.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Could not read tenant config ConfigMap %s/%s for validation: %v", namespace, name, err))
+		return
+	}
+
+	raw, ok := cm.Data[dataKey]
+	if !ok || strings.TrimSpace(raw) == "" {
+		vlog.Warn(fmt.Sprintf("Tenant config ConfigMap %s/%s missing data key %s", namespace, name, dataKey))
+		return
+	}
+
+	if err := talosconfigservice.ValidateTenantConfigYAML(raw); err != nil {
+		vlog.Error(fmt.Sprintf("Tenant config ConfigMap %s/%s key %s contains invalid YAML. "+
+			"Check that --- document separators and all documents are at the same indentation level.", namespace, name, dataKey), err)
+		os.Exit(1)
+	}
+
+	vlog.Info("✅ Tenant config validation passed")
 }

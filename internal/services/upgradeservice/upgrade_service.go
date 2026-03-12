@@ -634,6 +634,9 @@ func (s *UpgradeService) RegenerateMachineConfigsAfterUpgrade(
 
 // loadTenantPatches loads tenant configuration patches from the ConfigMap.
 // Returns nil if no ConfigMap is configured or if the ConfigMap doesn't exist.
+// Supports multi-document YAML (documents separated by ---) since Talos v1.12,
+// allowing additional config documents like LinkAliasConfig and LinkConfig
+// alongside the standard machine/cluster configuration.
 func (s *UpgradeService) loadTenantPatches(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) ([]string, error) {
 	name := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAME))
 	if name == "" {
@@ -668,20 +671,24 @@ func (s *UpgradeService) loadTenantPatches(ctx context.Context, cluster *vitista
 	// Replace #CLUSTERID# placeholder with actual cluster ID
 	replaced := strings.ReplaceAll(raw, "#CLUSTERID#", cluster.Spec.Cluster.ClusterId)
 
-	// Validate that it's valid YAML
-	var overrides map[string]any
-	if err := yaml.Unmarshal([]byte(replaced), &overrides); err != nil {
+	// Validate the first YAML document is parseable.
+	// yaml.Unmarshal only parses the first document in a multi-document YAML string.
+	var firstDoc map[string]any
+	if err := yaml.Unmarshal([]byte(replaced), &firstDoc); err != nil {
 		return nil, fmt.Errorf("failed to parse tenant patches from ConfigMap %s/%s key %s: %w", namespace, name, dataKey, err)
 	}
 
-	// Convert back to YAML string for the patch
-	patchYAML, err := yaml.Marshal(overrides)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal tenant patches: %w", err)
+	// Validate the full YAML (including multi-document sections) before using it.
+	if err := talosconfigservice.ValidateTenantConfigYAML(raw); err != nil {
+		return nil, fmt.Errorf("tenant config ConfigMap %s/%s key %s has invalid YAML: %w", namespace, name, dataKey, err)
 	}
 
-	vlog.Info(fmt.Sprintf("Loaded tenant patches from ConfigMap %s/%s", namespace, name))
-	return []string{string(patchYAML)}, nil
+	// Return the full raw YAML (including any additional config documents separated
+	// by ---) as a single patch string. configpatcher.LoadPatches → configloader.NewFromBytes
+	// uses yaml.NewDecoder to iterate multi-document YAML internally.
+	vlog.Info(fmt.Sprintf("Loaded tenant patches from ConfigMap %s/%s (%d bytes, %d lines)",
+		namespace, name, len(replaced), strings.Count(replaced, "\n")+1))
+	return []string{replaced}, nil
 }
 
 // FailTalosUpgrade marks a failed Talos upgrade

@@ -204,11 +204,19 @@ func (t *TalosManager) determineControlPlaneEndpoints(ctx context.Context, clust
 	return t.endpointService.DetermineControlPlaneEndpoints(ctx, cluster, controlPlaneIPs)
 }
 
-// loadTenantOverrides loads tenant-specific configuration overrides from a ConfigMap
-func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (map[string]any, error) {
+// loadTenantOverrides loads tenant-specific configuration overrides from a ConfigMap.
+// It returns:
+//   - overrides: the first YAML document parsed as a map (for backward compatibility)
+//   - patches: the full raw YAML string (including additional config documents like
+//     LinkAliasConfig, LinkConfig) as a slice for configpatcher.LoadPatches.
+//
+// Multi-document YAML (documents separated by ---) is supported since Talos v1.12.
+// Additional documents beyond the first (e.g., LinkAliasConfig, LinkConfig) are
+// preserved in the patches return value so that configpatcher can apply them properly.
+func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (map[string]any, []string, error) {
 	name := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAME))
 	if name == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	namespace := strings.TrimSpace(viper.GetString(consts.TENANT_CONFIGMAP_NAMESPACE))
@@ -225,24 +233,44 @@ func (t *TalosManager) loadTenantOverrides(ctx context.Context, cluster *vitista
 	if err := t.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, cm); err != nil {
 		if apierrors.IsNotFound(err) {
 			vlog.Info(fmt.Sprintf("Tenant overrides ConfigMap %s/%s not found, skipping overrides", namespace, name))
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("failed to read tenant overrides ConfigMap %s/%s: %w", namespace, name, err)
+		return nil, nil, fmt.Errorf("failed to read tenant overrides ConfigMap %s/%s: %w", namespace, name, err)
 	}
 
 	raw, ok := cm.Data[dataKey]
 	if !ok || strings.TrimSpace(raw) == "" {
 		vlog.Warn(fmt.Sprintf("Tenant overrides ConfigMap %s/%s missing data key %s, skipping overrides", namespace, name, dataKey))
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	replaced := strings.ReplaceAll(raw, "#CLUSTERID#", cluster.Spec.Cluster.ClusterId)
+
+	// Parse the first YAML document as a map for backward compatibility.
+	// yaml.Unmarshal only parses the first document in a multi-document YAML string.
 	overrides := map[string]any{}
 	if err := yaml.Unmarshal([]byte(replaced), &overrides); err != nil {
-		return nil, fmt.Errorf("failed to parse tenant overrides from ConfigMap %s/%s key %s: %w", namespace, name, dataKey, err)
+		return nil, nil, fmt.Errorf("failed to parse tenant overrides from ConfigMap %s/%s key %s: %w", namespace, name, dataKey, err)
 	}
 
-	return overrides, nil
+	if len(overrides) == 0 {
+		return nil, nil, nil
+	}
+
+	// Validate the full YAML (including multi-document sections) before using it.
+	if err := talosconfigservice.ValidateTenantConfigYAML(raw); err != nil {
+		return nil, nil, fmt.Errorf("tenant config ConfigMap %s/%s key %s has invalid YAML: %w", namespace, name, dataKey, err)
+	}
+
+	// Return the full raw YAML (including any additional config documents separated
+	// by ---) as a single patch string. configpatcher.LoadPatches → configloader.NewFromBytes
+	// uses yaml.NewDecoder to iterate multi-document YAML internally.
+	patches := []string{replaced}
+
+	vlog.Info(fmt.Sprintf("Tenant overrides loaded from ConfigMap %s/%s (%d bytes, %d lines)",
+		namespace, name, len(replaced), strings.Count(replaced, "\n")+1))
+
+	return overrides, patches, nil
 }
 
 // applyPerNodeConfiguration applies Talos configuration to a set of machines
@@ -292,7 +320,13 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 
 		// Select install disk and prepare configuration
 		installDisk := t.configService.SelectInstallDisk(m)
-		nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides)
+
+		// Resolve the DHCP-reserved MAC address for this machine.
+		// Primary source: NetworkConfiguration CRD (authoritative, created by the VM operator).
+		// Fallback: Machine.Status.NetworkInterfaces (populated from the running VM).
+		macAddress := t.getMachineMAC(ctx, m)
+
+		nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides, macAddress)
 		if err != nil {
 			return fmt.Errorf("failed to prepare config for node %s: %w", m.Name, err)
 		}
@@ -473,4 +507,27 @@ func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv
 
 	vlog.Info(fmt.Sprintf("New %s configured successfully: node=%s", nodeType, node.Name))
 	return nil
+}
+
+// getMachineMAC resolves the DHCP-reserved MAC address for a machine.
+// It first checks the NetworkConfiguration CRD (authoritative source, created by the VM operator
+// with the MAC reserved in Kea DHCP). If unavailable, it falls back to Machine.Status.NetworkInterfaces.
+func (t *TalosManager) getMachineMAC(ctx context.Context, m *vitistackv1alpha1.Machine) string {
+	// Try NetworkConfiguration CRD first (same name/namespace as the Machine)
+	nc := &vitistackv1alpha1.NetworkConfiguration{}
+	if err := t.Get(ctx, types.NamespacedName{Name: m.Name, Namespace: m.Namespace}, nc); err == nil {
+		for i := range nc.Spec.NetworkInterfaces {
+			if nc.Spec.NetworkInterfaces[i].MacAddress != "" {
+				return nc.Spec.NetworkInterfaces[i].MacAddress
+			}
+		}
+	}
+
+	// Fallback to Machine status
+	for _, iface := range m.Status.NetworkInterfaces {
+		if iface.MACAddress != "" {
+			return iface.MACAddress
+		}
+	}
+	return ""
 }

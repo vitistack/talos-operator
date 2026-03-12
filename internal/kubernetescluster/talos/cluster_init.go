@@ -11,7 +11,6 @@ import (
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
-	yaml "gopkg.in/yaml.v3"
 )
 
 // initializeTalosCluster handles the staged initialization of a Talos cluster.
@@ -201,20 +200,11 @@ func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster
 	_ = t.statusManager.SetPhase(ctx, cluster, "ControlPlaneIPsPending")
 	_ = t.statusManager.SetCondition(ctx, cluster, "", "True", "Generated", "Talos client and role configs generated")
 
-	// Load tenant overrides
-	tenantOverrides, err := t.loadTenantOverrides(ctx, cluster)
+	// Load tenant overrides and raw patches (supports multi-document YAML with
+	// additional config documents like LinkAliasConfig, LinkConfig since Talos v1.12)
+	tenantOverrides, tenantPatches, err := t.loadTenantOverrides(ctx, cluster)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load tenant overrides: %w", err)
-	}
-
-	// Convert tenant overrides to YAML patches
-	var tenantPatches []string
-	if len(tenantOverrides) > 0 {
-		tenantYAML, err := yaml.Marshal(tenantOverrides)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal tenant overrides: %w", err)
-		}
-		tenantPatches = []string{string(tenantYAML)}
 	}
 
 	return &clusterInitPrep{
