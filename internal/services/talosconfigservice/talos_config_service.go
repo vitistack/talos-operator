@@ -418,7 +418,7 @@ func (s *TalosConfigService) buildNodeAnnotationsPatch(cluster *vitistackv1alpha
 		vitistackv1alpha1.MachineIdAnnotation:          m.Name,
 
 		// Deprecated: kept for backward compatibility during transition
-		vitistackv1alpha1.VMProviderAnnotation: string(m.Status.Provider),
+		vitistackv1alpha1.VMProviderAnnotation: string(m.Status.Provider), //nolint:staticcheck // intentionally using deprecated annotation for backward compatibility
 	}
 
 	networkNamespaceName := ""
@@ -454,7 +454,7 @@ func (s *TalosConfigService) buildNodeAnnotationsPatch(cluster *vitistackv1alpha
 	annotations[vitistackv1alpha1.MachineInfrastructureAnnotation] = infrastructure
 
 	// Deprecated: kept for backward compatibility during transition
-	annotations[vitistackv1alpha1.InfrastructureAnnotation] = infrastructure
+	annotations[vitistackv1alpha1.InfrastructureAnnotation] = infrastructure //nolint:staticcheck // intentionally using deprecated annotation for backward compatibility
 
 	// Add nodepool annotation if present on the machine
 	if nodePool, ok := m.Annotations[vitistackv1alpha1.NodePoolAnnotation]; ok && nodePool != "" {
