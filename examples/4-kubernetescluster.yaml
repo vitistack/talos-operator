@@ -14,20 +14,18 @@ spec:
     workorder: "simple-workorder"
     zone: "az1"
     workspace: "simple-workspace"
-  # High-availability configuration with Talos recommended specifications:
-  # Control Plane: 4 GiB RAM, 4 CPUs, 100 GiB disk
-  # Workers: 2 GiB RAM, 2 CPUs, 100 GiB disk
+    networkNamespaceName: t-test004
   topology:
-    version: "1.35.0"
+    version: "1.35.2"
     controlplane:
       replicas: 1
-      version: "1.35.0"
-      machineClass: small # Should provide 4 vCPUs, 4 GiB RAM
+      version: "1.35.2"
+      machineClass: small
       provider: kubevirt
       storage:
         - class: "standard"
           path: "/var/lib/vitistack/kubevirt"
-          size: "50Gi" # Talos recommended for production
+          size: "50Gi"
       metadata:
         annotations:
           environment: development
@@ -39,7 +37,7 @@ spec:
       nodePools:
         - name: wp
           taint: []
-          version: "1.35.0"
+          version: "1.35.2"
           replicas: 1
           machineClass: large
           autoscaling:
@@ -59,4 +57,4 @@ spec:
           storage:
             - class: "standard"
               path: "/var/lib/vitistack/kubevirt"
-              size: "50Gi" # Talos recommended for production
+              size: "50Gi"

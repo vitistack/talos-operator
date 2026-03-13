@@ -14,15 +14,12 @@ spec:
     workorder: "simple-workorder"
     zone: "az1"
     workspace: "simple-workspace"
-  # Empty spec will use defaults:
-  # - 1 control plane node
-  # - 1 worker nodes
+    networkNamespaceName: t-test002
   topology:
-    version: "1.34.3"
+    version: "1.35.2"
     controlplane:
-      # Defaults to 1 replica
       replicas: 3
-      version: "1.34.3"
+      version: "1.35.2"
       machineClass: small
       provider: kubevirt
       storage:
@@ -40,11 +37,9 @@ spec:
       nodePools:
         - name: wp
           taint: []
-          version: "1.34.3"
-          # Defaults to 1 replica
+          version: "1.35.2"
           replicas: 2
-          # Defaults to "standard" machine class
-          machineClass: large
+          machineClass: medium
           autoscaling:
             enabled: false
             minReplicas: 1
