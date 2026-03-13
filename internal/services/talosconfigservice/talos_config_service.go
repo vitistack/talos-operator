@@ -405,13 +405,20 @@ func (s *TalosConfigService) buildNodeAnnotationsPatch(cluster *vitistackv1alpha
 	country, az := extractDatacenterInfo(cluster.Spec.Cluster.Datacenter)
 
 	annotations := map[string]string{
-		vitistackv1alpha1.ClusterNameAnnotation:        cluster.Name,
 		vitistackv1alpha1.ClusterIdAnnotation:          cluster.Spec.Cluster.ClusterId,
+		vitistackv1alpha1.ClusterNameAnnotation:        cluster.Name,
+		vitistackv1alpha1.ClusterProjectAnnotation:     cluster.Spec.Cluster.Project,
+		vitistackv1alpha1.EnvironmentAnnotation:        cluster.Spec.Cluster.Environment,
 		vitistackv1alpha1.CountryAnnotation:            country,
 		vitistackv1alpha1.AzAnnotation:                 az,
 		vitistackv1alpha1.RegionAnnotation:             cluster.Spec.Cluster.Region,
-		vitistackv1alpha1.VMProviderAnnotation:         string(m.Status.Provider),
 		vitistackv1alpha1.KubernetesProviderAnnotation: string(cluster.Spec.Cluster.Provider),
+		vitistackv1alpha1.MachineProviderAnnotation:    string(m.Status.Provider),
+		vitistackv1alpha1.MachineClassAnnotation:       m.Spec.MachineClass,
+		vitistackv1alpha1.MachineIdAnnotation:          m.Name,
+
+		// Deprecated: kept for backward compatibility during transition
+		vitistackv1alpha1.VMProviderAnnotation: string(m.Status.Provider),
 	}
 
 	networkNamespaceName := ""
@@ -444,6 +451,9 @@ func (s *TalosConfigService) buildNodeAnnotationsPatch(cluster *vitistackv1alpha
 	}
 
 	annotations[vitistackv1alpha1.ClusterWorkspaceAnnotation] = networkNamespaceName
+	annotations[vitistackv1alpha1.MachineInfrastructureAnnotation] = infrastructure
+
+	// Deprecated: kept for backward compatibility during transition
 	annotations[vitistackv1alpha1.InfrastructureAnnotation] = infrastructure
 
 	// Add nodepool annotation if present on the machine
