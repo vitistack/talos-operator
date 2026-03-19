@@ -11,7 +11,7 @@ require (
 	github.com/onsi/gomega v1.39.1
 	github.com/siderolabs/talos/pkg/machinery v1.12.5
 	github.com/spf13/viper v1.21.0
-	github.com/vitistack/common v0.8.48
+	github.com/vitistack/common v0.8.49
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.35.2
 	k8s.io/apimachinery v0.35.2
@@ -21,7 +21,7 @@ require (
 
 require (
 	cel.dev/expr v0.25.1 // indirect
-	github.com/ProtonMail/go-crypto v1.4.0 // indirect
+	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/ProtonMail/go-mime v0.0.0-20230322103455-7d82a3887f2f // indirect
 	github.com/ProtonMail/gopenpgp/v2 v2.9.0 // indirect
 	github.com/adrg/xdg v0.5.3 // indirect
@@ -96,7 +96,7 @@ require (
 	github.com/prometheus/procfs v0.20.1 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
-	github.com/sasha-s/go-deadlock v0.3.8 // indirect
+	github.com/sasha-s/go-deadlock v0.3.9 // indirect
 	github.com/siderolabs/crypto v0.6.4 // indirect
 	github.com/siderolabs/gen v0.8.6 // indirect
 	github.com/siderolabs/go-api-signature v0.3.12 // indirect
@@ -146,7 +146,7 @@ require (
 	k8s.io/apiserver v0.35.2 // indirect
 	k8s.io/component-base v0.35.2 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
-	k8s.io/kube-openapi v0.0.0-20260317180543-43fb72c5454a // indirect
+	k8s.io/kube-openapi v0.0.0-20260319004828-5883c5ee87b9 // indirect
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.34.0 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
