@@ -62,7 +62,7 @@ tenant:
 # Talos configuration
 talos:
   version: "v1.12.6"
-  defaultKubernetesVersion: "1.35.2"
+  defaultKubernetesVersion: "1.35.3"
   predictableNetworkNames: true
   vmInstallImage:
     kubevirt: "factory.talos.dev/metal-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.12.6"

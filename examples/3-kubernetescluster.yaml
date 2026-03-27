@@ -16,10 +16,10 @@ spec:
     workspace: "simple-workspace"
     networkNamespaceName: t-test003
   topology:
-    version: "1.35.2"
+    version: "1.35.3"
     controlplane:
       replicas: 3
-      version: "1.35.2"
+      version: "1.35.3"
       machineClass: small
       provider: kubevirt
       storage:
@@ -37,7 +37,7 @@ spec:
       nodePools:
         - name: wp
           taint: []
-          version: "1.35.2"
+          version: "1.35.3"
           replicas: 3
           machineClass: medium
           autoscaling:

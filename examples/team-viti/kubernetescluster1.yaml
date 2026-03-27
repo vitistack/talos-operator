@@ -16,10 +16,10 @@ spec:
     workspace: "simple-workspace"
     networkNamespaceName: team-viti
   topology:
-    version: "1.35.2"
+    version: "1.35.3"
     controlplane:
       replicas: 1
-      version: "1.35.2"
+      version: "1.35.3"
       machineClass: small # Should provide 4 vCPUs, 4 GiB RAM
       provider: kubevirt
       storage:
@@ -37,7 +37,7 @@ spec:
       nodePools:
         - name: wp
           taint: []
-          version: "1.35.2"
+          version: "1.35.3"
           replicas: 2
           machineClass: medium # Should provide 2 vCPUs, 2 GiB RAM
           autoscaling:
