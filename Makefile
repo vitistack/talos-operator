@@ -130,6 +130,7 @@ SYFT ?= $(LOCALBIN)/syft
 SYFT_VERSION ?= latest
 SBOM_OUTPUT_DIR ?= sbom
 SBOM_PROJECT_NAME ?= talos-operator
+SBOM_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 
 .PHONY: install-syft
 install-syft: $(SYFT) ## Install syft SBOM generator locally
@@ -143,8 +144,8 @@ sbom-source: install-syft ## Generate SBOMs for Go source code (CycloneDX + SPDX
 	@echo "Downloading Go modules for license detection..."
 	go mod download
 	@echo "Generating source code SBOMs..."
-	$(SYFT) dir:. --source-name=$(SBOM_PROJECT_NAME) -o cyclonedx-json=$(SBOM_OUTPUT_DIR)/sbom-source.cdx.json
-	$(SYFT) dir:. --source-name=$(SBOM_PROJECT_NAME) -o spdx-json=$(SBOM_OUTPUT_DIR)/sbom-source.spdx.json
+	$(SYFT) dir:. --source-name=$(SBOM_PROJECT_NAME) --source-version=$(SBOM_VERSION) -o cyclonedx-json=$(SBOM_OUTPUT_DIR)/sbom-source.cdx.json
+	$(SYFT) dir:. --source-name=$(SBOM_PROJECT_NAME) --source-version=$(SBOM_VERSION) -o spdx-json=$(SBOM_OUTPUT_DIR)/sbom-source.spdx.json
 	@echo "SBOMs generated: $(SBOM_OUTPUT_DIR)/sbom-source.{cdx,spdx}.json"
 
 .PHONY: sbom-container
