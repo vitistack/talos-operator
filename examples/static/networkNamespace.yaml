@@ -1,0 +1,32 @@
+# Local dev: uses 192.168.1.240-254 with pod network (no VLANs needed).
+# VMs get internet via the pod network; static IPs are tracked in
+# NetworkConfiguration status for when VLAN infrastructure is available.
+#
+# For organisation deployment with VLANs, change to:
+#   ipv4CIDR: "100.64.1.0/24"
+#   ipv4Gateway: "100.64.1.1"
+#   ipv4RangeStart: "100.64.1.2"
+#   ipv4RangeEnd: "100.64.1.254"
+#   vlanId: 100
+# The static-ip-operator will populate status.vlanId and status.ipv4Prefix,
+# which the kubevirt-operator uses to create the correct bridge+VLAN NAD.
+---
+apiVersion: vitistack.io/v1alpha1
+kind: NetworkNamespace
+metadata:
+  name: t-static001
+spec:
+  datacenterIdentifier: no-centraltest-az1
+  supervisorIdentifier: test-viti
+  ipAllocation:
+    type: static
+    provider: static-ip-operator
+    static:
+      ipv4CIDR: "100.64.0.0/24"
+      ipv4Gateway: "100.64.0.1"
+      ipv4RangeStart: "100.64.0.240"
+      ipv4RangeEnd: "100.64.0.254"
+      dns:
+        - "8.8.8.8"
+        - "8.8.4.4"
+      ttlSeconds: 600

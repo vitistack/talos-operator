@@ -54,6 +54,21 @@ func (a *baseAdapter) BuildInstallDiskPatch(disk string) string {
     disk: %s`, disk)
 }
 
+func (a *baseAdapter) BuildVIPPatch(vipIP, link string) string {
+	// v1.11.x: VIP is configured inline on a network interface
+	return fmt.Sprintf(`machine:
+  network:
+    interfaces:
+      - interface: %s
+        vip:
+          ip: %s`, link, vipIP)
+}
+
+func (a *baseAdapter) BuildLinkAliasConfigPatch(name string) string {
+	// v1.11.x: multi-doc config not supported
+	return ""
+}
+
 func (a *baseAdapter) BuildVMInstallImagePatch(installImage string) string {
 	return fmt.Sprintf(`machine:
   install:
@@ -63,6 +78,23 @@ func (a *baseAdapter) BuildVMInstallImagePatch(installImage string) string {
 // multiDocAdapter handles Talos v1.12.x+ configuration (multi-doc format)
 type multiDocAdapter struct {
 	baseAdapter
+}
+
+func (a *multiDocAdapter) BuildLinkAliasConfigPatch(name string) string {
+	// v1.12.x+: LinkAliasConfig maps a stable alias to a physical interface via MAC
+	return fmt.Sprintf(`apiVersion: v1alpha1
+kind: LinkAliasConfig
+name: %s
+selector:
+  match: mac(link.permanent_addr) == "#MACADDRESS#"`, name)
+}
+
+func (a *multiDocAdapter) BuildVIPPatch(vipIP, link string) string {
+	// v1.12.x+: VIP uses the Layer2VIPConfig document
+	return fmt.Sprintf(`apiVersion: v1alpha1
+kind: Layer2VIPConfig
+name: %s
+link: %s`, vipIP, link)
 }
 
 func (a *multiDocAdapter) BuildHostnamePatch(hostname string) string {

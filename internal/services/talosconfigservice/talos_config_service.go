@@ -309,7 +309,8 @@ func (s *TalosConfigService) PrepareNodeConfig(
 	installDisk string,
 	m *vitistackv1alpha1.Machine,
 	tenantOverrides map[string]any,
-	macAddress string) ([]byte, error) {
+	macAddress string,
+	extraPatches ...string) ([]byte, error) {
 	// Replace per-node placeholders in the role template before applying patches.
 	// #MACADDRESS# is used in LinkAliasConfig selectors to match the node's physical
 	// interface by its MAC address (reserved in DHCP via NetworkConfiguration CRD).
@@ -360,6 +361,13 @@ func (s *TalosConfigService) PrepareNodeConfig(
 	// The tenantOverrides parameter is kept for backward compatibility but is ignored.
 	_ = tenantOverrides // Explicitly mark as intentionally unused
 
+	// Append any extra per-node patches (e.g. static IP configuration)
+	for _, ep := range extraPatches {
+		if ep != "" {
+			patches = append(patches, ep)
+		}
+	}
+
 	// Load all patches using configpatcher
 	loadedPatches, err := configpatcher.LoadPatches(patches)
 	if err != nil {
@@ -398,6 +406,79 @@ func (s *TalosConfigService) buildVMCustomizationPatch(installImage string) stri
 		}
 	}
 	return patch.String()
+}
+
+// StaticIPConfig holds the network configuration for a static IP assignment.
+type StaticIPConfig struct {
+	IP        string   // e.g. "10.0.0.240"
+	CIDR      string   // e.g. "10.0.0.0/24" (used to derive prefix length)
+	Gateway   string   // e.g. "10.0.0.1"
+	DNS       []string // e.g. ["8.8.8.8", "8.8.4.4"]
+	Interface string   // e.g. "eth0" or "net0"
+}
+
+// BuildStaticNetworkPatch generates a Talos machine config patch that configures
+// a static IP address, default route, and DNS nameservers on the given interface.
+func BuildStaticNetworkPatch(cfg StaticIPConfig) string {
+	prefixLen := extractPrefixLength(cfg.CIDR)
+	addressCIDR := fmt.Sprintf("%s/%s", cfg.IP, prefixLen)
+
+	var patch strings.Builder
+	patch.WriteString("machine:\n")
+	patch.WriteString("  network:\n")
+	patch.WriteString("    interfaces:\n")
+	fmt.Fprintf(&patch, "      - interface: %s\n", cfg.Interface)
+	patch.WriteString("        addresses:\n")
+	fmt.Fprintf(&patch, "          - %s\n", addressCIDR)
+	patch.WriteString("        routes:\n")
+	patch.WriteString("          - network: 0.0.0.0/0\n")
+	fmt.Fprintf(&patch, "            gateway: %s\n", cfg.Gateway)
+	if len(cfg.DNS) > 0 {
+		patch.WriteString("    nameservers:\n")
+		for _, ns := range cfg.DNS {
+			fmt.Fprintf(&patch, "      - %s\n", ns)
+		}
+	}
+
+	return patch.String()
+}
+
+// BuildStaticIPKernelArgPatch generates a Talos machine config patch that adds
+// a Linux ip= kernel argument so the node has network connectivity at boot,
+// before machine config is applied.
+// Format: ip=<client-ip>::<gateway>:<netmask>::<device>:none
+func BuildStaticIPKernelArgPatch(cfg StaticIPConfig) string {
+	netmask := cidrToNetmask(cfg.CIDR)
+	kernelArg := fmt.Sprintf("ip=%s::%s:%s::%s:none", cfg.IP, cfg.Gateway, netmask, cfg.Interface)
+
+	var patch strings.Builder
+	patch.WriteString("machine:\n")
+	patch.WriteString("  install:\n")
+	patch.WriteString("    extraKernelArgs:\n")
+	fmt.Fprintf(&patch, "      - %s\n", kernelArg)
+
+	return patch.String()
+}
+
+// extractPrefixLength extracts the prefix length from a CIDR string (e.g. "10.0.0.0/24" -> "24").
+func extractPrefixLength(cidr string) string {
+	if idx := strings.LastIndex(cidr, "/"); idx >= 0 {
+		return cidr[idx+1:]
+	}
+	return "24" // default
+}
+
+// cidrToNetmask converts a CIDR prefix to a dotted-decimal netmask.
+func cidrToNetmask(cidr string) string {
+	prefixLen := extractPrefixLength(cidr)
+	var bits int
+	fmt.Sscanf(prefixLen, "%d", &bits)
+	if bits <= 0 || bits > 32 {
+		bits = 24
+	}
+	mask := uint32(0xFFFFFFFF) << (32 - bits)
+	return fmt.Sprintf("%d.%d.%d.%d",
+		(mask>>24)&0xFF, (mask>>16)&0xFF, (mask>>8)&0xFF, mask&0xFF)
 }
 
 // buildNodeAnnotationsPatch builds a YAML patch for node annotations

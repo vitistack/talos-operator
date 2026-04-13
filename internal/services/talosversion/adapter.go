@@ -57,6 +57,19 @@ type TalosVersionAdapter interface {
 	// GrubUseUKICmdlineDefault returns the default value for grubUseUKICmdline
 	// This changed from false to true in v1.12.x
 	GrubUseUKICmdlineDefault() bool
+
+	// BuildVIPPatch creates a VIP configuration patch for control plane HA.
+	// In v1.11.x this uses machine.network.interfaces[].vip.ip
+	// In v1.12.x+ this uses the Layer2VIPConfig document
+	BuildVIPPatch(vipIP, link string) string
+
+	// BuildLinkAliasConfigPatch creates a LinkAliasConfig document that maps a
+	// stable alias name (e.g. "net0") to a physical interface via a CEL selector.
+	// The selector uses #MACADDRESS# as a placeholder that is replaced per-node
+	// with the actual MAC address during PrepareNodeConfig.
+	// In v1.11.x this returns "" (multi-doc not supported).
+	// In v1.12.x+ this returns a LinkAliasConfig document.
+	BuildLinkAliasConfigPatch(name string) string
 }
 
 // GetTalosVersionAdapter returns the appropriate adapter for the given Talos version string.

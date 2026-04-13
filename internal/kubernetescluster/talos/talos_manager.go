@@ -24,6 +24,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	"github.com/vitistack/talos-operator/internal/services/talosconfigservice"
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
+	"github.com/vitistack/talos-operator/internal/services/talosversion"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -92,7 +93,7 @@ func (t *TalosManager) ensureTalosConfiguration(ctx context.Context, cluster *vi
 	}
 
 	// Generate Talos configuration using the new bundle approach (like talosctl)
-	configBundle, err := t.configService.GenerateTalosConfigBundle(cluster, prep.endpointIPs, prep.tenantPatches, nil, nil)
+	configBundle, err := t.configService.GenerateTalosConfigBundle(cluster, prep.endpointIPs, prep.tenantPatches, prep.controlPlaneTenantPatches, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate Talos config bundle: %w", err)
 	}
@@ -202,6 +203,55 @@ func (t *TalosManager) addConfiguredNode(ctx context.Context, cluster *vitistack
 // determineControlPlaneEndpoints determines the control plane endpoints based on the configured endpoint mode
 func (t *TalosManager) determineControlPlaneEndpoints(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
 	return t.endpointService.DetermineControlPlaneEndpoints(ctx, cluster, controlPlaneIPs)
+}
+
+// buildVIPPatchIfNeeded returns a Layer2VIPConfig (or legacy VIP) patch string when
+// ENDPOINT_MODE=talosvip and a VIP IP has been allocated. Returns "" otherwise.
+func (t *TalosManager) buildVIPPatchIfNeeded(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) string {
+	endpointMode := consts.EndpointMode(viper.GetString(consts.ENDPOINT_MODE))
+	if endpointMode != consts.EndpointModeTalosVIP {
+		return ""
+	}
+
+	vipIP := t.endpointService.GetAllocatedVIPIP(ctx, cluster)
+	if vipIP == "" {
+		vlog.Warn(fmt.Sprintf("talosvip mode but no VIP IP allocated yet for cluster %s", cluster.Name))
+		return ""
+	}
+
+	link := strings.TrimSpace(viper.GetString(consts.TALOS_VIP_LINK))
+	if link == "" {
+		link = "net0"
+	}
+
+	adapter := talosversion.GetCurrentTalosVersionAdapter()
+	patch := adapter.BuildVIPPatch(vipIP, link)
+	vlog.Info(fmt.Sprintf("Built VIP patch for cluster %s: vipIP=%s link=%s (adapter=%s)", cluster.Name, vipIP, link, adapter.Version()))
+	return patch
+}
+
+// buildLinkAliasPatchIfNeeded returns a LinkAliasConfig patch when ENDPOINT_MODE=talosvip
+// and the Talos version supports multi-doc config (v1.12+). The LinkAliasConfig maps the
+// VIP link name (e.g. "net0") to a physical interface via a MAC-based CEL selector.
+// The #MACADDRESS# placeholder is replaced per-node in PrepareNodeConfig.
+// Returns "" when VIP mode is disabled or the adapter doesn't support LinkAliasConfig.
+func (t *TalosManager) buildLinkAliasPatchIfNeeded() string {
+	endpointMode := consts.EndpointMode(viper.GetString(consts.ENDPOINT_MODE))
+	if endpointMode != consts.EndpointModeTalosVIP {
+		return ""
+	}
+
+	link := strings.TrimSpace(viper.GetString(consts.TALOS_VIP_LINK))
+	if link == "" {
+		link = "net0"
+	}
+
+	adapter := talosversion.GetCurrentTalosVersionAdapter()
+	patch := adapter.BuildLinkAliasConfigPatch(link)
+	if patch != "" {
+		vlog.Info(fmt.Sprintf("Built LinkAliasConfig patch for VIP link: link=%s (adapter=%s)", link, adapter.Version()))
+	}
+	return patch
 }
 
 // loadTenantOverrides loads tenant-specific configuration overrides from a ConfigMap.
@@ -326,7 +376,17 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 		// Fallback: Machine.Status.NetworkInterfaces (populated from the running VM).
 		macAddress := t.getMachineMAC(ctx, m)
 
-		nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides, macAddress)
+		// Build static IP patches if the NetworkNamespace uses static-ip-operator
+		var staticIPPatches []string
+		if staticCfg := t.getStaticIPConfig(ctx, cluster, m); staticCfg != nil {
+			networkPatch := talosconfigservice.BuildStaticNetworkPatch(*staticCfg)
+			kernelArgPatch := talosconfigservice.BuildStaticIPKernelArgPatch(*staticCfg)
+			staticIPPatches = append(staticIPPatches, networkPatch, kernelArgPatch)
+			vlog.Info(fmt.Sprintf("Static IP config for node %s: ip=%s gw=%s iface=%s",
+				m.Name, staticCfg.IP, staticCfg.Gateway, staticCfg.Interface))
+		}
+
+		nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides, macAddress, staticIPPatches...)
 		if err != nil {
 			return fmt.Errorf("failed to prepare config for node %s: %w", m.Name, err)
 		}
@@ -530,4 +590,51 @@ func (t *TalosManager) getMachineMAC(ctx context.Context, m *vitistackv1alpha1.M
 		}
 	}
 	return ""
+}
+
+// getStaticIPConfig checks if the cluster's NetworkNamespace uses static-ip-operator
+// and returns the static IP configuration from the machine's NetworkConfiguration status.
+// Returns nil if static IP is not applicable.
+func (t *TalosManager) getStaticIPConfig(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, m *vitistackv1alpha1.Machine) *talosconfigservice.StaticIPConfig {
+	// Look up the NetworkNamespace
+	nnName := cluster.Spec.Cluster.NetworkNamespaceName
+	if nnName == "" {
+		return nil
+	}
+	nn := &vitistackv1alpha1.NetworkNamespace{}
+	if err := t.Get(ctx, types.NamespacedName{Name: nnName, Namespace: cluster.Namespace}, nn); err != nil {
+		return nil
+	}
+
+	// Only apply for static-ip-operator
+	if nn.Spec.IPAllocation == nil ||
+		nn.Spec.IPAllocation.Type != vitistackv1alpha1.IPAllocationTypeStatic ||
+		!vitistackv1alpha1.MatchesProvider(nn.Spec.IPAllocation.Provider, vitistackv1alpha1.ProviderNameStaticIP) {
+		return nil
+	}
+
+	// Read IP config from the machine's NetworkConfiguration status
+	nc := &vitistackv1alpha1.NetworkConfiguration{}
+	if err := t.Get(ctx, types.NamespacedName{Name: m.Name, Namespace: m.Namespace}, nc); err != nil {
+		return nil
+	}
+
+	for _, iface := range nc.Status.NetworkInterfaces {
+		if iface.IPAllocated && len(iface.IPv4Addresses) > 0 {
+			// Determine interface name
+			ifaceName := "eth0"
+			if viper.GetBool(consts.TALOS_PREDICTABLE_NETWORK_NAMES) {
+				ifaceName = "enp1s0" // default virtio interface name
+			}
+
+			return &talosconfigservice.StaticIPConfig{
+				IP:        iface.IPv4Addresses[0],
+				CIDR:      iface.IPv4Subnet,
+				Gateway:   iface.IPv4Gateway,
+				DNS:       iface.DNS,
+				Interface: ifaceName,
+			}
+		}
+	}
+	return nil
 }

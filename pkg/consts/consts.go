@@ -31,6 +31,11 @@ var (
 	// Should be a comma-separated list of IP addresses or hostnames.
 	CUSTOM_ENDPOINT = "CUSTOM_ENDPOINT"
 
+	// TALOS_VIP_LINK is the network interface name used for Layer2VIPConfig when
+	// ENDPOINT_MODE is "talosvip". This should match a physical interface or a
+	// LinkAliasConfig name (e.g., "net0"). Default: "net0".
+	TALOS_VIP_LINK = "TALOS_VIP_LINK" //nolint:revive,stylecheck // consistent with other env var constants
+
 	BOOT_IMAGE_SOURCE = "BOOT_IMAGE_SOURCE"
 
 	BOOT_IMAGE = "BOOT_IMAGE"

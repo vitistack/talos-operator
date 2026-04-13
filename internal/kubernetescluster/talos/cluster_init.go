@@ -130,13 +130,14 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 // clusterInitPrep holds prepared data for cluster initialization
 type clusterInitPrep struct {
-	machines        []*vitistackv1alpha1.Machine
-	controlPlanes   []*vitistackv1alpha1.Machine
-	workers         []*vitistackv1alpha1.Machine
-	controlPlaneIPs []string
-	endpointIPs     []string
-	tenantOverrides map[string]any
-	tenantPatches   []string
+	machines                  []*vitistackv1alpha1.Machine
+	controlPlanes             []*vitistackv1alpha1.Machine
+	workers                   []*vitistackv1alpha1.Machine
+	controlPlaneIPs           []string
+	endpointIPs               []string
+	tenantOverrides           map[string]any
+	tenantPatches             []string
+	controlPlaneTenantPatches []string // additional patches applied only to control plane nodes (e.g., VIP)
 }
 
 // prepareClusterInitialization prepares all required data for cluster initialization.
@@ -207,14 +208,28 @@ func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster
 		return nil, fmt.Errorf("failed to load tenant overrides: %w", err)
 	}
 
+	// Build LinkAliasConfig patch for all nodes when VIP mode is enabled (v1.12+).
+	// This maps the VIP link name (e.g. "net0") to a physical interface via MAC selector.
+	// Applied to all nodes so every node has stable interface aliases.
+	if linkAliasPatch := t.buildLinkAliasPatchIfNeeded(); linkAliasPatch != "" {
+		tenantPatches = append(tenantPatches, linkAliasPatch)
+	}
+
+	// Build control-plane-only patches (e.g., Layer2VIPConfig for talosvip mode)
+	var controlPlaneTenantPatches []string
+	if vipPatch := t.buildVIPPatchIfNeeded(ctx, cluster); vipPatch != "" {
+		controlPlaneTenantPatches = append(controlPlaneTenantPatches, vipPatch)
+	}
+
 	return &clusterInitPrep{
-		machines:        readyMachines,
-		controlPlanes:   controlPlanes,
-		workers:         workers,
-		controlPlaneIPs: controlPlaneIPs,
-		endpointIPs:     endpointIPs,
-		tenantOverrides: tenantOverrides,
-		tenantPatches:   tenantPatches,
+		machines:                  readyMachines,
+		controlPlanes:             controlPlanes,
+		workers:                   workers,
+		controlPlaneIPs:           controlPlaneIPs,
+		endpointIPs:               endpointIPs,
+		tenantOverrides:           tenantOverrides,
+		tenantPatches:             tenantPatches,
+		controlPlaneTenantPatches: controlPlaneTenantPatches,
 	}, nil
 }
 

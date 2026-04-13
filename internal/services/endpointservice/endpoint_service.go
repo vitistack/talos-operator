@@ -17,6 +17,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const statusFailed = "Failed"
+
 // deprecationWarned tracks namespaces for which the deprecation warning has already been logged,
 // so we don't spam the logs on every reconcile loop.
 var deprecationWarned sync.Map
@@ -56,7 +58,7 @@ func (s *EndpointService) DetermineControlPlaneEndpoints(ctx context.Context, cl
 		return s.getEndpointsNetworkConfiguration(ctx, cluster, controlPlaneIPs)
 
 	case consts.EndpointModeTalosVIP:
-		return s.getEndpointsTalosVIP(controlPlaneIPs)
+		return s.getEndpointsTalosVIP(ctx, cluster, controlPlaneIPs)
 
 	case consts.EndpointModeCustom:
 		return s.getEndpointsCustom()
@@ -103,24 +105,120 @@ func (s *EndpointService) getEndpointsNetworkConfiguration(ctx context.Context, 
 	return vipEndpoints, nil
 }
 
-// getEndpointsTalosVIP returns endpoints for Talos built-in VIP mode.
-// In this mode, the operator uses the control plane IPs directly, but Talos
-// handles VIP failover internally through its machine config.
-// Note: The actual VIP configuration should be added to tenant config overrides.
-func (s *EndpointService) getEndpointsTalosVIP(controlPlaneIPs []string) ([]string, error) {
+// getEndpointsTalosVIP allocates a VIP IP from the static pool via a NetworkConfiguration
+// and returns it as the control plane endpoint. The operator will also inject a
+// Layer2VIPConfig patch into the control plane Talos config so that Talos advertises
+// the VIP using gratuitous ARP.
+func (s *EndpointService) getEndpointsTalosVIP(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
 	if len(controlPlaneIPs) == 0 {
 		return nil, fmt.Errorf("no control plane IPs available for endpoint mode 'talosvip'")
 	}
 
-	// For Talos VIP mode, we need to check if a custom VIP is configured in tenant overrides
-	// The VIP address should be configured in the Talos machine config via tenant overrides
-	// For now, use the first control plane IP as the endpoint
-	// The actual VIP will be handled by Talos' internal VIP mechanism
-	vlog.Info(fmt.Sprintf("Endpoint mode 'talosvip': using first control plane IP: %s (Talos VIP should be configured in machine config)", controlPlaneIPs[0]))
-	vlog.Warn("Talos VIP mode requires additional configuration in tenant overrides to set the VIP address")
+	networkNamespace, err := s.findNetworkNamespace(ctx, cluster.GetNamespace(), cluster.Spec.Cluster.NetworkNamespaceName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find NetworkNamespace for talosvip: %w", err)
+	}
+	if networkNamespace == nil {
+		vlog.Warn("No NetworkNamespace found for talosvip mode, falling back to first control plane IP")
+		return []string{controlPlaneIPs[0]}, nil
+	}
 
-	// Return first control plane IP - the actual VIP address should be in the Talos config
-	return []string{controlPlaneIPs[0]}, nil
+	// Create or get a NetworkConfiguration to reserve a VIP IP from the static pool
+	vipNCName := cluster.Spec.Cluster.ClusterId + "-vip"
+	vipNC := &vitistackv1alpha1.NetworkConfiguration{}
+	err = s.Get(ctx, types.NamespacedName{Name: vipNCName, Namespace: cluster.Namespace}, vipNC)
+
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get VIP NetworkConfiguration: %w", err)
+		}
+
+		// Create a NetworkConfiguration with a single "vip" interface to reserve one IP
+		vipNC = &vitistackv1alpha1.NetworkConfiguration{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      vipNCName,
+				Namespace: cluster.Namespace,
+				Labels: map[string]string{
+					vitistackv1alpha1.ClusterIdAnnotation: cluster.Spec.Cluster.ClusterId,
+					"vitistack.io/purpose":                "control-plane-vip",
+				},
+			},
+			Spec: vitistackv1alpha1.NetworkConfigurationSpec{
+				Name:                 vipNCName,
+				NetworkNamespaceName: networkNamespace.Name,
+				Provider:             vitistackv1alpha1.ProviderNameStaticIP,
+				NetworkInterfaces: []vitistackv1alpha1.NetworkConfigurationInterface{
+					{Name: "vip"},
+				},
+			},
+		}
+		if err := s.Create(ctx, vipNC); err != nil {
+			return nil, fmt.Errorf("failed to create VIP NetworkConfiguration %s: %w", vipNCName, err)
+		}
+		vlog.Info(fmt.Sprintf("Created VIP NetworkConfiguration %s/%s for cluster %s", cluster.Namespace, vipNCName, cluster.Name))
+	}
+
+	// Wait for the static-ip-operator to allocate an IP
+	vipIP, err := s.waitForVIPIPAllocation(ctx, cluster, vipNCName, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed waiting for VIP IP allocation: %w", err)
+	}
+
+	vlog.Info(fmt.Sprintf("Endpoint mode 'talosvip': using allocated VIP %s for cluster %s", vipIP, cluster.Name))
+	return []string{vipIP}, nil
+}
+
+// waitForVIPIPAllocation polls the VIP NetworkConfiguration until an IP is allocated
+func (s *EndpointService) waitForVIPIPAllocation(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, vipNCName string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("context cancelled while waiting for VIP IP allocation: %w", ctx.Err())
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				return "", fmt.Errorf("timeout waiting for VIP IP allocation on %s/%s after %v", cluster.Namespace, vipNCName, timeout)
+			}
+
+			nc := &vitistackv1alpha1.NetworkConfiguration{}
+			if err := s.Get(ctx, types.NamespacedName{Name: vipNCName, Namespace: cluster.Namespace}, nc); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to get VIP NetworkConfiguration status: %v", err))
+				continue
+			}
+
+			if nc.Status.Phase == "Error" || nc.Status.Status == statusFailed {
+				return "", fmt.Errorf("VIP NetworkConfiguration %s/%s failed: %s", cluster.Namespace, vipNCName, nc.Status.Message)
+			}
+
+			// Check if the "vip" interface has an allocated IP
+			for i := range nc.Status.NetworkInterfaces {
+				if nc.Status.NetworkInterfaces[i].Name == "vip" && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
+					return nc.Status.NetworkInterfaces[i].IPv4Addresses[0], nil
+				}
+			}
+
+			vlog.Info(fmt.Sprintf("Waiting for VIP IP allocation on %s/%s... phase=%s", cluster.Namespace, vipNCName, nc.Status.Phase))
+		}
+	}
+}
+
+// GetAllocatedVIPIP returns the currently allocated VIP IP for a cluster, or empty string if none.
+// This is used by config generation to inject the Layer2VIPConfig patch.
+func (s *EndpointService) GetAllocatedVIPIP(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) string {
+	vipNCName := cluster.Spec.Cluster.ClusterId + "-vip"
+	nc := &vitistackv1alpha1.NetworkConfiguration{}
+	if err := s.Get(ctx, types.NamespacedName{Name: vipNCName, Namespace: cluster.Namespace}, nc); err != nil {
+		return ""
+	}
+	for i := range nc.Status.NetworkInterfaces {
+		if nc.Status.NetworkInterfaces[i].Name == "vip" && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
+			return nc.Status.NetworkInterfaces[i].IPv4Addresses[0]
+		}
+	}
+	return ""
 }
 
 // getEndpointsCustom returns user-provided endpoint addresses from the CUSTOM_ENDPOINT environment variable.
@@ -273,7 +371,7 @@ func (s *EndpointService) checkVIPStatus(ctx context.Context, namespace, vipName
 	}
 
 	// Check for VIP error conditions
-	if vip.Status.Phase == "Failed" || vip.Status.Status == "Failed" {
+	if vip.Status.Phase == statusFailed || vip.Status.Status == statusFailed {
 		msg := vip.Status.Message
 		if msg == "" {
 			msg = "VIP creation failed without details"

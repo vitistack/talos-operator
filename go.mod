@@ -154,3 +154,7 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+// Workaround: force the old umbrella google.golang.org/genproto past its package split
+// so it stops colliding with google.golang.org/genproto/googleapis/{api,rpc}.
+replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20260406210006-6f92a3bedf2d

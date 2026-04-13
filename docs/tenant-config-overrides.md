@@ -57,6 +57,8 @@ Starting with Talos v1.12, machine configuration supports multiple YAML document
 | `LinkAliasConfig` | Network link aliases with CEL-based selectors |
 | `LinkConfig` | Network link settings (MTU, etc.) |
 | `DHCPv4Config` | DHCPv4 client configuration |
+| `Layer2VIPConfig` | Virtual IP using Layer 2 (gratuitous ARP) for control plane HA |
+| `HostnameConfig` | Hostname configuration (managed by operator, avoid overriding) |
 
 ### Example multi-document config
 
@@ -103,6 +105,14 @@ apiVersion: v1alpha1
 kind: DHCPv4Config
 name: net0
 clientIdentifier: mac
+---
+# Layer 2 VIP for control plane HA (only applied to controlplane nodes)
+# Uses gratuitous ARP to advertise the VIP from one controlplane at a time.
+# Requirements: all controlplane nodes on same L2 network, IP must be reserved/unused.
+apiVersion: v1alpha1
+kind: Layer2VIPConfig
+name: 10.0.0.100
+link: net0
 ```
 
 ### Per-node MAC address substitution

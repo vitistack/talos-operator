@@ -70,20 +70,28 @@ Uses Talos' built-in VIP feature for control plane high availability. This mode 
 
 1. The operator uses control plane IPs for initial configuration
 2. Talos handles VIP failover internally through its machine config
-3. The VIP address must be configured in tenant overrides
+3. The VIP address must be configured in tenant overrides using `Layer2VIPConfig`
 
 **Use case:** Environments where you want to use Talos' native VIP support instead of external load balancers.
 
-**Tenant Override Example:**
+**Requirements:**
+
+- All control plane nodes must share a Layer 2 network (no router between them)
+- The VIP must be an unused, reserved IP from the control plane subnet
+- DHCP servers must not assign the VIP address
+- etcd must be running for VIP election to function
+- The VIP will not activate until after Kubernetes bootstrap completes
+
+**Tenant Override Example (Talos v1.12+):**
+
+Add a `Layer2VIPConfig` document to your tenant config ConfigMap. The `link` field should reference the network interface name (or a `LinkAliasConfig` alias like `net0`).
 
 ```yaml
-# In your tenant config ConfigMap
-machine:
-  network:
-    interfaces:
-      - interface: eth0
-        vip:
-          ip: 10.0.0.100 # Your VIP address
+# In your tenant config ConfigMap (as an additional --- separated document)
+apiVersion: v1alpha1
+kind: Layer2VIPConfig
+name: 10.0.0.100   # Your VIP address
+link: net0          # Network interface (or LinkAliasConfig alias)
 ```
 
 **Helm Values:**
