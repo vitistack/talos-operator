@@ -1,21 +1,20 @@
 apiVersion: vitistack.io/v1alpha1
 kind: KubernetesCluster
 metadata:
-  name: t-static-001-8k2p
+  name: t-sd-001-8k2p
 spec:
   data:
-    clusterUid: "b41fcd9e-697f-59e1-9652-ecd34ddb39b2"
-    clusterId: "t-static-001-8k2p"
+    clusterUid: "c7e56f11-9c4e-4b8a-9b2f-1d1f2c3a4b5d"
+    clusterId: "t-sd-001-8k2p"
     provider: talos
     environment: test
     datacenter: no-centraltest-az1
-    project: static-ip-project
+    project: static-docker-project
     region: centraltest
-    workorder: "static-workorder"
+    workorder: "static-docker-workorder"
     zone: "az1"
-    #country: no
-    workspace: "static-workspace"
-    networkNamespaceName: t-static001
+    workspace: "static-docker-workspace"
+    networkNamespaceName: t-static-docker-001
   topology:
     version: "1.35.3"
     controlplane:

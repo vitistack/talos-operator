@@ -48,6 +48,26 @@ func getMachineOS() vitistackv1alpha1.MachineOS {
 	return vitistackv1alpha1.MachineOS{}
 }
 
+// cloudInitOrNil returns a CloudInitConfig only when the cluster's
+// NetworkNamespace uses static IP allocation. DHCP and unset clusters get nil
+// so their Machine specs remain byte-identical to the pre-feature output.
+//
+// The returned config carries only Type=noCloud — no user-data source. That
+// is intentional: kubevirt-operator synthesizes network-config (the static IP)
+// from NetworkConfiguration.status, while user-data stays empty so Talos boots
+// into maintenance mode. The existing talosctl apply-config flow then delivers
+// the machine config over the Talos API once the VM is reachable on its
+// now-predictable static IP. This avoids a chicken-and-egg between
+// "role templates generated after VM boots" and "VM needs templates to boot".
+func cloudInitOrNil(enabled bool) *vitistackv1alpha1.CloudInitConfig {
+	if !enabled {
+		return nil
+	}
+	return &vitistackv1alpha1.CloudInitConfig{
+		Type: vitistackv1alpha1.CloudInitTypeNoCloud,
+	}
+}
+
 // getBootImageAnnotations returns the annotations required for boot image source.
 // When BOOT_IMAGE_SOURCE is set to "bootimage", it returns annotations to indicate
 // the use of a DataVolume for the boot source with HTTP type.
@@ -84,8 +104,13 @@ func (m *MachineManager) ReconcileMachines(ctx context.Context, cluster *vitista
 		return fmt.Errorf("failed to list existing machines: %w", err)
 	}
 
+	useCloudInit, err := m.isStaticNetworkNamespace(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to evaluate network namespace allocation type: %w", err)
+	}
+
 	// Extract node information from cluster spec, passing existing machines for index allocation
-	desiredMachines, err := m.GenerateMachinesFromClusterWithContext(cluster, existingMachines)
+	desiredMachines, err := m.GenerateMachinesFromClusterWithContext(cluster, existingMachines, useCloudInit)
 	if err != nil {
 		return fmt.Errorf("failed to generate machines from cluster spec: %w", err)
 	}
@@ -122,9 +147,14 @@ func (m *MachineManager) GetExcessMachines(ctx context.Context, cluster *vitista
 		return nil, nil, fmt.Errorf("failed to list cluster machines: %w", err)
 	}
 
+	useCloudInit, err := m.isStaticNetworkNamespace(ctx, cluster)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to evaluate network namespace allocation type: %w", err)
+	}
+
 	// Generate desired machines from cluster spec WITH context about existing machines
 	// This ensures existing machines that belong to valid nodepools are preserved
-	desiredMachines, err := m.GenerateMachinesFromClusterWithContext(cluster, currentMachines)
+	desiredMachines, err := m.GenerateMachinesFromClusterWithContext(cluster, currentMachines, useCloudInit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate machines from cluster spec: %w", err)
 	}
@@ -208,10 +238,30 @@ func (m *MachineManager) DeleteMachine(ctx context.Context, machine *vitistackv1
 	return nil
 }
 
+// isStaticNetworkNamespace returns true when the cluster's referenced
+// NetworkNamespace has ipAllocation.type == static. This gates the cloud-init
+// (cidata) feature: DHCP clusters must remain untouched by this code path so
+// the existing boot flow stays byte-identical for them.
+func (m *MachineManager) isStaticNetworkNamespace(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (bool, error) {
+	name := cluster.Spec.Cluster.NetworkNamespaceName
+	if name == "" {
+		return false, nil
+	}
+	nn := &vitistackv1alpha1.NetworkNamespace{}
+	if err := m.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, nn); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return nn.Spec.IPAllocation != nil &&
+		nn.Spec.IPAllocation.Type == vitistackv1alpha1.IPAllocationTypeStatic, nil
+}
+
 // GenerateMachinesFromClusterWithContext extracts node information and creates Machine specs
 // When existingMachines is provided, it uses smart index allocation to preserve existing machines
 // and fill gaps when adding new workers
-func (m *MachineManager) GenerateMachinesFromClusterWithContext(cluster *vitistackv1alpha1.KubernetesCluster, existingMachines []vitistackv1alpha1.Machine) ([]*vitistackv1alpha1.Machine, error) {
+func (m *MachineManager) GenerateMachinesFromClusterWithContext(cluster *vitistackv1alpha1.KubernetesCluster, existingMachines []vitistackv1alpha1.Machine, useCloudInit bool) ([]*vitistackv1alpha1.Machine, error) {
 	machines := make([]*vitistackv1alpha1.Machine, 0, 2)
 
 	// Extract basic information from cluster
@@ -224,18 +274,18 @@ func (m *MachineManager) GenerateMachinesFromClusterWithContext(cluster *vitista
 	}
 
 	// Create control plane machines
-	controlPlaneMachines := m.generateControlPlaneMachines(cluster, clusterId, namespace)
+	controlPlaneMachines := m.generateControlPlaneMachines(cluster, clusterId, namespace, useCloudInit)
 	machines = append(machines, controlPlaneMachines...)
 
 	// Create worker machines with context about existing machines
-	workerMachines := m.generateWorkerMachinesWithContext(cluster, clusterId, namespace, existingMachines)
+	workerMachines := m.generateWorkerMachinesWithContext(cluster, clusterId, namespace, existingMachines, useCloudInit)
 	machines = append(machines, workerMachines...)
 
 	return machines, nil
 }
 
 // generateControlPlaneMachines creates control plane Machine objects from cluster spec
-func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string) []*vitistackv1alpha1.Machine {
+func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string, useCloudInit bool) []*vitistackv1alpha1.Machine {
 	var machines []*vitistackv1alpha1.Machine
 
 	// Create control plane nodes (assuming at least 1)
@@ -276,6 +326,7 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 				Network: vitistackv1alpha1.MachineNetwork{
 					NetworkNamespaceName: cluster.Spec.Cluster.NetworkNamespaceName,
 				},
+				CloudInit: cloudInitOrNil(useCloudInit),
 				Tags: map[string]string{
 					"cluster": clusterId,
 					"role":    "control-plane",
@@ -333,7 +384,7 @@ func buildWorkerIndexContext(existingMachines []vitistackv1alpha1.Machine, clust
 }
 
 // createWorkerMachine creates a worker Machine object with the given parameters
-func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass string, provider vitistackv1alpha1.MachineProviderType, disks []vitistackv1alpha1.MachineSpecDisk, networkNamespaceName string) *vitistackv1alpha1.Machine {
+func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass string, provider vitistackv1alpha1.MachineProviderType, disks []vitistackv1alpha1.MachineSpecDisk, networkNamespaceName string, useCloudInit bool) *vitistackv1alpha1.Machine {
 	// Get OS configuration based on boot image source setting
 	machineOS := getMachineOS()
 
@@ -362,6 +413,7 @@ func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass 
 			Network: vitistackv1alpha1.MachineNetwork{
 				NetworkNamespaceName: networkNamespaceName,
 			},
+			CloudInit: cloudInitOrNil(useCloudInit),
 			Tags: map[string]string{
 				"cluster":  clusterId,
 				"role":     "worker",
@@ -373,7 +425,7 @@ func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass 
 
 // generateWorkerMachinesWithContext creates worker Machine objects from cluster spec
 // Uses existing machines to determine nodepool membership and find available indices
-func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string, existingMachines []vitistackv1alpha1.Machine) []*vitistackv1alpha1.Machine {
+func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string, existingMachines []vitistackv1alpha1.Machine, useCloudInit bool) []*vitistackv1alpha1.Machine {
 	var machines []*vitistackv1alpha1.Machine
 
 	networkNamespaceName := cluster.Spec.Cluster.NetworkNamespaceName
@@ -382,7 +434,7 @@ func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1a
 	if len(cluster.Spec.Topology.Workers.NodePools) == 0 {
 		// Create default worker node if no node pools are specified
 		return []*vitistackv1alpha1.Machine{
-			createWorkerMachine(fmt.Sprintf("%s-wrk0", clusterId), namespace, clusterId, "", "medium", "", nil, networkNamespaceName),
+			createWorkerMachine(fmt.Sprintf("%s-wrk0", clusterId), namespace, clusterId, "", "medium", "", nil, networkNamespaceName, useCloudInit),
 		}
 	}
 
@@ -392,7 +444,7 @@ func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1a
 	// Process each nodepool
 	for idx := range cluster.Spec.Topology.Workers.NodePools {
 		nodePool := &cluster.Spec.Topology.Workers.NodePools[idx]
-		poolMachines := m.generateMachinesForNodePool(nodePool, clusterId, namespace, indexCtx, networkNamespaceName)
+		poolMachines := m.generateMachinesForNodePool(nodePool, clusterId, namespace, indexCtx, networkNamespaceName, useCloudInit)
 		machines = append(machines, poolMachines...)
 	}
 
@@ -400,7 +452,7 @@ func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1a
 }
 
 // generateMachinesForNodePool generates machines for a single nodepool
-func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1.KubernetesClusterNodePool, clusterId, namespace string, indexCtx *workerIndexContext, networkNamespaceName string) []*vitistackv1alpha1.Machine {
+func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1.KubernetesClusterNodePool, clusterId, namespace string, indexCtx *workerIndexContext, networkNamespaceName string, useCloudInit bool) []*vitistackv1alpha1.Machine {
 	workerDisks := convertStorageToDisks(nodePool.Storage)
 	machineClass := nodePool.MachineClass
 	if machineClass == "" {
@@ -427,7 +479,7 @@ func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1
 	// Add existing machines that we want to keep
 	for i := range keepCount {
 		existing := existingForPool[i]
-		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName)
+		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName, useCloudInit)
 		machines = append(machines, machine)
 	}
 
@@ -439,7 +491,7 @@ func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1
 		indexCtx.usedIndices[newIndex] = true
 
 		machineName := fmt.Sprintf("%s-wrk%d", clusterId, newIndex)
-		machine := createWorkerMachine(machineName, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName)
+		machine := createWorkerMachine(machineName, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName, useCloudInit)
 		machines = append(machines, machine)
 	}
 
@@ -542,6 +594,14 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackv1a
 			return fmt.Errorf("failed to get machine: %w", err)
 		}
 	} else {
+		// Preserve the existing Machine's CloudInit as-is. The cloud-init feature
+		// must be a no-op for Machines that predate it — even for clusters that
+		// now resolve to useCloudInit=true, the already-running VMs must not see
+		// their spec mutated (which could trigger a kubevirt-operator patch path).
+		// New Machines (scale-up / fresh clusters) go through the Create branch
+		// above and keep the desired CloudInit.
+		machine.Spec.CloudInit = existingMachine.Spec.CloudInit
+
 		// Machine exists, check if update is needed
 		// Compare spec and labels to determine if patch is necessary
 		specChanged := !machineSpecEqual(&existingMachine.Spec, &machine.Spec)
@@ -592,7 +652,17 @@ func machineSpecEqual(a, b *vitistackv1alpha1.MachineSpec) bool {
 			return false
 		}
 	}
+	if !cloudInitEqual(a.CloudInit, b.CloudInit) {
+		return false
+	}
 	return mapsEqual(a.Tags, b.Tags)
+}
+
+func cloudInitEqual(a, b *vitistackv1alpha1.CloudInitConfig) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Type == b.Type
 }
 
 // mapsEqual compares two string maps for equality

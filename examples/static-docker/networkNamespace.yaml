@@ -1,0 +1,50 @@
+# Static IP allocation for a Docker-hosted local dev cluster
+# (e.g. createlocalk8s / kind-style Talos nodes running as Docker containers).
+#
+# Topology:
+#   - Each KubeVirt node is a Docker container on a private Docker network
+#     (e.g. 10.5.0.0/24 for createlocalk8s). It has no uplink to any LAN.
+#   - kubevirt-operator creates a `bridge-br0` NetworkAttachmentDefinition.
+#     The bridge CNI plugin auto-creates `br0` inside each node's network
+#     namespace on first use. That bridge has NO upstream connectivity.
+#   - VMs attach to `br0` via Multus and receive their static IP from cidata.
+#
+# Consequence: VMs on the same node share a Layer-2 segment and can talk
+# to each other. They cannot reach the host LAN, cluster pods, or other
+# nodes. This example exists to validate the cidata -> Talos static-IP
+# pipeline end-to-end without requiring real network infrastructure.
+#
+# Prerequisites:
+#   - Multus installed and NOT disabled by Cilium
+#     (kubectl -n kube-system patch cm cilium-config --type=merge \
+#       -p '{"data":{"cni-exclusive":"false"}}'
+#      kubectl -n kube-system rollout restart ds cilium kube-multus-ds).
+#
+# The range below is deliberately outside Docker/pod/service CIDRs so it
+# won't clash with anything else on the node:
+#   10.5.0.0/24     Docker network used by createlocalk8s
+#   10.244.0.0/16   cluster pod CIDR
+#   10.96.0.0/12    cluster service CIDR
+#
+# For a real LAN deployment with an actual uplink on `br0`, use
+# examples/static instead.
+---
+apiVersion: vitistack.io/v1alpha1
+kind: NetworkNamespace
+metadata:
+  name: t-static-docker-001
+spec:
+  datacenterIdentifier: no-centraltest-az1
+  supervisorIdentifier: test-viti
+  ipAllocation:
+    type: static
+    provider: static-ip-operator
+    static:
+      ipv4CIDR: "192.168.200.0/24"
+      ipv4Gateway: "192.168.200.1"
+      ipv4RangeStart: "192.168.200.10"
+      ipv4RangeEnd: "192.168.200.50"
+      dns:
+        - "1.1.1.1"
+        - "8.8.8.8"
+      ttlSeconds: 600
