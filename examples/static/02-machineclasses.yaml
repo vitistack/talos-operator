@@ -34,3 +34,21 @@ spec:
   memory:
     quantity: 6Gi
   machineProviders: []
+---
+apiVersion: vitistack.io/v1alpha1
+kind: MachineClass
+metadata:
+  name: large
+spec:
+  displayName: Large
+  description: Large instance with 8 cores and 32Gi memory
+  enabled: true
+  default: false
+  category: Standard
+  cpu:
+    cores: 6
+    sockets: 1
+    threads: 1
+  memory:
+    quantity: 8Gi
+  machineProviders: []

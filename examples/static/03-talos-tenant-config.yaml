@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: talos-tenant-config
+  namespace: vitistack
+data:
+  config.yaml: |
+    machine:
+      network:
+        interfaces:
+          - interface: br0
+            bridge:
+              stp:
+                enabled: false
+              interfaces:
+                - net0
+            dhcp: false
+    ---
+    apiVersion: v1alpha1
+    kind: LinkAliasConfig
+    name: net0
+    selector:
+      match: mac(link.permanent_addr) == "#MACADDRESS#"

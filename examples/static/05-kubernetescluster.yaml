@@ -21,7 +21,7 @@ spec:
     controlplane:
       replicas: 1
       version: "1.35.3"
-      machineClass: small
+      machineClass: medium
       provider: kubevirt
       storage:
         - class: "standard"
