@@ -158,7 +158,7 @@ func (t *TalosManager) reconcileFailedNodes(ctx context.Context, cluster *vitist
 			continue
 		}
 
-		if t.clientService.IsNodeInMaintenanceMode(ctx, ip) {
+		if t.clientService.IsNodeInMaintenanceMode(ip) {
 			vlog.Warn(fmt.Sprintf("Node %s is marked as configured but still in maintenance mode, removing from configured list to retry configuration", nodeName))
 			if err := t.stateService.RemoveConfiguredNode(ctx, cluster, nodeName); err != nil {
 				vlog.Error(fmt.Sprintf("Failed to remove node %s from configured list: %v", nodeName, err), err)

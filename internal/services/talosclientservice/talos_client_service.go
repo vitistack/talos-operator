@@ -201,10 +201,16 @@ func (s *TalosClientService) IsTalosAPIReachable(nodeIP string) bool {
 }
 
 // IsNodeInMaintenanceMode checks if a node is still in Talos maintenance mode by
-// attempting an insecure (no client certificate) API call. Nodes in maintenance mode
-// accept insecure connections, while configured nodes require mutual TLS and will
-// reject the request. Returns true if the node is in maintenance mode.
-func (s *TalosClientService) IsNodeInMaintenanceMode(ctx context.Context, nodeIP string) bool {
+// making an insecure gRPC call (no client certificate). The behavior differs:
+//   - Maintenance node: gRPC connects but returns Unimplemented ("API is not implemented in maintenance mode")
+//   - Configured node: gRPC connection fails with "tls: certificate required" (mTLS enforced)
+//   - Unreachable node: connection times out
+//
+// Returns true only if the node is confirmed to be in maintenance mode.
+func (s *TalosClientService) IsNodeInMaintenanceMode(nodeIP string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	tClient, err := s.CreateTalosClient(ctx, true, nil, []string{nodeIP})
 	if err != nil {
 		return false
@@ -213,7 +219,13 @@ func (s *TalosClientService) IsNodeInMaintenanceMode(ctx context.Context, nodeIP
 
 	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
 	_, err = tClient.Version(nodeCtx)
-	return err == nil
+	if err == nil {
+		// Version succeeded — unexpected in maintenance, but treat as not-maintenance
+		return false
+	}
+
+	// In maintenance mode, the error contains "not implemented in maintenance mode"
+	return strings.Contains(err.Error(), "maintenance mode")
 }
 
 func (s *TalosClientService) WaitForTalosAPIs(
