@@ -356,6 +356,19 @@ func (t *TalosManager) stageBootstrapCluster(
 	}
 	// Use short timeout (1 minute) with quick retries (5 seconds) to allow other reconcilers to run
 	if err := t.clientService.BootstrapTalosControlPlaneWithRetry(ctx, bootstrapClient, firstCPIP, 1*time.Minute, 5*time.Second); err != nil {
+		// Check for CA certificate mismatch — this means the node has a stale CA from a
+		// previous cluster lifecycle. Reset state flags so the next reconcile re-applies
+		// config via insecure mode, which will install the correct CA on the node.
+		if talosclientservice.IsCACertMismatchError(err) {
+			vlog.Info(fmt.Sprintf("Stage 2b: CA certificate mismatch detected, node has stale CA — resetting to Stage 1: node=%s cluster=%s error=%s", firstControlPlane.Name, cluster.Name, err.Error()))
+			_ = t.setTalosSecretFlags(ctx, cluster, map[string]bool{
+				"first_controlplane_applied": false,
+				"first_controlplane_ready":   false,
+				"talos_api_ready":            false,
+			})
+			_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "False", "CACertMismatch", "Node has stale CA from previous lifecycle, re-applying config")
+			return talosclientservice.NewRequeueError("CA cert mismatch, resetting to re-apply config", 15*time.Second)
+		}
 		// If it's a retryable error, return a RequeueError so other reconcilers can be processed
 		if talosclientservice.IsRetryableBootstrapError(err) {
 			return talosclientservice.NewRequeueError("bootstrap not ready yet, will retry", 10*time.Second)

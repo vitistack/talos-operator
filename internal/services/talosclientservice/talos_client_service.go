@@ -326,6 +326,10 @@ func (s *TalosClientService) BootstrapTalosControlPlaneWithRetry(
 			return nil
 		} else {
 			lastErr = err
+			// CA mismatch is not transient — return immediately so the caller can reset state
+			if IsCACertMismatchError(err) {
+				return err
+			}
 			// Check if this is a retryable error
 			if !IsRetryableBootstrapError(err) {
 				return err
@@ -386,6 +390,20 @@ func isTLSHandshakeAuthError(err error) bool {
 	}
 	s := err.Error()
 	return strings.Contains(s, "x509:") || strings.Contains(s, "tls:")
+}
+
+// IsCACertMismatchError checks if the error is specifically a CA certificate mismatch.
+// This indicates the node has a different CA than the operator expects, which happens
+// when a cluster is deleted and recreated while the node still has the old CA.
+// Unlike transient TLS errors, this won't resolve by retrying — the node needs
+// to be re-configured with the correct CA.
+func IsCACertMismatchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "certificate signed by unknown authority") ||
+		strings.Contains(s, "certificate is not trusted")
 }
 
 // isRetryableBootstrapError checks if a bootstrap error is transient and should be retried.
