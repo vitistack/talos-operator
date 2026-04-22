@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"strings"
 
+	semver "github.com/Masterminds/semver/v3"
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -237,4 +240,141 @@ func (t *TalosManager) getEndpointIPForNewNodes(ctx context.Context, cluster *vi
 		}
 		return vip.Status.LoadBalancerIps[0], nil
 	}
+}
+
+// reconcileNodeVersions checks all nodes in the workload cluster and upgrades any
+// that are running a different Kubernetes version than what the cluster spec requires.
+// This handles the case where a node joins with a stale config template that has an
+// older Kubernetes version baked in (e.g., after a cluster-wide upgrade).
+func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	desiredVersion := cluster.Spec.Topology.Version
+	if desiredVersion == "" {
+		return nil // No explicit version set, nothing to enforce
+	}
+
+	// Normalize to "v1.35.0" format for comparison with node.Status.NodeInfo.KubeletVersion
+	desiredVersion = consts.EnsureVersionPrefix(desiredVersion)
+
+	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
+	if err != nil || clientset == nil {
+		return err
+	}
+
+	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list workload cluster nodes: %w", err)
+	}
+
+	// Get all machines for this cluster once
+	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster machines: %w", err)
+	}
+	machineMap := make(map[string]*vitistackv1alpha1.Machine)
+	for _, m := range machines {
+		machineMap[m.Name] = m
+	}
+
+	// Parse desired version for comparison
+	desiredSemver, err := semver.NewVersion(desiredVersion)
+	if err != nil {
+		return fmt.Errorf("failed to parse desired Kubernetes version %q: %w", desiredVersion, err)
+	}
+
+	// Collect nodes whose version is older than the desired version (upgrades only, no downgrades)
+	type mismatchedNode struct {
+		info talosclientservice.NodeUpgradeInfo
+		node string
+	}
+	var candidates []mismatchedNode
+	for i := range nodeList.Items {
+		node := &nodeList.Items[i]
+		nodeVersion := node.Status.NodeInfo.KubeletVersion
+		if nodeVersion == desiredVersion {
+			continue
+		}
+
+		nodeSemver, err := semver.NewVersion(nodeVersion)
+		if err != nil {
+			vlog.Warn(fmt.Sprintf("Cannot parse node %s Kubernetes version %q, skipping", node.Name, nodeVersion))
+			continue
+		}
+
+		// Only upgrade — skip if node is already at or above desired version
+		if !nodeSemver.LessThan(desiredSemver) {
+			if nodeSemver.GreaterThan(desiredSemver) {
+				vlog.Warn(fmt.Sprintf("Node %s is running Kubernetes %s which is newer than desired %s — downgrade is not supported, skipping",
+					node.Name, nodeVersion, desiredVersion))
+			}
+			continue
+		}
+
+		m, exists := machineMap[node.Name]
+		if !exists {
+			continue
+		}
+
+		nodeIP := getFirstIPv4(m)
+		if nodeIP == "" {
+			continue
+		}
+
+		candidates = append(candidates, mismatchedNode{
+			info: talosclientservice.NodeUpgradeInfo{
+				Name:           node.Name,
+				IP:             nodeIP,
+				IsControlPlane: m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == controlPlaneRole,
+			},
+			node: node.Name,
+		})
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Load Talos client config to check machine configs before upgrading
+	clientConfig, err := t.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to load talos client config: %w", err)
+	}
+
+	controlPlanes := t.machineService.FilterMachinesByRole(machines, controlPlaneRole)
+	controlPlaneIPs := extractIPv4Addresses(controlPlanes)
+	if len(controlPlaneIPs) == 0 {
+		return fmt.Errorf("no control plane IPs found for version reconciliation")
+	}
+
+	tClient, err := t.clientService.CreateTalosClient(ctx, false, clientConfig, controlPlaneIPs)
+	if err != nil {
+		return fmt.Errorf("failed to create Talos client for version reconciliation: %w", err)
+	}
+	defer func() { _ = tClient.Close() }()
+
+	// Filter out nodes whose machine config already has the target kubelet version.
+	// Those nodes just need time for the kubelet to restart — no need to re-apply.
+	expectedKubeletImage := fmt.Sprintf("ghcr.io/siderolabs/kubelet:%s", desiredVersion)
+	var nodesToUpgrade []talosclientservice.NodeUpgradeInfo
+	for _, c := range candidates {
+		if t.clientService.NodeHasKubeletImage(ctx, tClient, c.info.IP, expectedKubeletImage) {
+			continue // Config already correct, kubelet restart pending
+		}
+		vlog.Info(fmt.Sprintf("Node %s needs Kubernetes upgrade to %s", c.node, desiredVersion))
+		nodesToUpgrade = append(nodesToUpgrade, c.info)
+	}
+
+	if len(nodesToUpgrade) == 0 {
+		return nil
+	}
+
+	// Strip the "v" prefix for the upgrade API (it adds it back internally)
+	targetVersion := consts.NormalizeKubernetesVersion(desiredVersion)
+
+	if err := t.clientService.UpgradeKubernetes(ctx, tClient, nodesToUpgrade, targetVersion); err != nil {
+		return fmt.Errorf("failed to upgrade node Kubernetes versions: %w", err)
+	}
+
+	vlog.Info(fmt.Sprintf("Kubernetes version reconciliation complete: %d nodes upgraded to %s",
+		len(nodesToUpgrade), desiredVersion))
+	return nil
 }
