@@ -200,6 +200,22 @@ func (s *TalosClientService) IsTalosAPIReachable(nodeIP string) bool {
 	return true
 }
 
+// IsNodeInMaintenanceMode checks if a node is still in Talos maintenance mode by
+// attempting an insecure (no client certificate) API call. Nodes in maintenance mode
+// accept insecure connections, while configured nodes require mutual TLS and will
+// reject the request. Returns true if the node is in maintenance mode.
+func (s *TalosClientService) IsNodeInMaintenanceMode(ctx context.Context, nodeIP string) bool {
+	tClient, err := s.CreateTalosClient(ctx, true, nil, []string{nodeIP})
+	if err != nil {
+		return false
+	}
+	defer func() { _ = tClient.Close() }()
+
+	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	_, err = tClient.Version(nodeCtx)
+	return err == nil
+}
+
 func (s *TalosClientService) WaitForTalosAPIs(
 	machines []*vitistackv1alpha1.Machine,
 	timeout time.Duration,

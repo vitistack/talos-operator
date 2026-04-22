@@ -16,6 +16,13 @@ import (
 // reconcileNewNodes handles adding new nodes to an existing cluster
 // This is called when the cluster is already initialized but new machines have been added
 func (t *TalosManager) reconcileNewNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	// Check for nodes that were marked as configured but never actually joined the cluster.
+	// If they are still in Talos maintenance mode, remove them from the configured list
+	// so they get reconfigured on this pass.
+	if err := t.reconcileFailedNodes(ctx, cluster); err != nil {
+		vlog.Warn(fmt.Sprintf("Error during failed node reconciliation: %v", err))
+	}
+
 	newMachines, err := t.findUnconfiguredMachines(ctx, cluster)
 	if err != nil {
 		return err
@@ -117,6 +124,49 @@ func (t *TalosManager) findUnconfiguredMachines(ctx context.Context, cluster *vi
 		}
 	}
 	return newMachines, nil
+}
+
+// reconcileFailedNodes checks nodes that are marked as configured but are still in
+// Talos maintenance mode, meaning the configuration was never successfully applied
+// or the node was reset. These nodes are removed from the configured list so they
+// get picked up by findUnconfiguredMachines and reconfigured on the next pass.
+func (t *TalosManager) reconcileFailedNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	configuredNodes, err := t.getConfiguredNodes(ctx, cluster)
+	if err != nil || len(configuredNodes) == 0 {
+		return err
+	}
+
+	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster machines: %w", err)
+	}
+
+	// Build a lookup of machine name -> Machine
+	machineMap := make(map[string]*vitistackv1alpha1.Machine)
+	for _, m := range machines {
+		machineMap[m.Name] = m
+	}
+
+	for _, nodeName := range configuredNodes {
+		m, exists := machineMap[nodeName]
+		if !exists {
+			continue // Machine CRD was deleted; handled by reconcileRemovedNodes
+		}
+
+		ip := getFirstIPv4(m)
+		if ip == "" {
+			continue
+		}
+
+		if t.clientService.IsNodeInMaintenanceMode(ctx, ip) {
+			vlog.Warn(fmt.Sprintf("Node %s is marked as configured but still in maintenance mode, removing from configured list to retry configuration", nodeName))
+			if err := t.stateService.RemoveConfiguredNode(ctx, cluster, nodeName); err != nil {
+				vlog.Error(fmt.Sprintf("Failed to remove node %s from configured list: %v", nodeName, err), err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // loadNewNodeConfigContext loads configuration context needed for adding new nodes
