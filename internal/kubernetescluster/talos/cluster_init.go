@@ -45,7 +45,16 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 				// Continue even if cleanup has issues
 			}
 
-			return t.reconcileNewNodes(ctx, cluster)
+			if err := t.reconcileNewNodes(ctx, cluster); err != nil {
+				return err
+			}
+
+			// Reconcile Kubernetes version on nodes that joined with a stale config
+			if err := t.reconcileNodeVersions(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Error during node version reconciliation: %v", err))
+			}
+
+			return nil
 		}
 	}
 
