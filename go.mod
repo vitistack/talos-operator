@@ -11,7 +11,7 @@ require (
 	github.com/onsi/gomega v1.39.1
 	github.com/siderolabs/talos/pkg/machinery v1.12.6
 	github.com/spf13/viper v1.21.0
-	github.com/vitistack/common v0.8.58
+	github.com/vitistack/common v0.8.59
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.35.4
 	k8s.io/apimachinery v0.35.4
