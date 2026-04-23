@@ -379,8 +379,8 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 		// Build static IP patches if the NetworkNamespace uses static-ip-operator
 		var staticIPPatches []string
 		if staticCfg := t.getStaticIPConfig(ctx, cluster, m); staticCfg != nil {
-			networkPatch := talosconfigservice.BuildStaticNetworkPatch(*staticCfg)
-			kernelArgPatch := talosconfigservice.BuildStaticIPKernelArgPatch(*staticCfg)
+			networkPatch := talosconfigservice.BuildStaticNetworkPatch(staticCfg)
+			kernelArgPatch := talosconfigservice.BuildStaticIPKernelArgPatch(staticCfg)
 			staticIPPatches = append(staticIPPatches, networkPatch, kernelArgPatch)
 			vlog.Info(fmt.Sprintf("Static IP config for node %s: ip=%s gw=%s iface=%s",
 				m.Name, staticCfg.IP, staticCfg.Gateway, staticCfg.Interface))
@@ -619,7 +619,8 @@ func (t *TalosManager) getStaticIPConfig(ctx context.Context, cluster *vitistack
 		return nil
 	}
 
-	for _, iface := range nc.Status.NetworkInterfaces {
+	for i := range nc.Status.NetworkInterfaces {
+		iface := &nc.Status.NetworkInterfaces[i]
 		if iface.IPAllocated && len(iface.IPv4Addresses) > 0 {
 			// Determine interface name
 			ifaceName := "eth0"

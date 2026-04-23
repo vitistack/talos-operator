@@ -3,6 +3,7 @@ package talosconfigservice
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -419,7 +420,7 @@ type StaticIPConfig struct {
 
 // BuildStaticNetworkPatch generates a Talos machine config patch that configures
 // a static IP address, default route, and DNS nameservers on the given interface.
-func BuildStaticNetworkPatch(cfg StaticIPConfig) string {
+func BuildStaticNetworkPatch(cfg *StaticIPConfig) string {
 	prefixLen := extractPrefixLength(cfg.CIDR)
 	addressCIDR := fmt.Sprintf("%s/%s", cfg.IP, prefixLen)
 
@@ -447,7 +448,7 @@ func BuildStaticNetworkPatch(cfg StaticIPConfig) string {
 // a Linux ip= kernel argument so the node has network connectivity at boot,
 // before machine config is applied.
 // Format: ip=<client-ip>::<gateway>:<netmask>::<device>:none
-func BuildStaticIPKernelArgPatch(cfg StaticIPConfig) string {
+func BuildStaticIPKernelArgPatch(cfg *StaticIPConfig) string {
 	netmask := cidrToNetmask(cfg.CIDR)
 	kernelArg := fmt.Sprintf("ip=%s::%s:%s::%s:none", cfg.IP, cfg.Gateway, netmask, cfg.Interface)
 
@@ -471,9 +472,8 @@ func extractPrefixLength(cidr string) string {
 // cidrToNetmask converts a CIDR prefix to a dotted-decimal netmask.
 func cidrToNetmask(cidr string) string {
 	prefixLen := extractPrefixLength(cidr)
-	var bits int
-	fmt.Sscanf(prefixLen, "%d", &bits)
-	if bits <= 0 || bits > 32 {
+	bits, err := strconv.Atoi(prefixLen)
+	if err != nil || bits <= 0 || bits > 32 {
 		bits = 24
 	}
 	mask := uint32(0xFFFFFFFF) << (32 - bits)
