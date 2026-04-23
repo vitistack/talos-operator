@@ -5,3 +5,11 @@ metadata:
 spec:
   datacenterIdentifier: test-south-az1
   supervisorIdentifier: test-viti
+  ipAllocation:
+    type: dhcp
+    provider: kea
+    dhcp:
+      requireClientClasses:
+        - biosclients
+        - ueficlients
+        - ipxeclients
