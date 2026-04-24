@@ -1,0 +1,18 @@
+# KubevirtConfig for single-cluster setup (supervisor = remote KubeVirt target).
+#
+# Before applying, create the kubeconfig secret:
+#
+#   KUBECONFIG=~/dev/github/roger/createlocalk8s/clusters/viti/kubeconfig
+#   kubectl create secret generic kubevirt-provider \
+#     --namespace=default \
+#     --from-file=kubeconfig=$KUBECONFIG
+#
+---
+apiVersion: vitistack.io/v1alpha1
+kind: KubevirtConfig
+metadata:
+  name: kubevirt-provider
+spec:
+  name: kubevirt-provider
+  secretNamespace: vitistack
+  kubeconfigSecretRef: kubevirt-provider

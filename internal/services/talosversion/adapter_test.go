@@ -338,6 +338,78 @@ func TestSupportsHostnameConfigDocument(t *testing.T) {
 	}
 }
 
+func TestBuildVIPPatch_V1_11(t *testing.T) {
+	adapter := NewV1_11Adapter()
+	patch := adapter.BuildVIPPatch("10.0.0.100", "net0")
+
+	if !strings.Contains(patch, "machine:") {
+		t.Error("v1.11.x VIP patch should contain 'machine:'")
+	}
+	if !strings.Contains(patch, "interface: net0") {
+		t.Error("v1.11.x VIP patch should contain 'interface: net0'")
+	}
+	if !strings.Contains(patch, "ip: 10.0.0.100") {
+		t.Error("v1.11.x VIP patch should contain 'ip: 10.0.0.100'")
+	}
+}
+
+func TestBuildVIPPatch_V1_12(t *testing.T) {
+	adapter := NewV1_12Adapter()
+	patch := adapter.BuildVIPPatch("10.0.0.100", "net0")
+
+	if !strings.Contains(patch, "apiVersion: v1alpha1") {
+		t.Error("v1.12.x VIP patch should contain 'apiVersion: v1alpha1'")
+	}
+	if !strings.Contains(patch, "kind: Layer2VIPConfig") {
+		t.Error("v1.12.x VIP patch should contain 'kind: Layer2VIPConfig'")
+	}
+	if !strings.Contains(patch, "name: 10.0.0.100") {
+		t.Error("v1.12.x VIP patch should contain 'name: 10.0.0.100'")
+	}
+	if !strings.Contains(patch, "link: net0") {
+		t.Error("v1.12.x VIP patch should contain 'link: net0'")
+	}
+}
+
+func TestBuildLinkAliasConfigPatch_V1_11(t *testing.T) {
+	adapter := NewV1_11Adapter()
+	patch := adapter.BuildLinkAliasConfigPatch("net0")
+
+	if patch != "" {
+		t.Errorf("v1.11.x should return empty LinkAliasConfig patch, got %q", patch)
+	}
+}
+
+func TestBuildLinkAliasConfigPatch_V1_12(t *testing.T) {
+	adapter := NewV1_12Adapter()
+	patch := adapter.BuildLinkAliasConfigPatch("net0")
+
+	if !strings.Contains(patch, "apiVersion: v1alpha1") {
+		t.Error("v1.12.x LinkAliasConfig patch should contain 'apiVersion: v1alpha1'")
+	}
+	if !strings.Contains(patch, "kind: LinkAliasConfig") {
+		t.Error("v1.12.x LinkAliasConfig patch should contain 'kind: LinkAliasConfig'")
+	}
+	if !strings.Contains(patch, "name: net0") {
+		t.Error("v1.12.x LinkAliasConfig patch should contain 'name: net0'")
+	}
+	if !strings.Contains(patch, `mac(link.permanent_addr) == "#MACADDRESS#"`) {
+		t.Error("v1.12.x LinkAliasConfig patch should contain MAC address selector with #MACADDRESS# placeholder")
+	}
+}
+
+func TestBuildLinkAliasConfigPatch_V1_13(t *testing.T) {
+	adapter := NewV1_13Adapter()
+	patch := adapter.BuildLinkAliasConfigPatch("eth0")
+
+	if !strings.Contains(patch, "kind: LinkAliasConfig") {
+		t.Error("v1.13.x LinkAliasConfig patch should contain 'kind: LinkAliasConfig'")
+	}
+	if !strings.Contains(patch, "name: eth0") {
+		t.Error("v1.13.x LinkAliasConfig patch should use the provided name")
+	}
+}
+
 func TestListSupportedVersions(t *testing.T) {
 	versions := ListSupportedVersions()
 	if len(versions) < 3 {

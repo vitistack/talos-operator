@@ -304,6 +304,20 @@ func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vi
 	}
 	vlog.Info("Deleted ControlPlaneVirtualSharedIP: " + vipName)
 
+	// Delete VIP NetworkConfiguration (created by talosvip endpoint mode)
+	vipNCName := kc.Spec.Cluster.ClusterId + "-vip"
+	vipNC := &vitistackv1alpha1.NetworkConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      vipNCName,
+			Namespace: kc.GetNamespace(),
+		},
+	}
+	if err := r.Delete(ctx, vipNC); err != nil && !apierrors.IsNotFound(err) {
+		vlog.Error("Failed to delete VIP NetworkConfiguration: "+vipNCName, err)
+		return err
+	}
+	vlog.Info("Deleted VIP NetworkConfiguration: " + vipNCName)
+
 	// Delete Talos Secret
 	secretName := viper.GetString(consts.SECRET_PREFIX) + kc.Spec.Cluster.ClusterId
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: kc.GetNamespace()}}

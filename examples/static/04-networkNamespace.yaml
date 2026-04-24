@@ -1,0 +1,42 @@
+# Static IP allocation for a real L2 segment reachable from the cluster nodes.
+#
+# kubevirt-operator creates a NetworkAttachmentDefinition named `bridge-br0`
+# (when vlanId is unset) or `vlan<id>` (when vlanId is set). The VM attaches
+# through Multus to `br0` on each KubeVirt node, and cidata delivers the
+# allocated static IP from the range below to the VM at first boot.
+#
+# Prerequisites on every KubeVirt node:
+#   - A Linux bridge named `br0` exists.
+#   - `br0` has an uplink to the L2 segment the range lives on
+#     (here: the 192.168.0.0/23 LAN, untagged).
+#   - Multus is installed and not disabled by the primary CNI
+#     (e.g. Cilium: set `cni.exclusive=false`).
+#
+# For a local Docker-hosted dev cluster where nodes have no LAN uplink,
+# use examples/static-docker instead — same mechanism, explicitly isolated.
+#
+# For a VLAN-tagged segment, add `vlanId` under `static`:
+#   vlanId: 100
+# kubevirt-operator then creates a NAD `vlan100` with the VLAN tag applied
+# on the bridge CNI.
+---
+apiVersion: vitistack.io/v1alpha1
+kind: NetworkNamespace
+metadata:
+  name: t-static001
+spec:
+  datacenterIdentifier: no-centraltest-az1
+  supervisorIdentifier: test-viti
+  ipAllocation:
+    type: static
+    provider: static-ip-operator
+    static:
+      ipv4CIDR: "192.168.0.0/23"
+      ipv4Gateway: "192.168.0.1"
+      ipv4RangeStart: "192.168.1.240"
+      ipv4RangeEnd: "192.168.1.254"
+      dns:
+        - "192.168.0.1"
+        - "8.8.8.8"
+        - "1.1.1.1"
+      ttlSeconds: 600

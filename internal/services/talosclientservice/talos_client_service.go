@@ -200,6 +200,34 @@ func (s *TalosClientService) IsTalosAPIReachable(nodeIP string) bool {
 	return true
 }
 
+// IsNodeInMaintenanceMode checks if a node is still in Talos maintenance mode by
+// making an insecure gRPC call (no client certificate). The behavior differs:
+//   - Maintenance node: gRPC connects but returns Unimplemented ("API is not implemented in maintenance mode")
+//   - Configured node: gRPC connection fails with "tls: certificate required" (mTLS enforced)
+//   - Unreachable node: connection times out
+//
+// Returns true only if the node is confirmed to be in maintenance mode.
+func (s *TalosClientService) IsNodeInMaintenanceMode(nodeIP string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tClient, err := s.CreateTalosClient(ctx, true, nil, []string{nodeIP})
+	if err != nil {
+		return false
+	}
+	defer func() { _ = tClient.Close() }()
+
+	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	_, err = tClient.Version(nodeCtx)
+	if err == nil {
+		// Version succeeded — unexpected in maintenance, but treat as not-maintenance
+		return false
+	}
+
+	// In maintenance mode, the error contains "not implemented in maintenance mode"
+	return strings.Contains(err.Error(), "maintenance mode")
+}
+
 func (s *TalosClientService) WaitForTalosAPIs(
 	machines []*vitistackv1alpha1.Machine,
 	timeout time.Duration,
@@ -326,6 +354,10 @@ func (s *TalosClientService) BootstrapTalosControlPlaneWithRetry(
 			return nil
 		} else {
 			lastErr = err
+			// CA mismatch is not transient — return immediately so the caller can reset state
+			if IsCACertMismatchError(err) {
+				return err
+			}
 			// Check if this is a retryable error
 			if !IsRetryableBootstrapError(err) {
 				return err
@@ -386,6 +418,20 @@ func isTLSHandshakeAuthError(err error) bool {
 	}
 	s := err.Error()
 	return strings.Contains(s, "x509:") || strings.Contains(s, "tls:")
+}
+
+// IsCACertMismatchError checks if the error is specifically a CA certificate mismatch.
+// This indicates the node has a different CA than the operator expects, which happens
+// when a cluster is deleted and recreated while the node still has the old CA.
+// Unlike transient TLS errors, this won't resolve by retrying — the node needs
+// to be re-configured with the correct CA.
+func IsCACertMismatchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "certificate signed by unknown authority") ||
+		strings.Contains(s, "certificate is not trusted")
 }
 
 // isRetryableBootstrapError checks if a bootstrap error is transient and should be retried.
@@ -698,6 +744,24 @@ func (s *TalosClientService) upgradeNodeKubernetes(
 
 	provider := mc.Provider()
 
+	// Check if the machine config already specifies the target kubelet version.
+	// The kubelet may not have restarted yet, so the K8s API still reports the old
+	// version, but the config is already correct — no need to re-apply.
+	expectedKubeletImage := fmt.Sprintf("ghcr.io/siderolabs/kubelet:%s", targetVersion)
+	var configAlreadyCurrent bool
+	// Inspect current config without modifying it
+	_, _ = provider.PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
+		if cfg.MachineConfig != nil && cfg.MachineConfig.MachineKubelet != nil &&
+			cfg.MachineConfig.MachineKubelet.KubeletImage == expectedKubeletImage {
+			configAlreadyCurrent = true
+		}
+		return nil
+	})
+	if configAlreadyCurrent {
+		vlog.Info(fmt.Sprintf("Node %s machine config already has kubelet %s, waiting for kubelet restart", nodeIP, targetVersion))
+		return nil
+	}
+
 	// Patch the config with new Kubernetes image versions
 	newProvider, err := provider.PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
 		return s.patchKubernetesImages(cfg, targetVersion, isControlPlane)
@@ -731,6 +795,32 @@ func (s *TalosClientService) upgradeNodeKubernetes(
 	}
 
 	return nil
+}
+
+// NodeHasKubeletImage checks if a node's active machine config already specifies
+// the given kubelet image. This avoids redundant config applies when the config
+// is correct but the kubelet hasn't restarted yet.
+func (s *TalosClientService) NodeHasKubeletImage(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+	expectedImage string,
+) bool {
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
+	mc, err := safe.StateGetByID[*config.MachineConfig](nodeCtx, tClient.COSI, config.ActiveID)
+	if err != nil {
+		return false
+	}
+
+	var matches bool
+	_, _ = mc.Provider().PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
+		if cfg.MachineConfig != nil && cfg.MachineConfig.MachineKubelet != nil &&
+			cfg.MachineConfig.MachineKubelet.KubeletImage == expectedImage {
+			matches = true
+		}
+		return nil
+	})
+	return matches
 }
 
 // patchKubernetesImages patches the config with Kubernetes component images

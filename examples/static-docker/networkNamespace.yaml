@@ -1,0 +1,38 @@
+# NetworkNamespace for the Docker-hosted local dev example. Paired with
+# kubernetescluster.yaml in this directory.
+#
+# For the topology diagram, prerequisites, limitations, and troubleshooting,
+# see docs/docs/howtoguide/clusters/local-dev-docker.md (also referenced
+# from this directory's README.md).
+#
+# Quick orientation:
+#   - Static IP allocation only; kubevirt-operator creates a `bridge-br0`
+#     NAD with no uplink to any real LAN.
+#   - VMs come up on the range below inside each node's isolated `br0`;
+#     they are reachable from each other on the same node, nothing else.
+#   - The range is deliberately outside Docker/pod/service CIDRs to avoid
+#     collisions: 10.5.0.0/24 (Docker), 10.244.0.0/16 (pod), 10.96.0.0/12
+#     (service).
+#
+# For a real LAN deployment with an actual uplink on `br0`, use
+# examples/static instead.
+---
+apiVersion: vitistack.io/v1alpha1
+kind: NetworkNamespace
+metadata:
+  name: t-static-docker-001
+spec:
+  datacenterIdentifier: no-centraltest-az1
+  supervisorIdentifier: test-viti
+  ipAllocation:
+    type: static
+    provider: static-ip-operator
+    static:
+      ipv4CIDR: "192.168.200.0/24"
+      ipv4Gateway: "192.168.200.1"
+      ipv4RangeStart: "192.168.200.10"
+      ipv4RangeEnd: "192.168.200.50"
+      dns:
+        - "1.1.1.1"
+        - "8.8.8.8"
+      ttlSeconds: 600

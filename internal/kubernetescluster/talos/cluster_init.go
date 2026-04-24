@@ -45,7 +45,16 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 				// Continue even if cleanup has issues
 			}
 
-			return t.reconcileNewNodes(ctx, cluster)
+			if err := t.reconcileNewNodes(ctx, cluster); err != nil {
+				return err
+			}
+
+			// Reconcile Kubernetes version on nodes that joined with a stale config
+			if err := t.reconcileNodeVersions(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Error during node version reconciliation: %v", err))
+			}
+
+			return nil
 		}
 	}
 
@@ -130,13 +139,14 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 // clusterInitPrep holds prepared data for cluster initialization
 type clusterInitPrep struct {
-	machines        []*vitistackv1alpha1.Machine
-	controlPlanes   []*vitistackv1alpha1.Machine
-	workers         []*vitistackv1alpha1.Machine
-	controlPlaneIPs []string
-	endpointIPs     []string
-	tenantOverrides map[string]any
-	tenantPatches   []string
+	machines                  []*vitistackv1alpha1.Machine
+	controlPlanes             []*vitistackv1alpha1.Machine
+	workers                   []*vitistackv1alpha1.Machine
+	controlPlaneIPs           []string
+	endpointIPs               []string
+	tenantOverrides           map[string]any
+	tenantPatches             []string
+	controlPlaneTenantPatches []string // additional patches applied only to control plane nodes (e.g., VIP)
 }
 
 // prepareClusterInitialization prepares all required data for cluster initialization.
@@ -207,14 +217,28 @@ func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster
 		return nil, fmt.Errorf("failed to load tenant overrides: %w", err)
 	}
 
+	// Build LinkAliasConfig patch for all nodes when VIP mode is enabled (v1.12+).
+	// This maps the VIP link name (e.g. "net0") to a physical interface via MAC selector.
+	// Applied to all nodes so every node has stable interface aliases.
+	if linkAliasPatch := t.buildLinkAliasPatchIfNeeded(); linkAliasPatch != "" {
+		tenantPatches = append(tenantPatches, linkAliasPatch)
+	}
+
+	// Build control-plane-only patches (e.g., Layer2VIPConfig for talosvip mode)
+	var controlPlaneTenantPatches []string
+	if vipPatch := t.buildVIPPatchIfNeeded(ctx, cluster); vipPatch != "" {
+		controlPlaneTenantPatches = append(controlPlaneTenantPatches, vipPatch)
+	}
+
 	return &clusterInitPrep{
-		machines:        readyMachines,
-		controlPlanes:   controlPlanes,
-		workers:         workers,
-		controlPlaneIPs: controlPlaneIPs,
-		endpointIPs:     endpointIPs,
-		tenantOverrides: tenantOverrides,
-		tenantPatches:   tenantPatches,
+		machines:                  readyMachines,
+		controlPlanes:             controlPlanes,
+		workers:                   workers,
+		controlPlaneIPs:           controlPlaneIPs,
+		endpointIPs:               endpointIPs,
+		tenantOverrides:           tenantOverrides,
+		tenantPatches:             tenantPatches,
+		controlPlaneTenantPatches: controlPlaneTenantPatches,
 	}, nil
 }
 
@@ -341,6 +365,19 @@ func (t *TalosManager) stageBootstrapCluster(
 	}
 	// Use short timeout (1 minute) with quick retries (5 seconds) to allow other reconcilers to run
 	if err := t.clientService.BootstrapTalosControlPlaneWithRetry(ctx, bootstrapClient, firstCPIP, 1*time.Minute, 5*time.Second); err != nil {
+		// Check for CA certificate mismatch — this means the node has a stale CA from a
+		// previous cluster lifecycle. Reset state flags so the next reconcile re-applies
+		// config via insecure mode, which will install the correct CA on the node.
+		if talosclientservice.IsCACertMismatchError(err) {
+			vlog.Info(fmt.Sprintf("Stage 2b: CA certificate mismatch detected, node has stale CA — resetting to Stage 1: node=%s cluster=%s error=%s", firstControlPlane.Name, cluster.Name, err.Error()))
+			_ = t.setTalosSecretFlags(ctx, cluster, map[string]bool{
+				"first_controlplane_applied": false,
+				"first_controlplane_ready":   false,
+				"talos_api_ready":            false,
+			})
+			_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "False", "CACertMismatch", "Node has stale CA from previous lifecycle, re-applying config")
+			return talosclientservice.NewRequeueError("CA cert mismatch, resetting to re-apply config", 15*time.Second)
+		}
 		// If it's a retryable error, return a RequeueError so other reconcilers can be processed
 		if talosclientservice.IsRetryableBootstrapError(err) {
 			return talosclientservice.NewRequeueError("bootstrap not ready yet, will retry", 10*time.Second)
