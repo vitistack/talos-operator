@@ -80,28 +80,27 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Validate the cluster spec (especially control plane replicas for etcd quorum)
-	if err := r.ValidatorService.ValidateKubernetesCluster(kubernetesCluster); err != nil {
-		vlog.Error("KubernetesCluster validation failed", err)
-		_ = r.StatusManager.SetPhase(ctx, kubernetesCluster, status.PhaseValidationError)
-		_ = r.StatusManager.SetCondition(ctx, kubernetesCluster, "Valid", "False", "ValidationFailed", err.Error())
-		// Don't requeue - user needs to fix the spec
+	if r.validateClusterSpec(ctx, kubernetesCluster) {
+		// Don't requeue — user needs to fix the spec.
 		return ctrl.Result{}, nil
 	}
-	// Clear validation error - reset phase if it was ValidationError, and set Valid condition
-	_ = r.StatusManager.ClearValidationError(ctx, kubernetesCluster)
-	_ = r.StatusManager.SetCondition(ctx, kubernetesCluster, "Valid", "True", "ValidationPassed", "Cluster spec is valid")
 
 	// Add finalizer if not present (only for talos-managed clusters)
-	if requeue, err := r.ensureFinalizer(ctx, kubernetesCluster); err != nil {
-		vlog.Error("Failed to add finalizer", err)
-		return ctrl.Result{}, err
-	} else if requeue {
-		return ctrl.Result{Requeue: true}, nil
+	if result, handled, err := r.ensureFinalizerOrRequeue(ctx, kubernetesCluster); handled {
+		return result, err
 	}
 
 	// Handle scale-down before machine reconciliation
 	// This ensures nodes are properly removed from etcd/VIP before Machine CRDs are deleted
 	if result, handled := r.handleScaleDown(ctx, kubernetesCluster); handled {
+		return result, nil
+	}
+
+	// Gate Machine creation on the referenced NetworkNamespace being Ready.
+	// Otherwise downstream operators (e.g. kubevirt-operator) read NetworkNamespace.Status
+	// fields like VlanID while they're still zero and silently wire VMs to the wrong
+	// network — a wrong-IP bug that's invisible until the cluster fails to come up.
+	if result, handled := r.gateOnNetworkNamespaceReady(ctx, kubernetesCluster); handled {
 		return result, nil
 	}
 
@@ -182,6 +181,53 @@ func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluste
 	}
 
 	return ctrl.Result{}, false
+}
+
+// validateClusterSpec runs spec validation and sets the Valid condition. Returns
+// true when validation failed — Reconcile should stop without requeue (the user
+// must fix the spec). Returns false when validation passed.
+func (r *KubernetesClusterReconciler) validateClusterSpec(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) bool {
+	if err := r.ValidatorService.ValidateKubernetesCluster(cluster); err != nil {
+		vlog.Error("KubernetesCluster validation failed", err)
+		_ = r.StatusManager.SetPhase(ctx, cluster, status.PhaseValidationError)
+		_ = r.StatusManager.SetCondition(ctx, cluster, "Valid", "False", "ValidationFailed", err.Error())
+		return true
+	}
+	_ = r.StatusManager.ClearValidationError(ctx, cluster)
+	_ = r.StatusManager.SetCondition(ctx, cluster, "Valid", "True", "ValidationPassed", "Cluster spec is valid")
+	return false
+}
+
+// ensureFinalizerOrRequeue adds the finalizer if missing. Returns (result, true, err)
+// when Reconcile should return immediately (either because the finalizer Update failed,
+// or because it was just persisted and we want a clean requeue), or (_, false, nil)
+// when the finalizer was already present and Reconcile should continue.
+func (r *KubernetesClusterReconciler) ensureFinalizerOrRequeue(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, bool, error) {
+	requeue, err := r.ensureFinalizer(ctx, cluster)
+	if err != nil {
+		vlog.Error("Failed to add finalizer", err)
+		return ctrl.Result{}, true, err
+	}
+	if requeue {
+		return ctrl.Result{Requeue: true}, true, nil
+	}
+	return ctrl.Result{}, false, nil
+}
+
+// gateOnNetworkNamespaceReady blocks Machine reconciliation until the referenced
+// NetworkNamespace has reached Ready. Returns (result, true) to short-circuit Reconcile
+// (either requeueing or stopping on terminal failure), (_, false) to proceed.
+func (r *KubernetesClusterReconciler) gateOnNetworkNamespaceReady(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, bool) {
+	err := r.TalosManager.EnsureNetworkNamespaceReady(ctx, cluster)
+	if err == nil {
+		return ctrl.Result{}, false
+	}
+	if requeueErr, ok := talosclientservice.IsRequeueError(err); ok {
+		vlog.Info("Holding off Machine reconciliation: " + requeueErr.Reason)
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+	vlog.Error("NetworkNamespace prerequisite failed", err)
+	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 }
 
 // handleScaleDown handles machine scale-down operations.

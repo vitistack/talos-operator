@@ -55,7 +55,7 @@ func NewTalosManager(c client.Client, statusManager *status.StatusManager) *Talo
 		configService:   talosconfigservice.NewTalosConfigService(),
 		clientService:   clientSvc,
 		machineService:  machineservice.NewMachineService(c),
-		endpointService: endpointservice.NewEndpointService(c),
+		endpointService: endpointservice.NewEndpointService(c, statusManager),
 		stateService:    talosstateservice.NewTalosStateService(secretSvc),
 		etcdService:     etcdservice.NewEtcdService(clientSvc),
 	}
@@ -165,6 +165,13 @@ func (t *TalosManager) GetClientService() *talosclientservice.TalosClientService
 // GetStateService returns the Talos state service for version/upgrade state management
 func (t *TalosManager) GetStateService() *talosstateservice.TalosStateService {
 	return t.stateService
+}
+
+// EnsureNetworkNamespaceReady delegates to the endpoint service. Exposed so the
+// KubernetesCluster reconciler can gate Machine creation on the upstream
+// NetworkNamespace being Ready, without reaching into endpointService internals.
+func (t *TalosManager) EnsureNetworkNamespaceReady(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	return t.endpointService.EnsureNetworkNamespaceReady(ctx, cluster)
 }
 
 // talosSecretFlags is an alias to the state service's TalosSecretFlags type

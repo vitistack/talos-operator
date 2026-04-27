@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	semver "github.com/Masterminds/semver/v3"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
+	"github.com/vitistack/common/pkg/operator/conditions"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
@@ -17,6 +19,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
+
+// dependentVIPRequeueDelay is how long to wait before re-checking whether the
+// cluster's ControlPlaneVirtualSharedIP has reached its Ready condition.
+// NAM backend operations typically take 10–20s so this keeps us from
+// reconciling faster than the upstream can respond.
+const dependentVIPRequeueDelay = 15 * time.Second
 
 // reconcileNewNodes handles adding new nodes to an existing cluster
 // This is called when the cluster is already initialized but new machines have been added
@@ -231,17 +239,68 @@ func (t *TalosManager) getEndpointIPForNewNodes(ctx context.Context, cluster *vi
 	case consts.EndpointModeNetworkConfiguration:
 		fallthrough
 	default:
-		// For 'networkconfiguration' mode, get from VIP
+		// For 'networkconfiguration' mode, get from VIP. The VIP is driven
+		// to Ready asynchronously by the nms-operator (NAM takes 10–20s),
+		// so requeue instead of erroring when it's not ready yet.
 		vipName := cluster.Spec.Cluster.ClusterId
 		vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
 		if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip); err != nil {
 			return "", fmt.Errorf("failed to get VIP for new node configuration: %w", err)
 		}
+		t.mirrorVIPReadyToKC(ctx, cluster, vip)
+		if cond, ok := conditions.Get(vip.Status.Conditions, "Ready"); ok {
+			if cond.Status == metav1.ConditionFalse && cond.Reason == "Error" {
+				vlog.Warn(fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is in terminal failure state, spec change required: %s", vip.Namespace, vip.Name, cond.Message))
+				return "", fmt.Errorf("ControlPlaneVirtualSharedIP %s/%s is in a terminal failure state: %s", vip.Namespace, vip.Name, cond.Message)
+			}
+			if cond.Status != metav1.ConditionTrue {
+				vlog.Info(fmt.Sprintf("Waiting for ControlPlaneVirtualSharedIP %s/%s to reach Ready before configuring new nodes (phase=%s)", vip.Namespace, vip.Name, vip.Status.Phase))
+				return "", talosclientservice.NewRequeueError(
+					fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s not ready yet (phase=%s)", vip.Namespace, vip.Name, vip.Status.Phase),
+					dependentVIPRequeueDelay,
+				)
+			}
+		} else {
+			vlog.Info(fmt.Sprintf("Waiting for ControlPlaneVirtualSharedIP %s/%s to publish a Ready condition", vip.Namespace, vip.Name))
+			return "", talosclientservice.NewRequeueError(
+				fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s has no Ready condition yet", vip.Namespace, vip.Name),
+				dependentVIPRequeueDelay,
+			)
+		}
 		if len(vip.Status.LoadBalancerIps) == 0 {
-			return "", fmt.Errorf("VIP has no LoadBalancerIps, cannot configure new nodes")
+			vlog.Warn(fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is Ready but has no LoadBalancerIps yet, waiting", vip.Namespace, vip.Name))
+			return "", talosclientservice.NewRequeueError(
+				fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is Ready but has no LoadBalancerIps yet", vip.Namespace, vip.Name),
+				dependentVIPRequeueDelay,
+			)
 		}
 		return vip.Status.LoadBalancerIps[0], nil
 	}
+}
+
+// mirrorVIPReadyToKC copies the VIP's Ready condition onto the
+// KubernetesCluster as ControlPlaneVirtualSharedIPReady so the dependency
+// state is visible via kubectl describe kubernetescluster.
+func (t *TalosManager) mirrorVIPReadyToKC(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, vip *vitistackv1alpha1.ControlPlaneVirtualSharedIP) {
+	if t.statusManager == nil || cluster == nil || vip == nil {
+		return
+	}
+	display := fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s", vip.Namespace, vip.Name)
+	cond, ok := conditions.Get(vip.Status.Conditions, "Ready")
+	if !ok {
+		_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneVirtualSharedIPReady", "Unknown", "NoCondition",
+			fmt.Sprintf("%s has not published a Ready condition yet", display))
+		return
+	}
+	msg := cond.Message
+	if msg == "" {
+		msg = fmt.Sprintf("%s Ready=%s", display, cond.Status)
+	}
+	reason := cond.Reason
+	if reason == "" {
+		reason = "Unknown"
+	}
+	_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneVirtualSharedIPReady", string(cond.Status), reason, msg)
 }
 
 // reconcileNodeVersions checks all nodes in the workload cluster and upgrades any

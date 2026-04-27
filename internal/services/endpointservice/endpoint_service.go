@@ -9,7 +9,10 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
+	"github.com/vitistack/common/pkg/operator/conditions"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
+	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,7 +20,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const statusFailed = "Failed"
+// Condition types surfaced onto the KubernetesCluster to reflect the Ready
+// state of the dependent CRDs this controller consumes. The talos-operator
+// only consumes the CRDs themselves; whichever controller provisions them
+// (and whatever backend it talks to) is a deployment detail.
+const (
+	kcCondNetworkNamespaceReady            = "NetworkNamespaceReady"
+	kcCondControlPlaneVirtualSharedIPReady = "ControlPlaneVirtualSharedIPReady"
+)
+
+const (
+	statusFailed = "Failed"
+	// dependentCRRequeueDelay is how long to wait before re-checking whether a
+	// dependent CR (NetworkNamespace, ControlPlaneVirtualSharedIP) has reached
+	// its Ready condition. Reconciliation by the upstream controller typically
+	// takes a few seconds; this delay backs off enough to avoid hot-looping.
+	dependentCRRequeueDelay = 15 * time.Second
+)
+
+// isResourceReady returns true when conds contains a Ready condition with
+// Status=True. It also returns an error when Ready is explicitly False with
+// reason "Error" (terminal — user must fix the spec), so callers can stop
+// reconciling instead of looping forever. The "Error" reason is a convention
+// shared by the dependent CRDs we consume.
+func isResourceReady(conds []metav1.Condition) (ready bool, terminal error) {
+	cond, ok := conditions.Get(conds, "Ready")
+	if !ok {
+		return false, nil
+	}
+	if cond.Status == metav1.ConditionTrue {
+		return true, nil
+	}
+	if cond.Status == metav1.ConditionFalse && cond.Reason == "Error" {
+		return false, fmt.Errorf("%s", cond.Message)
+	}
+	return false, nil
+}
 
 // deprecationWarned tracks namespaces for which the deprecation warning has already been logged,
 // so we don't spam the logs on every reconcile loop.
@@ -26,11 +64,97 @@ var deprecationWarned sync.Map
 // EndpointService handles VIP and endpoint management for Talos clusters
 type EndpointService struct {
 	client.Client
+	StatusManager *status.StatusManager
 }
 
-// NewEndpointService creates a new EndpointService
-func NewEndpointService(c client.Client) *EndpointService {
-	return &EndpointService{Client: c}
+// NewEndpointService creates a new EndpointService. StatusManager is optional;
+// when provided, the service mirrors the Ready condition of dependent CRs
+// onto the KubernetesCluster so operators can see why a reconcile is waiting
+// via kubectl describe.
+func NewEndpointService(c client.Client, sm *status.StatusManager) *EndpointService {
+	return &EndpointService{Client: c, StatusManager: sm}
+}
+
+// mirrorReadyToKC copies the "Ready" condition of a dependent CR onto the
+// KubernetesCluster as kcCondType. Called whenever the endpoint service
+// inspects a dependent CR's readiness, so KC status tracks upstream state
+// without the user having to describe the dependent resource directly.
+//
+// Safe to call with a nil StatusManager (no-op) so the service still works
+// in tests or contexts without one wired in.
+func (s *EndpointService) mirrorReadyToKC(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster, upstreamConds []metav1.Condition, kcCondType, displayName string) {
+	if s.StatusManager == nil || kc == nil {
+		return
+	}
+	cond, ok := conditions.Get(upstreamConds, "Ready")
+	if !ok {
+		_ = s.StatusManager.SetCondition(ctx, kc, kcCondType, "Unknown", "NoCondition", fmt.Sprintf("%s has not published a Ready condition yet", displayName))
+		return
+	}
+	msg := cond.Message
+	if msg == "" {
+		msg = fmt.Sprintf("%s Ready=%s", displayName, cond.Status)
+	}
+	reason := cond.Reason
+	if reason == "" {
+		reason = "Unknown"
+	}
+	_ = s.StatusManager.SetCondition(ctx, kc, kcCondType, string(cond.Status), reason, msg)
+}
+
+// EnsureNetworkNamespaceReady verifies that the NetworkNamespace referenced by the
+// cluster is Ready before the caller proceeds with downstream work (e.g. creating
+// Machines). It mirrors the NetworkNamespace's Ready condition onto the cluster
+// status so users can see the wait reason via kubectl describe.
+//
+// Returns nil when the NetworkNamespace is Ready (or when the cluster doesn't
+// reference one — legacy specs are not blocked).
+//
+// Returns a *talosclientservice.RequeueError when the NetworkNamespace is missing
+// or not yet Ready, so the caller can requeue without surfacing a hard failure.
+//
+// Returns a regular error when the NetworkNamespace has reached a terminal failure
+// state (won't clear without a spec change), so the caller can stop reconciling.
+func (s *EndpointService) EnsureNetworkNamespaceReady(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	nnName := cluster.Spec.Cluster.NetworkNamespaceName
+	if nnName == "" {
+		// Legacy spec without an explicit NetworkNamespace reference — no gate to apply.
+		return nil
+	}
+
+	nn, err := s.findNetworkNamespace(ctx, cluster.GetNamespace(), nnName)
+	if err != nil {
+		return fmt.Errorf("failed to look up NetworkNamespace %q: %w", nnName, err)
+	}
+	if nn == nil {
+		// Referenced but not yet present — wait for it to appear.
+		if s.StatusManager != nil {
+			_ = s.StatusManager.SetCondition(ctx, cluster, kcCondNetworkNamespaceReady, "Unknown", "NotFound",
+				fmt.Sprintf("NetworkNamespace %q not found yet", nnName))
+		}
+		return talosclientservice.NewRequeueError(
+			fmt.Sprintf("NetworkNamespace %q not found yet", nnName),
+			dependentCRRequeueDelay,
+		)
+	}
+
+	s.mirrorReadyToKC(ctx, cluster, nn.Status.Conditions, kcCondNetworkNamespaceReady,
+		fmt.Sprintf("NetworkNamespace %s/%s", nn.Namespace, nn.Name))
+
+	ready, terminal := isResourceReady(nn.Status.Conditions)
+	if terminal != nil {
+		return fmt.Errorf("NetworkNamespace %s/%s is in a terminal failure state: %w",
+			nn.Namespace, nn.Name, terminal)
+	}
+	if !ready {
+		vlog.Info(fmt.Sprintf("Waiting for NetworkNamespace %s/%s to reach Ready (phase=%s)",
+			nn.Namespace, nn.Name, nn.Status.Phase))
+		return talosclientservice.NewRequeueError(
+			fmt.Sprintf("NetworkNamespace %s/%s not ready yet (phase=%s)", nn.Namespace, nn.Name, nn.Status.Phase),
+			dependentCRRequeueDelay,
+		)
+	}
+	return nil
 }
 
 // DetermineControlPlaneEndpoints determines the control plane endpoints based on the configured endpoint mode
@@ -91,6 +215,21 @@ func (s *EndpointService) getEndpointsNetworkConfiguration(ctx context.Context, 
 	if networkNamespace == nil {
 		vlog.Warn("No NetworkNamespace found, falling back to direct control plane IPs")
 		return []string{controlPlaneIPs[0]}, nil
+	}
+
+	// The NetworkNamespace must be Ready before we can attach a VIP to it —
+	// its Status fields (subnet, prefix, etc.) aren't populated until then.
+	// Surface this as a requeue so we don't burn reconciles waiting.
+	s.mirrorReadyToKC(ctx, cluster, networkNamespace.Status.Conditions, kcCondNetworkNamespaceReady, fmt.Sprintf("NetworkNamespace %s/%s", networkNamespace.Namespace, networkNamespace.Name))
+	if ready, terminal := isResourceReady(networkNamespace.Status.Conditions); terminal != nil {
+		vlog.Warn(fmt.Sprintf("NetworkNamespace %s/%s is in terminal failure state, spec change required: %v", networkNamespace.Namespace, networkNamespace.Name, terminal))
+		return nil, fmt.Errorf("NetworkNamespace %s/%s is in a terminal failure state: %w", networkNamespace.Namespace, networkNamespace.Name, terminal)
+	} else if !ready {
+		vlog.Info(fmt.Sprintf("Waiting for NetworkNamespace %s/%s to reach Ready (phase=%s)", networkNamespace.Namespace, networkNamespace.Name, networkNamespace.Status.Phase))
+		return nil, talosclientservice.NewRequeueError(
+			fmt.Sprintf("NetworkNamespace %s/%s not ready yet", networkNamespace.Namespace, networkNamespace.Name),
+			dependentCRRequeueDelay,
+		)
 	}
 
 	// Create or get ControlPlaneVirtualSharedIP for load balancing
@@ -247,7 +386,13 @@ func (s *EndpointService) getEndpointsCustom() ([]string, error) {
 	return validEndpoints, nil
 }
 
-// EnsureControlPlaneVIPs creates or updates a ControlPlaneVirtualSharedIP resource and waits for LoadBalancerIps
+// EnsureControlPlaneVIPs creates or updates a ControlPlaneVirtualSharedIP resource and
+// returns its LoadBalancerIps once it has reached Ready.
+//
+// Provisioning the VIP is asynchronous and driven by the controller that owns
+// the ControlPlaneVirtualSharedIP CRD (deployment-specific). If the VIP isn't
+// Ready yet, this returns a RequeueError so the outer reconcile loop retries
+// without blocking a goroutine on a sleep loop.
 func (s *EndpointService) EnsureControlPlaneVIPs(ctx context.Context, networkNamespace *vitistackv1alpha1.NetworkNamespace, cluster *vitistackv1alpha1.KubernetesCluster, controlPlaneIPs []string) ([]string, error) {
 	vipName := cluster.Spec.Cluster.ClusterId
 
@@ -284,114 +429,55 @@ func (s *EndpointService) EnsureControlPlaneVIPs(ctx context.Context, networkNam
 		if err := s.Create(ctx, vip); err != nil {
 			return nil, fmt.Errorf("failed to create ControlPlaneVirtualSharedIP: %w", err)
 		}
-		vlog.Info(fmt.Sprintf("Created ControlPlaneVirtualSharedIP: %s/%s", vip.Namespace, vip.Name))
+		vlog.Info(fmt.Sprintf("Created ControlPlaneVirtualSharedIP %s/%s, awaiting provisioning", vip.Namespace, vip.Name))
+		if s.StatusManager != nil {
+			_ = s.StatusManager.SetCondition(ctx, cluster, kcCondControlPlaneVirtualSharedIPReady, "False", "Provisioning",
+				fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s just created, awaiting provisioning", vip.Namespace, vip.Name))
+		}
+		return nil, talosclientservice.NewRequeueError(
+			fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s just created, awaiting provisioning", vip.Namespace, vip.Name),
+			dependentCRRequeueDelay,
+		)
 	} else if !stringSlicesEqual(vip.Spec.PoolMembers, controlPlaneIPs) {
 		// Update existing VIP if pool members changed
 		vip.Spec.PoolMembers = controlPlaneIPs
 		if err := s.Update(ctx, vip); err != nil {
 			return nil, fmt.Errorf("failed to update ControlPlaneVirtualSharedIP: %w", err)
 		}
-		vlog.Info(fmt.Sprintf("Updated ControlPlaneVirtualSharedIP pool members: %s/%s", vip.Namespace, vip.Name))
-	}
-
-	// Wait for LoadBalancerIps to be populated
-	endpoints, err := s.WaitForVIPLoadBalancerIP(ctx, cluster, vipName, 15*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("failed waiting for VIP LoadBalancerIps: %w", err)
-	}
-
-	vlog.Info(fmt.Sprintf("Using VIP endpoint for cluster %s: %v", cluster.Name, endpoints))
-	return endpoints, nil
-}
-
-// WaitForVIPLoadBalancerIP waits for the ControlPlaneVirtualSharedIP status to have LoadBalancerIps populated
-// It handles cluster deletion, VIP errors, and provides proper error context
-func (s *EndpointService) WaitForVIPLoadBalancerIP(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, vipName string, timeout time.Duration) ([]string, error) {
-	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("context cancelled while waiting for VIP LoadBalancerIps: %w", ctx.Err())
-		case <-ticker.C:
-			if time.Now().After(deadline) {
-				return nil, fmt.Errorf("timeout waiting for VIP LoadBalancerIps after %v", timeout)
-			}
-
-			// Check if cluster is being deleted
-			if err := s.checkClusterDeletion(ctx, cluster); err != nil {
-				return nil, err
-			}
-
-			// Check VIP status and get LoadBalancerIps
-			loadBalancerIps, shouldContinue, err := s.checkVIPStatus(ctx, cluster.Namespace, vipName)
-			if err != nil {
-				return nil, err
-			}
-			if shouldContinue {
-				continue
-			}
-			if loadBalancerIps != nil {
-				return loadBalancerIps, nil
-			}
+		vlog.Info(fmt.Sprintf("Updated ControlPlaneVirtualSharedIP %s/%s pool members, awaiting reconciliation", vip.Namespace, vip.Name))
+		if s.StatusManager != nil {
+			_ = s.StatusManager.SetCondition(ctx, cluster, kcCondControlPlaneVirtualSharedIPReady, "False", "Updating",
+				fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s pool members updated, awaiting reconciliation", vip.Namespace, vip.Name))
 		}
-	}
-}
-
-// checkClusterDeletion checks if the cluster is being deleted or has been removed
-func (s *EndpointService) checkClusterDeletion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	clusterCheck := &vitistackv1alpha1.KubernetesCluster{}
-	if err := s.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, clusterCheck); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("cluster %s/%s was deleted while waiting for VIP", cluster.Namespace, cluster.Name)
-		}
-		vlog.Warn(fmt.Sprintf("Failed to check cluster status: %v", err))
-		// Don't return error on transient errors, let retry continue
-		return nil
-	}
-	if clusterCheck.GetDeletionTimestamp() != nil {
-		return fmt.Errorf("cluster %s/%s is being deleted, cancelling VIP wait", cluster.Namespace, cluster.Name)
-	}
-	return nil
-}
-
-// checkVIPStatus checks VIP status and returns LoadBalancerIps if ready
-// Returns (loadBalancerIps, shouldContinue, error)
-func (s *EndpointService) checkVIPStatus(ctx context.Context, namespace, vipName string) ([]string, bool, error) {
-	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
-	if err := s.Get(ctx, types.NamespacedName{Name: vipName, Namespace: namespace}, vip); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, false, fmt.Errorf("VIP %s/%s was deleted or not found", namespace, vipName)
-		}
-		vlog.Warn(fmt.Sprintf("Failed to get VIP status: %v", err))
-		// Continue on transient errors
-		return nil, true, nil
+		return nil, talosclientservice.NewRequeueError(
+			fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s pool members updated, awaiting reconciliation", vip.Namespace, vip.Name),
+			dependentCRRequeueDelay,
+		)
 	}
 
-	// Check for VIP error conditions
-	if vip.Status.Phase == statusFailed || vip.Status.Status == statusFailed {
-		msg := vip.Status.Message
-		if msg == "" {
-			msg = "VIP creation failed without details"
-		}
-		return nil, false, fmt.Errorf("VIP %s/%s failed: %s", namespace, vipName, msg)
+	// Spec is up to date — wait for Ready before returning LoadBalancerIps.
+	s.mirrorReadyToKC(ctx, cluster, vip.Status.Conditions, kcCondControlPlaneVirtualSharedIPReady, fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s", vip.Namespace, vip.Name))
+	if ready, terminal := isResourceReady(vip.Status.Conditions); terminal != nil {
+		vlog.Warn(fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is in terminal failure state, spec change required: %v", vip.Namespace, vip.Name, terminal))
+		return nil, fmt.Errorf("ControlPlaneVirtualSharedIP %s/%s is in a terminal failure state: %w", vip.Namespace, vip.Name, terminal)
+	} else if !ready {
+		vlog.Info(fmt.Sprintf("Waiting for ControlPlaneVirtualSharedIP %s/%s to reach Ready (phase=%s status=%s)", vip.Namespace, vip.Name, vip.Status.Phase, vip.Status.Status))
+		return nil, talosclientservice.NewRequeueError(
+			fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s not ready yet (phase=%s status=%s)", vip.Namespace, vip.Name, vip.Status.Phase, vip.Status.Status),
+			dependentCRRequeueDelay,
+		)
 	}
 
-	// Check if LoadBalancerIps are populated
-	if len(vip.Status.LoadBalancerIps) > 0 {
-		vlog.Info(fmt.Sprintf("VIP %s/%s ready with LoadBalancerIps: %v", namespace, vipName, vip.Status.LoadBalancerIps))
-		return vip.Status.LoadBalancerIps, false, nil
+	if len(vip.Status.LoadBalancerIps) == 0 {
+		vlog.Warn(fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is Ready but has no LoadBalancerIps yet, waiting", vip.Namespace, vip.Name))
+		return nil, talosclientservice.NewRequeueError(
+			fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is Ready but has no LoadBalancerIps yet", vip.Namespace, vip.Name),
+			dependentCRRequeueDelay,
+		)
 	}
 
-	// Log current status for debugging
-	statusInfo := fmt.Sprintf("phase=%s, status=%s", vip.Status.Phase, vip.Status.Status)
-	if vip.Status.Message != "" {
-		statusInfo += fmt.Sprintf(", message=%s", vip.Status.Message)
-	}
-	vlog.Info(fmt.Sprintf("Waiting for VIP %s/%s to have LoadBalancerIps populated... [%s]", namespace, vipName, statusInfo))
-	return nil, true, nil
+	vlog.Info(fmt.Sprintf("Using VIP endpoint for cluster %s: %v", cluster.Name, vip.Status.LoadBalancerIps))
+	return vip.Status.LoadBalancerIps, nil
 }
 
 // UpdateVIPPoolMembers updates the pool members of an existing ControlPlaneVirtualSharedIP
