@@ -304,6 +304,13 @@ func (s *TalosConfigService) GetSecretsBundle(configBundle *TalosConfigBundle) *
 	return configBundle.SecretsBundle
 }
 
+// PrepareNodeConfig builds the per-node config from the role template.
+//
+// installImage pins the machine.install.image value when non-empty. Pass the
+// cluster's previously-resolved install image so new nodes added later install
+// the same Talos version as existing nodes. Pass "" to fall back to the
+// operator-wide TALOS_VM_INSTALL_IMAGE_* env vars (used at first cluster
+// creation when there is nothing to pin to yet).
 func (s *TalosConfigService) PrepareNodeConfig(
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	roleYAML []byte,
@@ -311,6 +318,7 @@ func (s *TalosConfigService) PrepareNodeConfig(
 	m *vitistackv1alpha1.Machine,
 	tenantOverrides map[string]any,
 	macAddress string,
+	installImage string,
 	extraPatches ...string) ([]byte, error) {
 	// Replace per-node placeholders in the role template before applying patches.
 	// #MACADDRESS# is used in LinkAliasConfig selectors to match the node's physical
@@ -335,7 +343,9 @@ func (s *TalosConfigService) PrepareNodeConfig(
 
 	// Apply VM customizations if needed
 	if m.Status.Provider != "" && s.IsVirtualMachineProvider(m.Status.Provider.String()) {
-		installImage := s.GetVMInstallImage(m.Status.Provider)
+		if installImage == "" {
+			installImage = s.GetVMInstallImage(m.Status.Provider)
+		}
 		vmPatch := s.buildVMCustomizationPatch(installImage)
 		if vmPatch != "" {
 			patches = append(patches, vmPatch)

@@ -123,7 +123,7 @@ func (c *UpgradeController) handleCompletedUpgrade(
 
 	// Mark upgrade as complete and regenerate configs
 	if state.UpgradeType == UpgradeTypeTalos {
-		_ = c.upgradeService.CompleteTalosUpgrade(ctx, cluster, state.TargetVersion)
+		_ = c.upgradeService.CompleteTalosUpgrade(ctx, cluster, state.TargetVersion, state.InstallerImage)
 
 		// Regenerate machine configs after Talos upgrade (no K8s version override needed)
 		if clientConfig != nil {

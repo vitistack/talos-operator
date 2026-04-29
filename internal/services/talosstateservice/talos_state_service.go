@@ -74,6 +74,10 @@ func (s *TalosStateService) EnsureSecretExists(ctx context.Context, cluster *vit
 		// Version tracking - persisted for recovery and verification
 		"talos_version":      []byte(""),
 		"kubernetes_version": []byte(""),
+		// Install image URL pinned at cluster create / last upgrade. Used when adding
+		// new nodes so they install the same Talos version as the rest of the cluster
+		// instead of whatever TALOS_VERSION the operator currently has configured.
+		"install_image": []byte(""),
 		// Upgrade state tracking - for resume/recovery of interrupted upgrades
 		"upgrade_in_progress":    []byte(falseStr),
 		"upgrade_type":           []byte(""),  // "talos" or "kubernetes"
@@ -303,6 +307,55 @@ func (s *TalosStateService) SetClusterVersions(ctx context.Context, cluster *vit
 		return err
 	}
 	return fmt.Errorf("failed to set cluster versions after %d retries", maxRetries)
+}
+
+// GetInstallImage retrieves the pinned Talos install image URL for the cluster.
+// Returns "" if not set (legacy clusters created before this field existed).
+func (s *TalosStateService) GetInstallImage(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (string, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return "", err
+	}
+	if secret.Data == nil {
+		return "", nil
+	}
+	return string(secret.Data["install_image"]), nil
+}
+
+// SetInstallImage persists the Talos install image URL for the cluster.
+// This is the image used to install Talos to disk; pinning it ensures new nodes
+// added later use the same Talos version as existing nodes.
+//
+//nolint:dupl // mirrors the SetCurrentUpgradingNode/SetKubeSystemUID retry pattern intentionally
+func (s *TalosStateService) SetInstallImage(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, image string) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+
+		if string(secret.Data["install_image"]) == image {
+			return nil
+		}
+		secret.Data["install_image"] = []byte(image)
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			vlog.Info(fmt.Sprintf("Install image persisted: cluster=%s image=%s", cluster.Name, image))
+			return nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to set install image after %d retries", maxRetries)
 }
 
 // GetUpgradeState retrieves the persisted upgrade state from the secret
@@ -1202,6 +1255,8 @@ func (s *TalosStateService) GetKubeSystemUID(ctx context.Context, cluster *vitis
 }
 
 // SetCurrentUpgradingNode sets which node is currently being upgraded
+//
+//nolint:dupl // mirrors the SetInstallImage retry pattern intentionally
 func (s *TalosStateService) SetCurrentUpgradingNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
 	maxRetries := 3
 	for attempt := range maxRetries {

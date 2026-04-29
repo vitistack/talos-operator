@@ -980,3 +980,28 @@ func (s *TalosClientService) GetMachineConfigYAML(
 
 	return cfgBytes, nil
 }
+
+// GetMachineInstallImage fetches machine.install.image from a node's active machine config.
+// Equivalent to: talosctl -n <node> get machineconfig -o jsonpath='{.spec.machine.install.image}'.
+// Returns "" if the field isn't set on the node.
+func (s *TalosClientService) GetMachineInstallImage(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+) (string, error) {
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
+
+	mc, err := safe.StateGetByID[*config.MachineConfig](nodeCtx, tClient.COSI, config.ActiveID)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch machine config from node %s: %w", nodeIP, err)
+	}
+
+	var image string
+	_, _ = mc.Provider().PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
+		if cfg.MachineConfig != nil && cfg.MachineConfig.MachineInstall != nil {
+			image = cfg.MachineConfig.MachineInstall.InstallImage
+		}
+		return nil
+	})
+	return image, nil
+}

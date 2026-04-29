@@ -346,71 +346,179 @@ func (t *TalosManager) applyPerNodeConfiguration(ctx context.Context,
 	cpTemplate := secret.Data["controlplane.yaml"]
 	wTemplate := secret.Data["worker.yaml"]
 
+	// Resolve the Talos install image once for this batch. Pinning the image at
+	// cluster-create time (and refreshing on upgrade) makes new nodes added
+	// later install the same Talos version as existing nodes, instead of
+	// drifting to whatever TALOS_VM_INSTALL_IMAGE_* the operator currently has.
+	// Order: secret -> fetch from running cluster -> env var.
+	var resolvedInstallImage string
+	if len(machines) > 0 {
+		resolvedInstallImage = t.resolveClusterInstallImage(ctx, cluster, machines[0], clientConfig)
+	}
+
 	for _, m := range machines {
-		if len(m.Status.NetworkInterfaces) == 0 || len(m.Status.PublicIPAddresses) == 0 {
-			continue
-		}
-
-		// Find first IPv4 address
-		var ip string
-		for _, ipAddr := range m.Status.PublicIPAddresses {
-			parsedIP := net.ParseIP(ipAddr)
-			if parsedIP != nil && parsedIP.To4() != nil {
-				ip = ipAddr
-				break
-			}
-		}
-		if ip == "" {
-			continue // Skip if no IPv4 address found
-		}
-
-		// Choose role template
-		var roleYAML []byte
-		if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] == controlPlaneRole {
-			roleYAML = cpTemplate
-		} else {
-			roleYAML = wTemplate
-		}
-		if len(roleYAML) == 0 {
-			return fmt.Errorf("missing role template for node %s (role=%s) in secret %s", m.Name, m.Labels[vitistackv1alpha1.NodeRoleAnnotation], secretservice.GetSecretName(cluster))
-		}
-
-		// Select install disk and prepare configuration
-		installDisk := t.configService.SelectInstallDisk(m)
-
-		// Resolve the DHCP-reserved MAC address for this machine.
-		// Primary source: NetworkConfiguration CRD (authoritative, created by the VM operator).
-		// Fallback: Machine.Status.NetworkInterfaces (populated from the running VM).
-		macAddress := t.getMachineMAC(ctx, m)
-
-		// Build static IP patches if the NetworkNamespace uses static-ip-operator
-		var staticIPPatches []string
-		if staticCfg := t.getStaticIPConfig(ctx, cluster, m); staticCfg != nil {
-			networkPatch := talosconfigservice.BuildStaticNetworkPatch(staticCfg)
-			kernelArgPatch := talosconfigservice.BuildStaticIPKernelArgPatch(staticCfg)
-			staticIPPatches = append(staticIPPatches, networkPatch, kernelArgPatch)
-			vlog.Info(fmt.Sprintf("Static IP config for node %s: ip=%s gw=%s iface=%s",
-				m.Name, staticCfg.IP, staticCfg.Gateway, staticCfg.Interface))
-		}
-
-		nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides, macAddress, staticIPPatches...)
-		if err != nil {
-			return fmt.Errorf("failed to prepare config for node %s: %w", m.Name, err)
-		}
-
-		// Add endpoint IPs to node config
-		patched, err := t.configService.PatchNodeConfigWithEndpointIPs(nodeConfig, endpointIP)
-		if err != nil {
-			return fmt.Errorf("failed to patch config for node %s with endpoint IPs: %w", m.Name, err)
-		}
-		nodeConfig = patched
-
-		// Apply configuration to node
-		if err := t.clientService.ApplyConfigToNode(ctx, insecure, clientConfig, ip, nodeConfig); err != nil {
-			return fmt.Errorf("failed to apply config to node %s: %w", ip, err)
+		if err := t.applySingleNodeConfig(ctx, cluster, clientConfig, m, insecure, tenantOverrides, endpointIP, cpTemplate, wTemplate, resolvedInstallImage); err != nil {
+			return err
 		}
 	}
+
+	t.persistInstallImageIfMissing(ctx, cluster, resolvedInstallImage)
 	return nil
+}
+
+// applySingleNodeConfig applies Talos configuration to a single machine.
+// Skips silently when the machine is missing networking info; returns an error
+// only for fatal problems (missing role template, config-apply failure).
+func (t *TalosManager) applySingleNodeConfig(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	m *vitistackv1alpha1.Machine,
+	insecure bool,
+	tenantOverrides map[string]any,
+	endpointIP string,
+	cpTemplate, wTemplate []byte,
+	installImage string,
+) error {
+	if len(m.Status.NetworkInterfaces) == 0 || len(m.Status.PublicIPAddresses) == 0 {
+		return nil
+	}
+
+	ip := firstIPv4From(m.Status.PublicIPAddresses)
+	if ip == "" {
+		return nil
+	}
+
+	roleYAML := cpTemplate
+	if m.Labels[vitistackv1alpha1.NodeRoleAnnotation] != controlPlaneRole {
+		roleYAML = wTemplate
+	}
+	if len(roleYAML) == 0 {
+		return fmt.Errorf("missing role template for node %s (role=%s) in secret %s", m.Name, m.Labels[vitistackv1alpha1.NodeRoleAnnotation], secretservice.GetSecretName(cluster))
+	}
+
+	installDisk := t.configService.SelectInstallDisk(m)
+	// Primary source: NetworkConfiguration CRD (authoritative, created by the VM operator).
+	// Fallback: Machine.Status.NetworkInterfaces (populated from the running VM).
+	macAddress := t.getMachineMAC(ctx, m)
+
+	var staticIPPatches []string
+	if staticCfg := t.getStaticIPConfig(ctx, cluster, m); staticCfg != nil {
+		staticIPPatches = []string{
+			talosconfigservice.BuildStaticNetworkPatch(staticCfg),
+			talosconfigservice.BuildStaticIPKernelArgPatch(staticCfg),
+		}
+		vlog.Info(fmt.Sprintf("Static IP config for node %s: ip=%s gw=%s iface=%s",
+			m.Name, staticCfg.IP, staticCfg.Gateway, staticCfg.Interface))
+	}
+
+	nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides, macAddress, installImage, staticIPPatches...)
+	if err != nil {
+		return fmt.Errorf("failed to prepare config for node %s: %w", m.Name, err)
+	}
+
+	nodeConfig, err = t.configService.PatchNodeConfigWithEndpointIPs(nodeConfig, endpointIP)
+	if err != nil {
+		return fmt.Errorf("failed to patch config for node %s with endpoint IPs: %w", m.Name, err)
+	}
+
+	if err := t.clientService.ApplyConfigToNode(ctx, insecure, clientConfig, ip, nodeConfig); err != nil {
+		return fmt.Errorf("failed to apply config to node %s: %w", ip, err)
+	}
+	return nil
+}
+
+// firstIPv4From returns the first parseable IPv4 address from the slice, or "".
+func firstIPv4From(addrs []string) string {
+	for _, ipAddr := range addrs {
+		parsed := net.ParseIP(ipAddr)
+		if parsed != nil && parsed.To4() != nil {
+			return ipAddr
+		}
+	}
+	return ""
+}
+
+// persistInstallImageIfMissing writes the resolved install image to the cluster
+// secret only when it is non-empty and not already saved. Pinning happens once
+// per cluster lifetime (and gets refreshed by the upgrade flow).
+func (t *TalosManager) persistInstallImageIfMissing(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, image string) {
+	if image == "" {
+		return
+	}
+	saved, _ := t.stateService.GetInstallImage(ctx, cluster)
+	if saved != "" {
+		return
+	}
+	if err := t.stateService.SetInstallImage(ctx, cluster, image); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to persist install image for cluster %s: %v", cluster.Name, err))
+	}
+}
+
+// resolveClusterInstallImage returns the Talos install image to bake into
+// machine.install.image for nodes in this cluster. Resolution order:
+//  1. Saved value in the cluster secret (pinned at cluster create or last upgrade).
+//  2. Fetched from a running cluster node (legacy clusters that predate the
+//     install_image secret field).
+//  3. Operator env var fallback (TALOS_VM_INSTALL_IMAGE_*) — used for the very
+//     first apply during initial cluster creation.
+//
+// Returns "" for non-VM providers and bare metal where no install image patch
+// should be applied.
+func (t *TalosManager) resolveClusterInstallImage(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	m *vitistackv1alpha1.Machine,
+	clientConfig *clientconfig.Config,
+) string {
+	if saved, err := t.stateService.GetInstallImage(ctx, cluster); err == nil && saved != "" {
+		return saved
+	}
+
+	if clientConfig != nil {
+		if image := t.fetchInstallImageFromCluster(ctx, cluster, clientConfig); image != "" {
+			vlog.Info(fmt.Sprintf("Resolved install image from running cluster %s: %s", cluster.Name, image))
+			return image
+		}
+	}
+
+	if m != nil && m.Status.Provider != "" && t.configService.IsVirtualMachineProvider(m.Status.Provider.String()) {
+		return t.configService.GetVMInstallImage(m.Status.Provider)
+	}
+	return ""
+}
+
+// fetchInstallImageFromCluster queries the active machine config of any
+// reachable control plane node and returns its machine.install.image value.
+// Returns "" if no node is reachable or the field is unset.
+func (t *TalosManager) fetchInstallImageFromCluster(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+) string {
+	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
+	if err != nil {
+		return ""
+	}
+	controlPlanes := t.machineService.FilterMachinesByRole(machines, controlPlaneRole)
+	controlPlaneIPs := extractIPv4Addresses(controlPlanes)
+	if len(controlPlaneIPs) == 0 {
+		return ""
+	}
+
+	tClient, err := t.clientService.CreateTalosClient(ctx, false, clientConfig, controlPlaneIPs)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = tClient.Close() }()
+
+	for _, ip := range controlPlaneIPs {
+		image, err := t.clientService.GetMachineInstallImage(ctx, tClient, ip)
+		if err == nil && image != "" {
+			return image
+		}
+	}
+	return ""
 }
 
 // applyConfigToMachineGroup applies configuration to a group of machines (control planes or workers)
@@ -463,6 +571,7 @@ func (t *TalosManager) applyConfigToSingleMachine(
 ) error {
 	if t.isNodeConfigured(ctx, cluster, m.Name) {
 		vlog.Info(fmt.Sprintf("%s already configured, skipping: node=%s", capitalizeFirst(grpCfg.nodeType), m.Name))
+		t.markMachineOSInstalled(ctx, m)
 		return nil
 	}
 
@@ -502,6 +611,63 @@ func (t *TalosManager) handlePostConfigSteps(
 	if err := t.addConfiguredNode(ctx, cluster, m.Name); err != nil {
 		vlog.Error(fmt.Sprintf("Failed to add %s %s to configured nodes", grpCfg.nodeType, m.Name), err)
 	}
+
+	t.markMachineOSInstalled(ctx, m)
+}
+
+// backfillOSInstalledAnnotations stamps OSInstalledAnnotation on every Machine
+// that's already in the cluster's configured_nodes set. The cluster-init
+// short-circuit bypasses the per-stage apply paths for fully-initialized
+// clusters, so without this pass legacy clusters would never get the
+// annotation and kubevirt-operator would never clean up their boot ISOs.
+func (t *TalosManager) backfillOSInstalledAnnotations(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) {
+	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to list machines for os-installed backfill on cluster %s: %v", cluster.Name, err))
+		return
+	}
+	for _, m := range machines {
+		if !t.isNodeConfigured(ctx, cluster, m.Name) {
+			continue
+		}
+		t.markMachineOSInstalled(ctx, m)
+	}
+}
+
+// markMachineOSInstalled patches the Machine CR with OSInstalledAnnotation so
+// downstream providers (e.g. kubevirt-operator) can release the boot ISO. The
+// patch is best-effort: transient errors are logged and a subsequent reconcile
+// will retry. The annotation is generic and safe to set for all boot sources —
+// providers that don't allocate an ISO ignore it.
+func (t *TalosManager) markMachineOSInstalled(ctx context.Context, m *vitistackv1alpha1.Machine) {
+	const annotationValueTrue = "true"
+
+	if m == nil || m.Annotations[consts.OSInstalledAnnotation] == annotationValueTrue {
+		return
+	}
+
+	fresh := &vitistackv1alpha1.Machine{}
+	if err := t.Get(ctx, types.NamespacedName{Name: m.Name, Namespace: m.Namespace}, fresh); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to fetch Machine %s to mark os-installed: %v", m.Name, err))
+		return
+	}
+	if fresh.Annotations[consts.OSInstalledAnnotation] == annotationValueTrue {
+		return
+	}
+
+	patch := client.MergeFrom(fresh.DeepCopy())
+	if fresh.Annotations == nil {
+		fresh.Annotations = make(map[string]string)
+	}
+	fresh.Annotations[consts.OSInstalledAnnotation] = annotationValueTrue
+	if err := t.Patch(ctx, fresh, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			return
+		}
+		vlog.Warn(fmt.Sprintf("Failed to set os-installed annotation on Machine %s: %v", m.Name, err))
+		return
+	}
+	vlog.Info(fmt.Sprintf("Marked Machine as OS installed: node=%s", m.Name))
 }
 
 // configureNewControlPlanes configures new control plane nodes
@@ -571,6 +737,8 @@ func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv
 	if err := t.addConfiguredNode(ctx, cluster, node.Name); err != nil {
 		vlog.Error(fmt.Sprintf("Failed to add new %s %s to configured nodes", nodeType, node.Name), err)
 	}
+
+	t.markMachineOSInstalled(ctx, node)
 
 	vlog.Info(fmt.Sprintf("New %s configured successfully: node=%s", nodeType, node.Name))
 	return nil

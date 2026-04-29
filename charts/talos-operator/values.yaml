@@ -35,10 +35,10 @@ customEndpoint: ""
 # Boot image source configuration
 # Valid values: "pxe", "bootimage"
 # Default: "pxe" (uses PXE boot for machine provisioning)
-bootImageSource: "pxe"
+bootImageSource: "bootimage"
 
 # Boot image URL (only used when bootImageSource is "bootimage")
-bootImage: "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.12.6/metal-amd64.iso"
+bootImage: "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.12.6/nocloud-amd64.iso"
 
 # Log configuration
 logLevel: "info"

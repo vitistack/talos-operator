@@ -505,9 +505,11 @@ func (s *UpgradeService) UpdateTalosUpgradeProgress(ctx context.Context, cluster
 	return nil
 }
 
-// CompleteTalosUpgrade marks a successful Talos upgrade completion
-// targetVersion is the version the cluster was upgraded to (from the persisted upgrade state)
-func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, targetVersion string) error {
+// CompleteTalosUpgrade marks a successful Talos upgrade completion.
+// targetVersion is the version the cluster was upgraded to (from the persisted upgrade state).
+// installerImage is the Talos installer image URL applied during the upgrade; it is pinned
+// in the secret so future node expansions install the same Talos version.
+func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, targetVersion, installerImage string) error {
 	updates := map[string]string{
 		consts.TalosCurrentAnnotation:  targetVersion,
 		consts.TalosStatusAnnotation:   string(consts.UpgradeStatusCompleted),
@@ -523,6 +525,14 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 	if s.stateService != nil {
 		if err := s.stateService.CompleteUpgradeState(ctx, cluster, "talos", targetVersion); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to persist completed upgrade to secret: %v", err))
+		}
+		// Pin the installer image used by this upgrade so new nodes added later
+		// install the same Talos version instead of inheriting the operator's
+		// current TALOS_VM_INSTALL_IMAGE_* env var.
+		if installerImage != "" {
+			if err := s.stateService.SetInstallImage(ctx, cluster, installerImage); err != nil {
+				vlog.Warn(fmt.Sprintf("Failed to persist install image after upgrade: %v", err))
+			}
 		}
 		// Clear workers ready time so it's fresh for next upgrade
 		if err := s.stateService.ClearWorkersReadyTime(ctx, cluster); err != nil {

@@ -33,6 +33,12 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	// Short-circuit: if the cluster is already initialized per persisted secret flags, skip init
 	if flags, err := t.getTalosSecretFlags(ctx, cluster); err == nil {
 		if flags.ControlPlaneApplied && flags.WorkerApplied && flags.Bootstrapped && flags.ClusterAccess {
+			// Backfill OSInstalledAnnotation on existing Machines. The short-circuit
+			// here bypasses every per-stage apply path, so legacy clusters created
+			// before the annotation existed would never get it stamped without
+			// this pass.
+			t.backfillOSInstalledAnnotations(ctx, cluster)
+
 			// Reconcile removed nodes first (scale-down), then new nodes (scale-up)
 			if err := t.reconcileRemovedNodes(ctx, cluster); err != nil {
 				vlog.Warn(fmt.Sprintf("Error during node removal reconciliation: %v", err))
@@ -278,6 +284,7 @@ func (t *TalosManager) stageApplyFirstControlPlane(
 	flags, _ := t.getTalosSecretFlags(ctx, cluster)
 	if flags.FirstControlPlaneApplied {
 		vlog.Info("Stage 1 already complete: First control plane config already applied, skipping: cluster=" + cluster.Name)
+		t.markMachineOSInstalled(ctx, firstControlPlane)
 		return nil
 	}
 
@@ -297,6 +304,8 @@ func (t *TalosManager) stageApplyFirstControlPlane(
 	if err := t.addConfiguredNode(ctx, cluster, firstControlPlane.Name); err != nil {
 		vlog.Error("Failed to add first control plane to configured nodes", err)
 	}
+
+	t.markMachineOSInstalled(ctx, firstControlPlane)
 
 	vlog.Info("Stage 1 complete: First control plane config applied: node=" + firstControlPlane.Name)
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "True", "Applied", "Config applied to first control plane")
