@@ -38,7 +38,7 @@ customEndpoint: ""
 bootImageSource: "bootimage"
 
 # Boot image URL (only used when bootImageSource is "bootimage")
-bootImage: "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.12.6/nocloud-amd64.iso"
+bootImage: "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.12.7/nocloud-amd64.iso"
 
 # Log configuration
 logLevel: "info"
@@ -61,12 +61,12 @@ tenant:
 
 # Talos configuration
 talos:
-  version: "v1.12.6"
-  defaultKubernetesVersion: "1.35.3"
+  version: "v1.12.7"
+  defaultKubernetesVersion: "1.35.4"
   predictableNetworkNames: true
   vmInstallImage:
-    kubevirt: "factory.talos.dev/metal-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.12.6"
-    default: "factory.talos.dev/metal-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.12.6"
+    kubevirt: "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.12.7"
+    default: "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.12.7"
 
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
