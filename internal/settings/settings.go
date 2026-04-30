@@ -27,6 +27,13 @@ func Init() {
 	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.35.0")
 	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/metal-installer/e52572396b329a850cf08baad906b367609f7e12e778c2073503751d018e429c:v1.25.5")
 	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/metal-installer/e52572396b329a850cf08baad906b367609f7e12e778c2073503751d018e429c:v1.25.5")
+	// TALOS_REQUIRED_EXTENSIONS is empty by default — feature is opt-in. Set it
+	// to a comma-separated list (e.g. "siderolabs/iscsi-tools,siderolabs/qemu-guest-agent")
+	// to have the operator reinstall nodes whose installed extensions don't match.
+	viper.SetDefault(consts.TALOS_REQUIRED_EXTENSIONS, "")
+	// Cooldown between Talos upgrade triggers on the same node + image. 10
+	// minutes covers the typical reboot + extension unpack window with margin.
+	viper.SetDefault(consts.TALOS_EXTENSION_COOLDOWN_MINUTES, 10)
 	viper.SetDefault(consts.TALOS_PREDICTABLE_NETWORK_NAMES, true)
 
 	// Endpoint mode configuration

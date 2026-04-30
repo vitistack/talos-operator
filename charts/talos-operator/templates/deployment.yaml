@@ -87,6 +87,14 @@ spec:
               value: {{ .Values.talos.vmInstallImage.kubevirt | quote }}
             - name: TALOS_VM_INSTALL_IMAGE_DEFAULT
               value: {{ .Values.talos.vmInstallImage.default | quote }}
+            {{- with .Values.talos.requiredExtensions }}
+            - name: TALOS_REQUIRED_EXTENSIONS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.talos.extensionCooldownMinutes }}
+            - name: TALOS_EXTENSION_COOLDOWN_MINUTES
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

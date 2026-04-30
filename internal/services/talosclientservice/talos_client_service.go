@@ -17,6 +17,7 @@ import (
 	v1alpha1config "github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/k8s"
+	"github.com/siderolabs/talos/pkg/machinery/resources/runtime"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 )
@@ -1004,4 +1005,34 @@ func (s *TalosClientService) GetMachineInstallImage(
 		return nil
 	})
 	return image, nil
+}
+
+// GetInstalledExtensions returns the names of every system extension currently
+// installed on the node, as reported by Talos's ExtensionStatus COSI resource
+// (the same data source as `talosctl get extensions`). Names are returned
+// verbatim — typically in the form "siderolabs/<name>". The list excludes
+// Talos's own kernel-modules pseudo-extensions when those are reported.
+//
+// Equivalent to: talosctl -n <node> get extensions -o json | jq '.[].spec.metadata.name'.
+func (s *TalosClientService) GetInstalledExtensions(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+) ([]string, error) {
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
+
+	statuses, err := safe.StateListAll[*runtime.ExtensionStatus](nodeCtx, tClient.COSI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ExtensionStatus on node %s: %w", nodeIP, err)
+	}
+
+	names := make([]string, 0, statuses.Len())
+	for ext := range statuses.All() {
+		name := ext.TypedSpec().Metadata.Name
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, nil
 }

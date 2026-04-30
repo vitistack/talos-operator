@@ -67,6 +67,21 @@ talos:
   vmInstallImage:
     kubevirt: "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.12.7"
     default: "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.12.7"
+  # Talos system extensions every node must have. The operator queries each
+  # reachable node and triggers a Talos upgrade with vmInstallImage.<provider>
+  # (or vmInstallImage.default as fallback) when one of these is missing — the
+  # schematic baked into that image MUST contain these extensions, so keep
+  # this list and the image's schematic in sync.
+  # Empty list disables the check.
+  requiredExtensions:
+    - siderolabs/iscsi-tools
+    - siderolabs/qemu-guest-agent
+    - siderolabs/trident-iscsi-tools
+    - siderolabs/util-linux-tools
+  # Minutes between Talos upgrade triggers on the same node + image. Must be
+  # long enough to cover a Talos reboot + extension unpack + API recovery; once
+  # the window elapses with extensions still missing, the operator re-triggers.
+  extensionCooldownMinutes: 10
 
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:

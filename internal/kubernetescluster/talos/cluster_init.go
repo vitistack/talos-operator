@@ -60,6 +60,14 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 				vlog.Warn(fmt.Sprintf("Error during node version reconciliation: %v", err))
 			}
 
+			// Reconcile required Talos system extensions: detects nodes that
+			// are missing entries from TALOS_REQUIRED_EXTENSIONS and triggers
+			// a Talos upgrade with the per-provider TALOS_VM_INSTALL_IMAGE_*
+			// image (one node per pass; rolling).
+			if err := t.reconcileExtensions(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Error during extension reconciliation: %v", err))
+			}
+
 			return nil
 		}
 	}
