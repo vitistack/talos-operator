@@ -196,8 +196,9 @@ func (c *UpgradeController) startTalosUpgrade(
 		return 30 * time.Second, true, nil
 	}
 
-	// Build installer image
-	installerImage := c.buildTalosInstallerImage(upgState.TalosTarget)
+	// Build installer image (preserves the cluster's pinned image base + any
+	// factory schematic so system extensions survive the upgrade).
+	installerImage := c.upgradeService.BuildTalosInstallerImage(ctx, cluster, upgState.TalosTarget)
 
 	// Build node lists
 	controlPlanes, workers := c.buildNodeLists(machines)
@@ -384,17 +385,6 @@ func (c *UpgradeController) buildNodeLists(machines []vitistackv1alpha1.Machine)
 	}
 
 	return controlPlanes, workers
-}
-
-// buildTalosInstallerImage constructs the installer image URL
-func (c *UpgradeController) buildTalosInstallerImage(version string) string {
-	// Ensure version has 'v' prefix
-	if len(version) > 0 && version[0] != 'v' {
-		version = "v" + version
-	}
-
-	// Use official Talos installer
-	return fmt.Sprintf("ghcr.io/siderolabs/installer:%s", version)
 }
 
 // GetStateManager returns the upgrade state manager for external access

@@ -505,6 +505,50 @@ func (s *UpgradeService) UpdateTalosUpgradeProgress(ctx context.Context, cluster
 	return nil
 }
 
+// BuildTalosInstallerImage returns the installer image to apply for a Talos
+// upgrade of cluster to targetVersion. Resolution order:
+//
+//  1. The cluster's pinned install_image (set at bootstrap or after the last
+//     upgrade) — repository/path is preserved (so a factory image with a
+//     custom schematic ID keeps its system extensions) and only the version
+//     tag is rewritten to targetVersion.
+//  2. The operator's TALOS_VM_INSTALL_IMAGE_DEFAULT env var, with the same
+//     tag rewrite. Used when the cluster predates the install_image pin.
+//  3. ghcr.io/siderolabs/installer at targetVersion as a final fallback.
+//
+// targetVersion may be passed with or without a leading "v"; the returned
+// image always uses "v<version>".
+func (s *UpgradeService) BuildTalosInstallerImage(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, targetVersion string) string {
+	versionTag := "v" + strings.TrimPrefix(targetVersion, "v")
+
+	var base string
+	if s.stateService != nil {
+		if saved, err := s.stateService.GetInstallImage(ctx, cluster); err == nil && saved != "" {
+			base = saved
+		}
+	}
+	if base == "" {
+		base = viper.GetString(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT)
+	}
+
+	if base == "" {
+		return "ghcr.io/siderolabs/installer:" + versionTag
+	}
+	return swapImageTag(base, versionTag)
+}
+
+// swapImageTag returns ref with its tag replaced by tag. If ref has no tag, tag
+// is appended. The colon search is anchored after the last '/' so registry
+// ports (e.g. "localhost:5000/foo") are not mistaken for tag separators.
+func swapImageTag(ref, tag string) string {
+	slash := strings.LastIndexByte(ref, '/')
+	colon := strings.LastIndexByte(ref, ':')
+	if colon > slash {
+		return ref[:colon] + ":" + tag
+	}
+	return ref + ":" + tag
+}
+
 // CompleteTalosUpgrade marks a successful Talos upgrade completion.
 // targetVersion is the version the cluster was upgraded to (from the persisted upgrade state).
 // installerImage is the Talos installer image URL applied during the upgrade; it is pinned
