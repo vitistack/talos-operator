@@ -7,8 +7,6 @@
 #
 # For each KubernetesCluster matching the requested environment filter, the
 # script verifies that:
-#   - upgrade.vitistack.io/talos-available equals the target version
-#     (compared with leading "v" stripped from both sides)
 #   - upgrade.vitistack.io/talos-current is older than the target version
 #   - upgrade.vitistack.io/talos-target is not already set
 #
@@ -32,7 +30,6 @@ LIMIT=0
 DRY_RUN=false
 ASSUME_YES=false
 
-AVAILABLE_ANNOTATION="upgrade.vitistack.io/talos-available"
 CURRENT_ANNOTATION="upgrade.vitistack.io/talos-current"
 TARGET_ANNOTATION="upgrade.vitistack.io/talos-target"
 
@@ -50,8 +47,9 @@ Required:
                             prod  = prod | production | live
 
 Options:
-  --target-version <ver>  Target Talos version. Must match the value of the
-                          'talos-available' annotation on candidate clusters.
+  --target-version <ver>  Target Talos version to upgrade to. The value of the
+                          'talos-target' annotation written to each cluster
+                          (always with a leading 'v').
                           Default: ${DEFAULT_TARGET_VERSION}
   --kubeconfig <path>     Path to the supervisor kubeconfig.
                           Default: ${DEFAULT_KUBECONFIG}
@@ -182,16 +180,15 @@ echo
 echo "Fetching KubernetesClusters from supervisor cluster..."
 CLUSTERS_JSON="$("${KCTL[@]}" get kubernetesclusters.vitistack.io -A -o json)"
 
-# Build a TSV stream of: namespace<TAB>name<TAB>env<TAB>available<TAB>current<TAB>target
+# Build a TSV stream of: namespace<TAB>name<TAB>env<TAB>current<TAB>target
 ALL_ROWS="$(jq -r '
     .items[]
     | [
         .metadata.namespace,
         .metadata.name,
         (.spec.data.environment // ""),
-        (.metadata.annotations["'"${AVAILABLE_ANNOTATION}"'"] // ""),
-        (.metadata.annotations["'"${CURRENT_ANNOTATION}"'"]   // ""),
-        (.metadata.annotations["'"${TARGET_ANNOTATION}"'"]    // "")
+        (.metadata.annotations["'"${CURRENT_ANNOTATION}"'"] // ""),
+        (.metadata.annotations["'"${TARGET_ANNOTATION}"'"]  // "")
       ]
     | @tsv
 ' <<<"${CLUSTERS_JSON}")"
@@ -207,17 +204,12 @@ SKIPPED_REASONS=()
 TARGET_VERSION_BARE="${TARGET_VERSION#v}"
 TARGET_VERSION_V="v${TARGET_VERSION_BARE}"
 
-while IFS=$'\t' read -r ns name env_raw available current target; do
+while IFS=$'\t' read -r ns name env_raw current target; do
     [[ -z "${name}" ]] && continue
 
     env_norm="$(normalize_env "${env_raw}")"
     if [[ "${env_norm}" != "${NORMALIZED_FILTER}" ]]; then
         continue  # not in scope; do not even report
-    fi
-
-    if [[ "${available#v}" != "${TARGET_VERSION_BARE}" ]]; then
-        SKIPPED_REASONS+=("${ns}/${name}: talos-available='${available}' != target '${TARGET_VERSION_BARE}'")
-        continue
     fi
 
     if [[ -z "${current}" ]]; then
@@ -236,7 +228,7 @@ while IFS=$'\t' read -r ns name env_raw available current target; do
         continue
     fi
 
-    ELIGIBLE+=("${ns}/${name}|${current}|${available}")
+    ELIGIBLE+=("${ns}/${name}|${current}")
 done <<<"${ALL_ROWS}"
 
 if [[ ${#SKIPPED_REASONS[@]} -gt 0 ]]; then
@@ -259,7 +251,7 @@ fi
 echo "Eligible clusters (${#ELIGIBLE[@]}):"
 printf "  %-50s  %-12s  %s\n" "NAMESPACE/NAME" "CURRENT" "-> TARGET"
 for entry in "${ELIGIBLE[@]}"; do
-    IFS='|' read -r id current available <<<"${entry}"
+    IFS='|' read -r id current <<<"${entry}"
     printf "  %-50s  %-12s  -> %s\n" "${id}" "${current}" "${TARGET_VERSION_V}"
 done
 echo
