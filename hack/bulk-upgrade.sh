@@ -5,6 +5,10 @@
 # Bulk-trigger Talos upgrades on KubernetesCluster resources in a management
 # (supervisor) cluster.
 #
+# Operates against the kubectl current context. Switch contexts beforehand
+# (`kubectl config use-context ...` or set KUBECONFIG) to point at a different
+# supervisor cluster.
+#
 # For each KubernetesCluster matching the requested environment filter, the
 # script verifies that:
 #   - upgrade.vitistack.io/talos-current is older than the target version
@@ -20,16 +24,16 @@ set -euo pipefail
 
 # ---- defaults ----------------------------------------------------------------
 
-DEFAULT_KUBECONFIG="${HOME}/kubeconfig/viti-super-test.config"
 DEFAULT_TARGET_VERSION="1.12.7"
 
-KUBECONFIG_PATH="${DEFAULT_KUBECONFIG}"
 TARGET_VERSION="${DEFAULT_TARGET_VERSION}"
 ENV_FILTER=""
 LIMIT=0
 DRY_RUN=false
 ASSUME_YES=false
+CLEAR_STALE_TARGET=false
 
+KUBERNETESCLUSTER_CRD="kubernetesclusters.vitistack.io"
 CURRENT_ANNOTATION="upgrade.vitistack.io/talos-current"
 TARGET_ANNOTATION="upgrade.vitistack.io/talos-target"
 
@@ -46,15 +50,22 @@ Required:
                             qa    = qa  | staging | stage
                             prod  = prod | production | live
 
+Operates against the kubectl current context. Use 'kubectl config use-context'
+or set KUBECONFIG before invoking the script to target a different cluster.
+
 Options:
   --target-version <ver>  Target Talos version to upgrade to. The value of the
                           'talos-target' annotation written to each cluster
                           (always with a leading 'v').
                           Default: ${DEFAULT_TARGET_VERSION}
-  --kubeconfig <path>     Path to the supervisor kubeconfig.
-                          Default: ${DEFAULT_KUBECONFIG}
   --limit <n>             Only trigger upgrades on at most N clusters this run
                           (0 = all matching). Default: 0
+  --clear-stale-target    Cleanup mode: instead of triggering upgrades, remove
+                          the 'talos-target' annotation from clusters where
+                          'talos-current' already satisfies '--target-version'.
+                          Use this to unstick clusters where the operator is
+                          reporting "target version must be greater than
+                          current version".
   --dry-run               Print what would change but do not modify anything.
   -y, --yes               Skip the confirmation prompt.
   -h, --help              Show this help.
@@ -70,13 +81,13 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --env)              ENV_FILTER="${2:-}"; shift 2 ;;
-        --target-version)   TARGET_VERSION="${2:-}"; shift 2 ;;
-        --kubeconfig)       KUBECONFIG_PATH="${2:-}"; shift 2 ;;
-        --limit)            LIMIT="${2:-0}"; shift 2 ;;
-        --dry-run)          DRY_RUN=true; shift ;;
-        -y|--yes)           ASSUME_YES=true; shift ;;
-        -h|--help)          usage; exit 0 ;;
+        --env)                 ENV_FILTER="${2:-}"; shift 2 ;;
+        --target-version)      TARGET_VERSION="${2:-}"; shift 2 ;;
+        --limit)               LIMIT="${2:-0}"; shift 2 ;;
+        --clear-stale-target)  CLEAR_STALE_TARGET=true; shift ;;
+        --dry-run)             DRY_RUN=true; shift ;;
+        -y|--yes)              ASSUME_YES=true; shift ;;
+        -h|--help)             usage; exit 0 ;;
         *)
             echo "Unknown argument: $1" >&2
             usage >&2
@@ -105,12 +116,17 @@ for bin in kubectl jq; do
     fi
 done
 
-if [[ ! -f "${KUBECONFIG_PATH}" ]]; then
-    echo "Error: kubeconfig not found: ${KUBECONFIG_PATH}" >&2
+CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+if [[ -z "${CURRENT_CONTEXT}" ]]; then
+    echo "Error: no current kubectl context. Run 'kubectl config use-context <ctx>' first." >&2
     exit 1
 fi
 
-KCTL=(kubectl --kubeconfig "${KUBECONFIG_PATH}")
+if ! kubectl get crd "${KUBERNETESCLUSTER_CRD}" >/dev/null 2>&1; then
+    echo "Error: CRD '${KUBERNETESCLUSTER_CRD}' is not installed in context '${CURRENT_CONTEXT}'." >&2
+    echo "       This does not look like a vitistack supervisor cluster." >&2
+    exit 1
+fi
 
 # ---- helpers -----------------------------------------------------------------
 
@@ -170,15 +186,25 @@ version_cmp() {
 
 # ---- main --------------------------------------------------------------------
 
-echo "Supervisor kubeconfig : ${KUBECONFIG_PATH}"
+TARGET_VERSION_BARE="${TARGET_VERSION#v}"
+TARGET_VERSION_V="v${TARGET_VERSION_BARE}"
+
+if [[ "${CLEAR_STALE_TARGET}" == "true" ]]; then
+    MODE="clear-stale-target"
+else
+    MODE="trigger-upgrade"
+fi
+
+echo "kubectl context       : ${CURRENT_CONTEXT}"
+echo "Mode                  : ${MODE}"
 echo "Environment filter    : ${ENV_FILTER}  (normalized: ${NORMALIZED_FILTER})"
-echo "Target Talos version  : ${TARGET_VERSION}"
+echo "Target Talos version  : ${TARGET_VERSION_BARE}"
 echo "Dry run               : ${DRY_RUN}"
 [[ "${LIMIT}" -gt 0 ]] && echo "Per-run limit         : ${LIMIT}"
 echo
 
 echo "Fetching KubernetesClusters from supervisor cluster..."
-CLUSTERS_JSON="$("${KCTL[@]}" get kubernetesclusters.vitistack.io -A -o json)"
+CLUSTERS_JSON="$(kubectl get "${KUBERNETESCLUSTER_CRD}" -A -o json)"
 
 # Build a TSV stream of: namespace<TAB>name<TAB>env<TAB>current<TAB>target
 ALL_ROWS="$(jq -r '
@@ -201,9 +227,6 @@ fi
 ELIGIBLE=()
 SKIPPED_REASONS=()
 
-TARGET_VERSION_BARE="${TARGET_VERSION#v}"
-TARGET_VERSION_V="v${TARGET_VERSION_BARE}"
-
 while IFS=$'\t' read -r ns name env_raw current target; do
     [[ -z "${name}" ]] && continue
 
@@ -218,17 +241,29 @@ while IFS=$'\t' read -r ns name env_raw current target; do
     fi
 
     cmp="$(version_cmp "${current}" "${TARGET_VERSION_BARE}")"
-    if [[ "${cmp}" != "2" ]]; then
-        SKIPPED_REASONS+=("${ns}/${name}: talos-current='${current}' is not older than '${TARGET_VERSION_BARE}'")
-        continue
-    fi
 
-    if [[ -n "${target}" ]]; then
-        SKIPPED_REASONS+=("${ns}/${name}: talos-target already set to '${target}' (upgrade pending)")
-        continue
+    if [[ "${MODE}" == "clear-stale-target" ]]; then
+        if [[ -z "${target}" ]]; then
+            continue  # nothing to clean
+        fi
+        if [[ "${cmp}" == "2" ]]; then
+            SKIPPED_REASONS+=("${ns}/${name}: talos-current='${current}' is still older than '${TARGET_VERSION_BARE}' — leaving talos-target='${target}' in place")
+            continue
+        fi
+        # current >= target AND target is set => stale, eligible for removal
+        ELIGIBLE+=("${ns}/${name}|${current}|${target}")
+    else
+        # trigger-upgrade mode
+        if [[ "${cmp}" != "2" ]]; then
+            SKIPPED_REASONS+=("${ns}/${name}: talos-current='${current}' is not older than '${TARGET_VERSION_BARE}'")
+            continue
+        fi
+        if [[ -n "${target}" ]]; then
+            SKIPPED_REASONS+=("${ns}/${name}: talos-target already set to '${target}' (upgrade pending)")
+            continue
+        fi
+        ELIGIBLE+=("${ns}/${name}|${current}|")
     fi
-
-    ELIGIBLE+=("${ns}/${name}|${current}")
 done <<<"${ALL_ROWS}"
 
 if [[ ${#SKIPPED_REASONS[@]} -gt 0 ]]; then
@@ -240,7 +275,11 @@ if [[ ${#SKIPPED_REASONS[@]} -gt 0 ]]; then
 fi
 
 if [[ ${#ELIGIBLE[@]} -eq 0 ]]; then
-    echo "No eligible clusters to upgrade in environment '${NORMALIZED_FILTER}'."
+    if [[ "${MODE}" == "clear-stale-target" ]]; then
+        echo "No stale talos-target annotations to clear in environment '${NORMALIZED_FILTER}'."
+    else
+        echo "No eligible clusters to upgrade in environment '${NORMALIZED_FILTER}'."
+    fi
     exit 0
 fi
 
@@ -249,20 +288,33 @@ if [[ "${LIMIT}" -gt 0 && ${#ELIGIBLE[@]} -gt ${LIMIT} ]]; then
 fi
 
 echo "Eligible clusters (${#ELIGIBLE[@]}):"
-printf "  %-50s  %-12s  %s\n" "NAMESPACE/NAME" "CURRENT" "-> TARGET"
-for entry in "${ELIGIBLE[@]}"; do
-    IFS='|' read -r id current <<<"${entry}"
-    printf "  %-50s  %-12s  -> %s\n" "${id}" "${current}" "${TARGET_VERSION_V}"
-done
+if [[ "${MODE}" == "clear-stale-target" ]]; then
+    printf "  %-50s  %-12s  %s\n" "NAMESPACE/NAME" "CURRENT" "STALE TARGET (will be removed)"
+    for entry in "${ELIGIBLE[@]}"; do
+        IFS='|' read -r id current target <<<"${entry}"
+        printf "  %-50s  %-12s  %s\n" "${id}" "${current}" "${target}"
+    done
+else
+    printf "  %-50s  %-12s  %s\n" "NAMESPACE/NAME" "CURRENT" "-> TARGET"
+    for entry in "${ELIGIBLE[@]}"; do
+        IFS='|' read -r id current _ <<<"${entry}"
+        printf "  %-50s  %-12s  -> %s\n" "${id}" "${current}" "${TARGET_VERSION_V}"
+    done
+fi
 echo
 
 if [[ "${DRY_RUN}" == "true" ]]; then
-    echo "Dry run: no annotations will be applied."
+    echo "Dry run: no annotations will be changed."
     exit 0
 fi
 
 if [[ "${ASSUME_YES}" != "true" ]]; then
-    read -r -p "Proceed and set ${TARGET_ANNOTATION}=${TARGET_VERSION_V} on the ${#ELIGIBLE[@]} cluster(s) above? [y/N] " ans
+    if [[ "${MODE}" == "clear-stale-target" ]]; then
+        prompt="Proceed and remove ${TARGET_ANNOTATION} from the ${#ELIGIBLE[@]} cluster(s) above? [y/N] "
+    else
+        prompt="Proceed and set ${TARGET_ANNOTATION}=${TARGET_VERSION_V} on the ${#ELIGIBLE[@]} cluster(s) above? [y/N] "
+    fi
+    read -r -p "${prompt}" ans
     case "${ans}" in
         y|Y|yes|YES) ;;
         *) echo "Aborted."; exit 0 ;;
@@ -274,11 +326,20 @@ for entry in "${ELIGIBLE[@]}"; do
     IFS='|' read -r id _ _ <<<"${entry}"
     ns="${id%%/*}"
     name="${id##*/}"
-    echo "Annotating ${ns}/${name}..."
-    if ! "${KCTL[@]}" -n "${ns}" annotate kubernetescluster.vitistack.io "${name}" \
-            "${TARGET_ANNOTATION}=${TARGET_VERSION_V}" --overwrite; then
-        echo "  ERROR: failed to annotate ${ns}/${name}" >&2
-        failed=$((failed + 1))
+    if [[ "${MODE}" == "clear-stale-target" ]]; then
+        echo "Removing ${TARGET_ANNOTATION} from ${ns}/${name}..."
+        if ! kubectl -n "${ns}" annotate "${KUBERNETESCLUSTER_CRD}" "${name}" \
+                "${TARGET_ANNOTATION}-"; then
+            echo "  ERROR: failed to remove annotation on ${ns}/${name}" >&2
+            failed=$((failed + 1))
+        fi
+    else
+        echo "Annotating ${ns}/${name}..."
+        if ! kubectl -n "${ns}" annotate "${KUBERNETESCLUSTER_CRD}" "${name}" \
+                "${TARGET_ANNOTATION}=${TARGET_VERSION_V}" --overwrite; then
+            echo "  ERROR: failed to annotate ${ns}/${name}" >&2
+            failed=$((failed + 1))
+        fi
     fi
 done
 
@@ -287,4 +348,8 @@ if [[ "${failed}" -gt 0 ]]; then
     echo "Done with ${failed} failure(s)."
     exit 1
 fi
-echo "Done. Triggered Talos upgrade to ${TARGET_VERSION_V} on ${#ELIGIBLE[@]} cluster(s)."
+if [[ "${MODE}" == "clear-stale-target" ]]; then
+    echo "Done. Removed stale ${TARGET_ANNOTATION} from ${#ELIGIBLE[@]} cluster(s)."
+else
+    echo "Done. Triggered Talos upgrade to ${TARGET_VERSION_V} on ${#ELIGIBLE[@]} cluster(s)."
+fi
