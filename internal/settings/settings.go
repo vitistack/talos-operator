@@ -33,7 +33,7 @@ func Init() {
 	viper.SetDefault(consts.TALOS_REQUIRED_EXTENSIONS, "")
 	// Cooldown between Talos upgrade triggers on the same node + image. 10
 	// minutes covers the typical reboot + extension unpack window with margin.
-	viper.SetDefault(consts.TALOS_EXTENSION_COOLDOWN_MINUTES, 10)
+	viper.SetDefault(consts.TALOS_EXTENSION_COOLDOWN_MINUTES, 5)
 	viper.SetDefault(consts.TALOS_PREDICTABLE_NETWORK_NAMES, true)
 
 	// Endpoint mode configuration

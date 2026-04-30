@@ -81,7 +81,7 @@ talos:
   # Minutes between Talos upgrade triggers on the same node + image. Must be
   # long enough to cover a Talos reboot + extension unpack + API recovery; once
   # the window elapses with extensions still missing, the operator re-triggers.
-  extensionCooldownMinutes: 10
+  extensionCooldownMinutes: 5
 
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
