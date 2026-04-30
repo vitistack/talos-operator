@@ -354,6 +354,7 @@ func (c *UpgradeController) handleUpgradeResult(
 	}
 
 	if result.Continue {
+		vlog.Info(fmt.Sprintf("Upgrade in progress: cluster=%s %s", cluster.Name, result.Message))
 		return result.RequeueAfter, true, nil
 	}
 
