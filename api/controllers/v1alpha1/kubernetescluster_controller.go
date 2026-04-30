@@ -87,6 +87,11 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
+	return r.reconcileTalosCluster(ctx, kubernetesCluster)
+}
+
+// reconcileTalosCluster performs the main reconciliation logic for a Talos-managed cluster.
+func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context, kubernetesCluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, error) {
 	// Set activity message for the duration of reconciliation
 	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Reconciling")
 
