@@ -623,7 +623,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	ml := &vitistackv1alpha1.MachineList{}
 	if err := m.List(ctx, ml,
 		client.InNamespace(kc.Namespace),
-		client.MatchingLabels{vitistackv1alpha1.ClusterNameAnnotation: kc.Name},
+		client.MatchingLabels{vitistackv1alpha1.ClusterIdAnnotation: kc.Spec.Cluster.ClusterId},
 	); err != nil {
 		vlog.Debug("failed to list machines for aggregation: cluster=" + kc.Name + " error=" + err.Error())
 		return err
