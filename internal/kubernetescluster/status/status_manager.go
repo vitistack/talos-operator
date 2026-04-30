@@ -648,10 +648,8 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 		return err
 	}
 
-	// Update control plane status
-	if err := m.updateControlPlaneStatus(ctx, u, kc, cpCount, cpRunning, cpNodes); err != nil {
-		return err
-	}
+	// Update control plane status (modifies u in-place, no API call)
+	cpReady := m.updateControlPlaneStatus(u, cpCount, cpRunning, cpNodes)
 
 	// Update worker count
 	_ = unstructured.SetNestedField(u.Object, workerCount, "status", "workers")
@@ -662,7 +660,18 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	// Touch timestamps
 	updateStatusTimestamps(u)
 
-	return m.updateStatus(ctx, u)
+	// Write all aggregated changes to the API in a single update
+	if err := m.updateStatus(ctx, u); err != nil {
+		return err
+	}
+
+	// Mark cluster Ready if all control plane machines are running
+	// Done after the aggregate update to avoid resourceVersion conflicts
+	if cpReady {
+		_ = m.SetPhase(ctx, kc, phaseReady)
+	}
+
+	return nil
 }
 
 // aggregateMachineResources aggregates resource usage from all machines in the list
@@ -697,8 +706,9 @@ func isControlPlaneMachine(m *vitistackv1alpha1.Machine) bool {
 	return ok && role == "control-plane"
 }
 
-// updateControlPlaneStatus updates the control plane status in the unstructured object
-func (m *StatusManager) updateControlPlaneStatus(ctx context.Context, u *unstructured.Unstructured, kc *vitistackv1alpha1.KubernetesCluster, cpCount, cpRunning int64, cpNodes []string) error {
+// updateControlPlaneStatus updates the control plane status in the unstructured object.
+// Returns true if all control plane machines are running (caller should set phase to Ready).
+func (m *StatusManager) updateControlPlaneStatus(u *unstructured.Unstructured, cpCount, cpRunning int64, cpNodes []string) bool {
 	_ = unstructured.SetNestedField(u.Object, cpCount, "status", "state", "cluster", "controlplane", "scale")
 
 	// Set control plane node names
@@ -711,11 +721,7 @@ func (m *StatusManager) updateControlPlaneStatus(ctx context.Context, u *unstruc
 	cpStatus := determineControlPlaneStatus(cpCount, cpRunning)
 	_ = unstructured.SetNestedField(u.Object, cpStatus, "status", "state", "cluster", "controlplane", "status")
 
-	// Mark cluster Ready if all control plane machines are running
-	if cpStatus == phaseRunning {
-		_ = m.SetPhase(ctx, kc, phaseReady)
-	}
-	return nil
+	return cpStatus == phaseRunning
 }
 
 // determineControlPlaneStatus determines the control plane status based on machine counts
