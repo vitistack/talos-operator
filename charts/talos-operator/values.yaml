@@ -28,6 +28,9 @@ fullnameOverride: ""
 # - "custom": Use user-provided endpoint addresses
 endpointMode: "networkconfiguration"
 
+# Maximum number of KubernetesCluster reconciliations running in parallel
+maxConcurrentReconciles: 3
+
 # Custom endpoint addresses (only used when endpointMode is "custom")
 # Can be a single IP/hostname or comma-separated list
 customEndpoint: ""

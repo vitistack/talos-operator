@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/spf13/viper"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -71,6 +73,12 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Handle deletion first and only perform cleanup when our finalizer is present
 	if kubernetesCluster.GetDeletionTimestamp() != nil {
 		return r.handleDeletion(ctx, kubernetesCluster)
+	}
+
+	// Skip reconciliation if do-not-reconcile annotation is set
+	if kubernetesCluster.Annotations["upgrade.vitistack.io/do-not-reconcile"] != "" {
+		vlog.Info("Skipping KubernetesCluster: do-not-reconcile annotation set: cluster=" + kubernetesCluster.GetName())
+		return ctrl.Result{}, nil
 	}
 
 	// Only reconcile clusters with spec.cluster.provider == "talos"
@@ -480,9 +488,17 @@ func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *Ku
 }
 
 func (r *KubernetesClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	maxConcurrent := 3
+	if v := viper.GetString(consts.MAX_CONCURRENT_RECONCILES); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxConcurrent = n
+		}
+	}
+	vlog.Info(fmt.Sprintf("KubernetesCluster controller max concurrent reconciles: %d", maxConcurrent))
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&vitistackv1alpha1.KubernetesCluster{}).
 		Owns(&vitistackv1alpha1.Machine{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Complete(r)
 }
 

@@ -45,6 +45,10 @@ var (
 	VITISTACK_NAME                   = "VITISTACK_NAME"
 	NAME_KUBERNETES_PROVIDER         = "NAME_KUBERNETES_PROVIDER"
 
+	// MAX_CONCURRENT_RECONCILES is the maximum number of KubernetesCluster
+	// reconciliations that run in parallel. Default: 3.
+	MAX_CONCURRENT_RECONCILES = "MAX_CONCURRENT_RECONCILES" //nolint:revive,stylecheck // consistent with other env var constants
+
 	// ENDPOINT_MODE configures how the operator determines control plane endpoints.
 	// Valid values: "none", "networkconfiguration", "talosvip", "custom"
 	// Default: "networkconfiguration"

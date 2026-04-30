@@ -41,6 +41,9 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            # Controller concurrency
+            - name: MAX_CONCURRENT_RECONCILES
+              value: {{ .Values.maxConcurrentReconciles | default 3 | quote }}
             # Endpoint mode configuration
             - name: ENDPOINT_MODE
               value: {{ .Values.endpointMode | quote }}

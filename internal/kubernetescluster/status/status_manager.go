@@ -630,7 +630,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	}
 
 	// Build aggregates
-	totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning, cpNodes := aggregateMachineResources(ml)
+	totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning, workerCount, cpNodes := aggregateMachineResources(ml)
 
 	// Convert typed KubernetesCluster to unstructured for status manipulation
 	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
@@ -653,6 +653,9 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 		return err
 	}
 
+	// Update worker count
+	_ = unstructured.SetNestedField(u.Object, workerCount, "status", "workers")
+
 	// Update cluster resource aggregates
 	updateClusterResourceStatus(u, totalCPU, totalMem, diskCap, diskUsed)
 
@@ -663,7 +666,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 }
 
 // aggregateMachineResources aggregates resource usage from all machines in the list
-func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) (totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning int64, cpNodes []string) {
+func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) (totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning, workerCount int64, cpNodes []string) {
 	for i := range ml.Items {
 		mObj := &ml.Items[i]
 		// Sum resources
@@ -681,6 +684,8 @@ func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) (totalCPU, tot
 			if mObj.Status.Phase == phaseRunning {
 				cpRunning++
 			}
+		} else {
+			workerCount++
 		}
 	}
 	return
