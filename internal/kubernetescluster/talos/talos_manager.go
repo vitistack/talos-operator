@@ -690,6 +690,7 @@ func (t *TalosManager) configureNewControlPlanes(ctx context.Context, cluster *v
 	}
 
 	vlog.Info(fmt.Sprintf("Configuring %d new control planes for cluster %s", len(nodes), cluster.Name))
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Configuring %d new control plane(s)", len(nodes)))
 	_ = t.statusManager.SetCondition(ctx, cluster, "NewControlPlanesConfiguring", "True", "Configuring", fmt.Sprintf("Configuring %d new control planes", len(nodes)))
 
 	for _, node := range nodes {
@@ -714,6 +715,7 @@ func (t *TalosManager) configureNewWorkers(ctx context.Context, cluster *vitista
 	}
 
 	vlog.Info(fmt.Sprintf("Configuring %d new workers for cluster %s", len(nodes), cluster.Name))
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Configuring %d new worker(s)", len(nodes)))
 	_ = t.statusManager.SetCondition(ctx, cluster, "NewWorkersConfiguring", "True", "Configuring", fmt.Sprintf("Configuring %d new workers", len(nodes)))
 
 	for _, node := range nodes {
@@ -743,6 +745,7 @@ func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv
 	}
 
 	vlog.Info(fmt.Sprintf("Applying config to new %s: node=%s ip=%s", nodeType, node.Name, ip))
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Applying config to %s %s", nodeType, node.Name))
 	// Use insecure mode for new nodes - they don't have the cluster CA yet
 	if err := t.applyPerNodeConfiguration(ctx, cluster, configCtx.clientConfig, []*vitistackv1alpha1.Machine{node}, true, configCtx.tenantOverrides, configCtx.endpointIP); err != nil {
 		return fmt.Errorf("failed to apply config: %w", err)

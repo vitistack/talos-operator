@@ -40,17 +40,20 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			t.backfillOSInstalledAnnotations(ctx, cluster)
 
 			// Reconcile removed nodes first (scale-down), then new nodes (scale-up)
+			_ = t.statusManager.SetMessage(ctx, cluster, "Reconciling removed nodes")
 			if err := t.reconcileRemovedNodes(ctx, cluster); err != nil {
 				vlog.Warn(fmt.Sprintf("Error during node removal reconciliation: %v", err))
 				// Continue with new node reconciliation even if removal has issues
 			}
 
 			// Cleanup orphaned K8s nodes (NotReady + SchedulingDisabled with no Machine CRD)
+			_ = t.statusManager.SetMessage(ctx, cluster, "Cleaning up orphaned nodes")
 			if err := t.CleanupOrphanedK8sNodes(ctx, cluster); err != nil {
 				vlog.Warn(fmt.Sprintf("Error during orphaned node cleanup: %v", err))
 				// Continue even if cleanup has issues
 			}
 
+			_ = t.statusManager.SetMessage(ctx, cluster, "Reconciling new nodes")
 			if err := t.reconcileNewNodes(ctx, cluster); err != nil {
 				return err
 			}
@@ -297,6 +300,7 @@ func (t *TalosManager) stageApplyFirstControlPlane(
 	}
 
 	vlog.Info(fmt.Sprintf("Stage 1: Applying config to first control plane: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Applying config to first control plane %s", firstControlPlane.Name))
 	_ = t.statusManager.SetPhase(ctx, cluster, "ConfiguringFirstControlPlane")
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "Applying", "Applying config to first control plane")
 
@@ -333,6 +337,7 @@ func (t *TalosManager) stageWaitFirstControlPlaneAPI(
 	}
 
 	vlog.Info(fmt.Sprintf("Stage 2a: Checking if first control plane Talos API is ready: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Waiting for Talos API on %s", firstControlPlane.Name))
 	_ = t.statusManager.SetPhase(ctx, cluster, "WaitingForFirstControlPlaneAPI")
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneTalosAPIReady", "False", "Waiting", "Waiting for Talos API on first control plane")
 
@@ -364,6 +369,7 @@ func (t *TalosManager) stageBootstrapCluster(
 	}
 
 	vlog.Info(fmt.Sprintf("Stage 2b: Bootstrapping cluster via first control plane: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Bootstrapping cluster via %s", firstControlPlane.Name))
 	_ = t.statusManager.SetPhase(ctx, cluster, "Bootstrapping")
 	_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "False", "Bootstrapping", "Bootstrapping Talos cluster")
 
@@ -434,6 +440,7 @@ func (t *TalosManager) stageRetrieveKubeconfig(
 	}
 
 	vlog.Info(fmt.Sprintf("Stage 2c: Retrieving kubeconfig after bootstrap: cluster=%s", cluster.Name))
+	_ = t.statusManager.SetMessage(ctx, cluster, "Retrieving kubeconfig")
 	_ = t.statusManager.SetPhase(ctx, cluster, "RetrievingKubeconfig")
 	_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "False", "Retrieving", "Retrieving kubeconfig from bootstrapped cluster")
 
@@ -475,6 +482,7 @@ func (t *TalosManager) stageApplyRemainingControlPlanes(
 		return nil
 	}
 
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Configuring %d remaining control plane(s)", len(remainingControlPlanes)))
 	if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, remainingControlPlanes, true, prep.tenantOverrides, prep.endpointIPs[0], &nodeGroupConfig{
 		stageNum:      3,
 		nodeType:      "control plane",
@@ -507,6 +515,7 @@ func (t *TalosManager) stageWaitAllControlPlanesReady(
 	}
 
 	vlog.Info(fmt.Sprintf("Checking if all control plane Talos APIs are ready: count=%d cluster=%s", len(controlPlanes), cluster.Name))
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Waiting for Talos API on %d control plane(s)", len(controlPlanes)))
 	_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "False", "Waiting", "Waiting for Talos API on all control planes")
 
 	if !t.clientService.AreTalosAPIsReady(controlPlanes) {
@@ -532,6 +541,7 @@ func (t *TalosManager) stageWaitKubernetesAPIReady(
 	}
 
 	vlog.Info(fmt.Sprintf("Checking if Kubernetes API server is ready: endpoint=%s cluster=%s", endpointIP, cluster.Name))
+	_ = t.statusManager.SetMessage(ctx, cluster, "Waiting for Kubernetes API server")
 	_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "False", "Waiting", "Waiting for Kubernetes API server to be ready")
 
 	if !t.clientService.IsKubernetesAPIReady(endpointIP) {
@@ -559,6 +569,7 @@ func (t *TalosManager) stageApplyWorkers(
 		return nil
 	}
 
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Configuring %d worker(s)", len(workers)))
 	if err := t.applyConfigToMachineGroup(ctx, cluster, clientConfig, workers, true, prep.tenantOverrides, prep.endpointIPs[0], &nodeGroupConfig{
 		stageNum:      4,
 		nodeType:      "worker",
@@ -586,6 +597,7 @@ func (t *TalosManager) stageFinalizeCluster(
 	allMachines = append(allMachines, prep.controlPlanes...)
 	allMachines = append(allMachines, prep.workers...)
 	vlog.Info(fmt.Sprintf("Stage 5: All %d nodes configured, marking cluster as ready: cluster=%s", len(allMachines), cluster.Name))
+	_ = t.statusManager.SetMessage(ctx, cluster, "Finalizing cluster")
 
 	if err := t.setSecretTimestamp(ctx, cluster, "ready_at"); err != nil {
 		vlog.Error("Failed to set ready_at timestamp in secret", err)

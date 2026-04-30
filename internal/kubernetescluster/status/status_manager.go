@@ -403,6 +403,46 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 	return nil
 }
 
+// SetMessage sets the human-readable message on status.message describing the current activity.
+// Pass an empty string to clear the message.
+func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster, message string) error {
+	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
+	if err != nil {
+		return err
+	}
+
+	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	currentMessage, _, _ := unstructured.NestedString(u.Object, "status", "message")
+	if currentMessage == message {
+		return nil
+	}
+
+	if err := ensureStatusMap(u); err != nil {
+		return err
+	}
+	if err := unstructured.SetNestedField(u.Object, message, "status", "message"); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
+	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+
+	if err := m.Status().Update(ctx, u); err != nil {
+		if apierrors.IsConflict(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // SetCondition updates status.conditions with a condition entry (type, status, reason, message, lastTransitionTime).
 // Uses unstructured to avoid coupling to generated condition types from external CRD module.
 // nolint:gocyclo // Complexity handled through helper functions
