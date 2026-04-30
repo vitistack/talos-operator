@@ -301,7 +301,7 @@ func (t *TalosManager) stageApplyFirstControlPlane(
 		vlog.Error("Failed to set first_controlplane_applied flag in secret", err)
 		return fmt.Errorf("failed to persist first_controlplane_applied flag: %w", err)
 	}
-	if err := t.addConfiguredNode(ctx, cluster, firstControlPlane.Name); err != nil {
+	if err := t.addConfiguredMachine(ctx, cluster, firstControlPlane); err != nil {
 		vlog.Error("Failed to add first control plane to configured nodes", err)
 	}
 

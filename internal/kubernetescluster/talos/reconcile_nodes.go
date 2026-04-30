@@ -123,16 +123,22 @@ func (t *TalosManager) findUnconfiguredMachines(ctx context.Context, cluster *vi
 	configuredNodes, err := t.getConfiguredNodes(ctx, cluster)
 	if err != nil {
 		vlog.Warn(fmt.Sprintf("Failed to get configured nodes: %v", err))
-		configuredNodes = []string{}
-	}
-	configuredSet := make(map[string]bool)
-	for _, n := range configuredNodes {
-		configuredSet[n] = true
+		configuredNodes = nil
 	}
 
 	var newMachines []*vitistackv1alpha1.Machine
 	for _, m := range machines {
-		if !configuredSet[m.Name] {
+		storedUID, ok := configuredNodes[m.Name]
+		if !ok {
+			newMachines = append(newMachines, m)
+			continue
+		}
+		// Stored UID empty = legacy entry, treat as still configured.
+		// Stored UID non-empty and != current = Machine was deleted and
+		// recreated with the same name; the new Machine needs Talos config
+		// applied before kubevirt-operator strips its boot ISO.
+		if storedUID != "" && storedUID != m.UID {
+			vlog.Info(fmt.Sprintf("Machine %s reused configured name with new UID (stored=%s current=%s); will reconfigure", m.Name, storedUID, m.UID))
 			newMachines = append(newMachines, m)
 		}
 	}
@@ -160,7 +166,7 @@ func (t *TalosManager) reconcileFailedNodes(ctx context.Context, cluster *vitist
 		machineMap[m.Name] = m
 	}
 
-	for _, nodeName := range configuredNodes {
+	for nodeName := range configuredNodes {
 		m, exists := machineMap[nodeName]
 		if !exists {
 			continue // Machine CRD was deleted; handled by reconcileRemovedNodes

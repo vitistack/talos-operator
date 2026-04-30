@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	yaml "gopkg.in/yaml.v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 )
@@ -876,33 +878,81 @@ func (s *TalosStateService) LoadTalosArtifacts(ctx context.Context, cluster *vit
 	return nil, false, nil
 }
 
-// GetConfiguredNodes returns the list of node names that have been configured
-func (s *TalosStateService) GetConfiguredNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) ([]string, error) {
+// parseConfiguredNodes parses the configured_nodes secret value.
+// Format: comma-separated entries of "name=uid". Legacy entries without "=uid"
+// are accepted and returned with an empty UID — IsNodeConfigured treats those
+// as matching any Machine UID so existing clusters keep working without a
+// disruptive re-configuration on upgrade.
+func parseConfiguredNodes(raw string) map[string]types.UID {
+	out := map[string]types.UID{}
+	if raw == "" {
+		return out
+	}
+	for _, entry := range strings.Split(raw, ",") {
+		if entry == "" {
+			continue
+		}
+		if i := strings.IndexByte(entry, '='); i >= 0 {
+			out[entry[:i]] = types.UID(entry[i+1:])
+		} else {
+			out[entry] = ""
+		}
+	}
+	return out
+}
+
+// serializeConfiguredNodes encodes the map back into the wire format. Names
+// are emitted in sorted order so the secret round-trips deterministically.
+func serializeConfiguredNodes(m map[string]types.UID) string {
+	if len(m) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		parts = append(parts, n+"="+string(m[n]))
+	}
+	return strings.Join(parts, ",")
+}
+
+// GetConfiguredNodes returns the configured-node set as name -> Machine UID.
+// Legacy entries (written before UID tracking was added) have an empty UID.
+func (s *TalosStateService) GetConfiguredNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (map[string]types.UID, error) {
 	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
 	if err != nil {
 		return nil, err
 	}
 	if secret.Data == nil {
-		return nil, nil
+		return map[string]types.UID{}, nil
 	}
-	nodesStr := string(secret.Data["configured_nodes"])
-	if nodesStr == "" {
-		return nil, nil
-	}
-	return strings.Split(nodesStr, ","), nil
+	return parseConfiguredNodes(string(secret.Data["configured_nodes"])), nil
 }
 
-// IsNodeConfigured checks if a node has already been configured
-func (s *TalosStateService) IsNodeConfigured(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) bool {
+// IsNodeConfigured reports whether nodeName is in the configured set AND the
+// stored UID either matches uid or is empty (legacy entry). A non-matching
+// stored UID means the Machine was deleted and recreated since it was
+// configured, so the new Machine must be re-configured before any
+// provider-side cleanup (e.g. kubevirt boot ISO removal) is allowed to run.
+func (s *TalosStateService) IsNodeConfigured(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string, uid types.UID) bool {
 	nodes, err := s.GetConfiguredNodes(ctx, cluster)
 	if err != nil {
 		return false
 	}
-	return slices.Contains(nodes, nodeName)
+	storedUID, ok := nodes[nodeName]
+	if !ok {
+		return false
+	}
+	return storedUID == "" || storedUID == uid
 }
 
-// AddConfiguredNode adds a node name to the list of configured nodes in the secret
-func (s *TalosStateService) AddConfiguredNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+// AddConfiguredNode upserts (nodeName, uid) into the configured set. If the
+// stored UID differs from uid (Machine was recreated) the entry is overwritten
+// so subsequent IsNodeConfigured checks pass for the new Machine.
+func (s *TalosStateService) AddConfiguredNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string, uid types.UID) error {
 	maxRetries := 3
 	for attempt := range maxRetries {
 		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
@@ -913,19 +963,13 @@ func (s *TalosStateService) AddConfiguredNode(ctx context.Context, cluster *viti
 			secret.Data = map[string][]byte{}
 		}
 
-		existingNodes := string(secret.Data["configured_nodes"])
-		var nodes []string
-		if existingNodes != "" {
-			nodes = strings.Split(existingNodes, ",")
+		nodes := parseConfiguredNodes(string(secret.Data["configured_nodes"]))
+		if existing, ok := nodes[nodeName]; ok && existing == uid {
+			return nil // Already configured with this exact UID
 		}
 
-		// Check if already exists
-		if slices.Contains(nodes, nodeName) {
-			return nil // Already configured
-		}
-
-		nodes = append(nodes, nodeName)
-		secret.Data["configured_nodes"] = []byte(strings.Join(nodes, ","))
+		nodes[nodeName] = uid
+		secret.Data["configured_nodes"] = []byte(serializeConfiguredNodes(nodes))
 
 		err = s.secretService.UpdateTalosSecret(ctx, secret)
 		if err == nil {
@@ -941,7 +985,8 @@ func (s *TalosStateService) AddConfiguredNode(ctx context.Context, cluster *viti
 	return fmt.Errorf("failed to add configured node after %d retries", maxRetries)
 }
 
-// RemoveConfiguredNode removes a node name from the list of configured nodes in the secret
+// RemoveConfiguredNode removes the entry for nodeName from the configured set,
+// regardless of the stored UID.
 func (s *TalosStateService) RemoveConfiguredNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
 	maxRetries := 3
 	for attempt := range maxRetries {
@@ -953,27 +998,12 @@ func (s *TalosStateService) RemoveConfiguredNode(ctx context.Context, cluster *v
 			return nil // No nodes configured
 		}
 
-		existingNodes := string(secret.Data["configured_nodes"])
-		if existingNodes == "" {
-			return nil // No nodes to remove
-		}
-
-		nodes := strings.Split(existingNodes, ",")
-		var newNodes []string
-		found := false
-		for _, n := range nodes {
-			if n != nodeName {
-				newNodes = append(newNodes, n)
-			} else {
-				found = true
-			}
-		}
-
-		if !found {
+		nodes := parseConfiguredNodes(string(secret.Data["configured_nodes"]))
+		if _, ok := nodes[nodeName]; !ok {
 			return nil // Node was not in the list
 		}
-
-		secret.Data["configured_nodes"] = []byte(strings.Join(newNodes, ","))
+		delete(nodes, nodeName)
+		secret.Data["configured_nodes"] = []byte(serializeConfiguredNodes(nodes))
 
 		err = s.secretService.UpdateTalosSecret(ctx, secret)
 		if err == nil {

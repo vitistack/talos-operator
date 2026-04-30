@@ -67,7 +67,7 @@ func (t *TalosManager) reconcileRemovedNodes(ctx context.Context, cluster *vitis
 
 	// Find nodes that are configured but no longer exist as machines
 	var nodesToRemove []string
-	for _, nodeName := range configuredNodes {
+	for nodeName := range configuredNodes {
 		if !currentMachines[nodeName] {
 			nodesToRemove = append(nodesToRemove, nodeName)
 		}

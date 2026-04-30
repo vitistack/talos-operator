@@ -192,19 +192,26 @@ func (t *TalosManager) setTalosSecretFlags(ctx context.Context, cluster *vitista
 	return t.stateService.SetFlags(ctx, cluster, updates)
 }
 
-// getConfiguredNodes returns the list of node names that have been configured
-func (t *TalosManager) getConfiguredNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) ([]string, error) {
+// getConfiguredNodes returns the configured-node set as name -> Machine UID.
+// Legacy entries (written before UID tracking was added) carry an empty UID.
+func (t *TalosManager) getConfiguredNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (map[string]types.UID, error) {
 	return t.stateService.GetConfiguredNodes(ctx, cluster)
 }
 
-// isNodeConfigured checks if a node has already been configured
-func (t *TalosManager) isNodeConfigured(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) bool {
-	return t.stateService.IsNodeConfigured(ctx, cluster, nodeName)
+// isMachineConfigured checks whether the given Machine is in the configured
+// set AND its UID matches what was stored when it was configured. A new
+// Machine that reuses the name of a deleted one (different UID) returns
+// false here so it gets re-configured before kubevirt-operator clears its
+// boot ISO.
+func (t *TalosManager) isMachineConfigured(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, m *vitistackv1alpha1.Machine) bool {
+	return t.stateService.IsNodeConfigured(ctx, cluster, m.Name, m.UID)
 }
 
-// addConfiguredNode adds a node name to the list of configured nodes in the secret
-func (t *TalosManager) addConfiguredNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
-	return t.stateService.AddConfiguredNode(ctx, cluster, nodeName)
+// addConfiguredMachine upserts (Machine name, Machine UID) into the configured
+// set. Replacing the stored UID is what makes the recreated-Machine path
+// recover automatically.
+func (t *TalosManager) addConfiguredMachine(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, m *vitistackv1alpha1.Machine) error {
+	return t.stateService.AddConfiguredNode(ctx, cluster, m.Name, m.UID)
 }
 
 // determineControlPlaneEndpoints determines the control plane endpoints based on the configured endpoint mode
@@ -569,7 +576,7 @@ func (t *TalosManager) applyConfigToSingleMachine(
 	endpointIP string,
 	grpCfg *nodeGroupConfig,
 ) error {
-	if t.isNodeConfigured(ctx, cluster, m.Name) {
+	if t.isMachineConfigured(ctx, cluster, m) {
 		vlog.Info(fmt.Sprintf("%s already configured, skipping: node=%s", capitalizeFirst(grpCfg.nodeType), m.Name))
 		t.markMachineOSInstalled(ctx, m)
 		return nil
@@ -608,7 +615,7 @@ func (t *TalosManager) handlePostConfigSteps(
 		}
 	}
 
-	if err := t.addConfiguredNode(ctx, cluster, m.Name); err != nil {
+	if err := t.addConfiguredMachine(ctx, cluster, m); err != nil {
 		vlog.Error(fmt.Sprintf("Failed to add %s %s to configured nodes", grpCfg.nodeType, m.Name), err)
 	}
 
@@ -620,6 +627,12 @@ func (t *TalosManager) handlePostConfigSteps(
 // short-circuit bypasses the per-stage apply paths for fully-initialized
 // clusters, so without this pass legacy clusters would never get the
 // annotation and kubevirt-operator would never clean up their boot ISOs.
+//
+// The UID-aware check in isMachineConfigured guards against the recreation
+// race: when a Machine is deleted and recreated with the same name, the new
+// Machine has a different UID and is treated as unconfigured here, so we do
+// NOT stamp os-installed on a fresh empty VM that hasn't actually had Talos
+// applied yet.
 func (t *TalosManager) backfillOSInstalledAnnotations(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) {
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
 	if err != nil {
@@ -627,7 +640,7 @@ func (t *TalosManager) backfillOSInstalledAnnotations(ctx context.Context, clust
 		return
 	}
 	for _, m := range machines {
-		if !t.isNodeConfigured(ctx, cluster, m.Name) {
+		if !t.isMachineConfigured(ctx, cluster, m) {
 			continue
 		}
 		t.markMachineOSInstalled(ctx, m)
@@ -734,7 +747,7 @@ func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv
 	if err := t.applyPerNodeConfiguration(ctx, cluster, configCtx.clientConfig, []*vitistackv1alpha1.Machine{node}, true, configCtx.tenantOverrides, configCtx.endpointIP); err != nil {
 		return fmt.Errorf("failed to apply config: %w", err)
 	}
-	if err := t.addConfiguredNode(ctx, cluster, node.Name); err != nil {
+	if err := t.addConfiguredMachine(ctx, cluster, node); err != nil {
 		vlog.Error(fmt.Sprintf("Failed to add new %s %s to configured nodes", nodeType, node.Name), err)
 	}
 
