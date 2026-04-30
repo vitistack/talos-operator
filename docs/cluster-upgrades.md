@@ -268,7 +268,7 @@ This ensures compatibility between control plane and kubelet versions.
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  5. User triggers Kubernetes upgrade                            │
-│     → Sets: upgrade.vitistack.io/kubernetes-target: "1.35.0"    │
+│     → Sets: spec.topology.version: "1.35.0"    │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼

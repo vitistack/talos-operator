@@ -19,8 +19,31 @@ var (
 	TALOS_VM_INSTALL_IMAGE_KUBEVIRT = "TALOS_VM_INSTALL_IMAGE_KUBEVIRT"
 	TALOS_VM_INSTALL_IMAGE_DEFAULT  = "TALOS_VM_INSTALL_IMAGE_DEFAULT"
 	TALOS_PREDICTABLE_NETWORK_NAMES = "TALOS_PREDICTABLE_NETWORK_NAMES"
-	VITISTACK_NAME                  = "VITISTACK_NAME"
-	NAME_KUBERNETES_PROVIDER        = "NAME_KUBERNETES_PROVIDER"
+
+	// TALOS_REQUIRED_EXTENSIONS is a comma-separated list of Talos system
+	// extension names that every node in every Talos cluster must have
+	// installed. Both formats are accepted and treated as equivalent:
+	//   - bare manifest name as Talos reports it: "iscsi-tools,qemu-guest-agent"
+	//   - factory display path with author prefix: "siderolabs/iscsi-tools,siderolabs/qemu-guest-agent"
+	// On every reconcile the operator queries the installed extensions on
+	// each reachable node; if any required extension is missing it triggers
+	// a Talos upgrade with TALOS_VM_INSTALL_IMAGE_<provider> (or _DEFAULT)
+	// so the node is reinstalled from an image whose schematic includes the
+	// missing extensions. The operator cannot pull extensions onto an
+	// already-installed image — the developer must keep this list in sync
+	// with the schematic baked into TALOS_VM_INSTALL_IMAGE_*.
+	// Empty value disables the feature.
+	TALOS_REQUIRED_EXTENSIONS = "TALOS_REQUIRED_EXTENSIONS" //nolint:revive,stylecheck // consistent with other env var constants
+
+	// TALOS_EXTENSION_COOLDOWN_MINUTES is how long the operator waits after
+	// triggering a Talos upgrade on a node before considering another trigger
+	// for the same node + image. The window has to cover Talos reboot +
+	// extension unpack + API recovery; once it elapses, if extensions are
+	// still missing the operator re-triggers (likely the previous upgrade
+	// failed). Default: 10. Min: 1.
+	TALOS_EXTENSION_COOLDOWN_MINUTES = "TALOS_EXTENSION_COOLDOWN_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
+	VITISTACK_NAME                   = "VITISTACK_NAME"
+	NAME_KUBERNETES_PROVIDER         = "NAME_KUBERNETES_PROVIDER"
 
 	// ENDPOINT_MODE configures how the operator determines control plane endpoints.
 	// Valid values: "none", "networkconfiguration", "talosvip", "custom"

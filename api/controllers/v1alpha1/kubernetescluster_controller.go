@@ -79,8 +79,13 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		return ctrl.Result{}, nil
 	}
 
+	// Set activity message for the duration of reconciliation
+	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Reconciling")
+
 	// Validate the cluster spec (especially control plane replicas for etcd quorum)
+	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Validating cluster spec")
 	if r.validateClusterSpec(ctx, kubernetesCluster) {
+		_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Validation error")
 		// Don't requeue — user needs to fix the spec.
 		return ctrl.Result{}, nil
 	}
@@ -92,7 +97,9 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// Handle scale-down before machine reconciliation
 	// This ensures nodes are properly removed from etcd/VIP before Machine CRDs are deleted
+	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Checking for scale-down")
 	if result, handled := r.handleScaleDown(ctx, kubernetesCluster); handled {
+		_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Scaling down")
 		return result, nil
 	}
 
@@ -105,12 +112,14 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Reconcile machines based on cluster spec (creates/updates desired machines)
+	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Reconciling machines")
 	if err := r.MachineManager.ReconcileMachines(ctx, kubernetesCluster); err != nil {
 		vlog.Error("Failed to reconcile machines", err)
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
 	// Reconcile Talos cluster after machines are created
+	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Reconciling Talos cluster")
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, kubernetesCluster); err != nil {
 		// Check if this is a RequeueError (non-blocking wait signal)
 		if requeueErr, ok := talosclientservice.IsRequeueError(err); ok {
@@ -123,11 +132,13 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	// Handle upgrade requests (only for ready clusters)
+	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Checking for upgrades")
 	if result, handled := r.handleUpgrades(ctx, kubernetesCluster); handled {
 		return result, nil
 	}
 
 	// Update KubernetesCluster status (skip if being deleted)
+	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Updating status")
 	if kubernetesCluster.GetDeletionTimestamp() == nil {
 		if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, kubernetesCluster); err != nil {
 			vlog.Error("Failed to update KubernetesCluster status", err)
@@ -140,6 +151,9 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		// Check for available upgrades (compares cluster version with operator's configured version)
 		_ = r.UpgradeService.CheckForAvailableUpgrades(ctx, kubernetesCluster)
 	}
+
+	// Clear activity message on successful reconciliation
+	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "")
 
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 }

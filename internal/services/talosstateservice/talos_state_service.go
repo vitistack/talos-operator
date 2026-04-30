@@ -2,6 +2,7 @@ package talosstateservice
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -98,6 +99,11 @@ func (s *TalosStateService) EnsureSecretExists(ctx context.Context, cluster *vit
 		"health_nodes_ready":        []byte(falseStr), // all nodes ready
 		"health_controlplane_ready": []byte(falseStr), // control plane components healthy
 		"health_check_message":      []byte(""),       // human-readable health status message
+		// Per-node, per-image record of extension-driven Talos upgrades the
+		// operator triggered, so the reconcile loop can throttle re-triggers
+		// while a node is rebooting and skip nodes that are already in flight.
+		// JSON: {"<nodeName>":{"image":"...","triggeredAt":"<RFC3339>"}, ...}
+		"extension_upgrade_state": []byte(""),
 	}
 	err = s.secretService.CreateTalosSecret(ctx, cluster, data)
 	if err == nil {
@@ -1018,6 +1024,99 @@ func (s *TalosStateService) RemoveConfiguredNode(ctx context.Context, cluster *v
 		return err
 	}
 	return fmt.Errorf("failed to remove configured node after %d retries", maxRetries)
+}
+
+// ExtensionUpgradeRecord captures one in-flight extension-driven Talos
+// upgrade. The reconciler uses TriggeredAt + Image to decide whether to wait
+// (cooldown still active, same image) or re-trigger (image changed because
+// the operator's TALOS_VM_INSTALL_IMAGE_* env was updated).
+type ExtensionUpgradeRecord struct {
+	Image       string    `json:"image"`
+	TriggeredAt time.Time `json:"triggeredAt"`
+}
+
+// GetExtensionUpgradeStates returns the per-node record of extension-driven
+// upgrades the operator has triggered for this cluster. The map key is the
+// Machine name. An empty / unset value yields an empty map (not nil).
+func (s *TalosStateService) GetExtensionUpgradeStates(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (map[string]ExtensionUpgradeRecord, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if secret.Data == nil {
+		return map[string]ExtensionUpgradeRecord{}, nil
+	}
+	raw := secret.Data["extension_upgrade_state"]
+	if len(raw) == 0 {
+		return map[string]ExtensionUpgradeRecord{}, nil
+	}
+	out := map[string]ExtensionUpgradeRecord{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		// Treat a corrupted blob as empty rather than wedging the reconciler.
+		vlog.Warn(fmt.Sprintf("extension_upgrade_state JSON corrupt for cluster %s, resetting: %v", cluster.Name, err))
+		return map[string]ExtensionUpgradeRecord{}, nil
+	}
+	return out, nil
+}
+
+// SetExtensionUpgradeState upserts the record for nodeName, stamping
+// TriggeredAt with the current UTC time. Existing entries for other nodes
+// are preserved.
+func (s *TalosStateService) SetExtensionUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName, image string) error {
+	return s.mutateExtensionUpgradeStates(ctx, cluster, func(m map[string]ExtensionUpgradeRecord) {
+		m[nodeName] = ExtensionUpgradeRecord{Image: image, TriggeredAt: time.Now().UTC()}
+	})
+}
+
+// RemoveExtensionUpgradeState drops the record for nodeName (called once a
+// node is observed back in compliance, or when the Machine no longer exists).
+func (s *TalosStateService) RemoveExtensionUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	return s.mutateExtensionUpgradeStates(ctx, cluster, func(m map[string]ExtensionUpgradeRecord) {
+		delete(m, nodeName)
+	})
+}
+
+// mutateExtensionUpgradeStates is the conflict-retried read-modify-write that
+// backs Set/Remove ExtensionUpgradeState.
+func (s *TalosStateService) mutateExtensionUpgradeStates(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, mutate func(map[string]ExtensionUpgradeRecord)) error {
+	maxRetries := 3
+	for attempt := range maxRetries {
+		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			return err
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+		state := map[string]ExtensionUpgradeRecord{}
+		if raw := secret.Data["extension_upgrade_state"]; len(raw) > 0 {
+			if uerr := json.Unmarshal(raw, &state); uerr != nil {
+				// Corrupt blob — start over rather than failing the write.
+				state = map[string]ExtensionUpgradeRecord{}
+			}
+		}
+		mutate(state)
+
+		var encoded []byte
+		if len(state) > 0 {
+			encoded, err = json.Marshal(state)
+			if err != nil {
+				return fmt.Errorf("failed to marshal extension_upgrade_state: %w", err)
+			}
+		}
+		secret.Data["extension_upgrade_state"] = encoded
+
+		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		if err == nil {
+			return nil
+		}
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1))
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("failed to update extension_upgrade_state after %d retries", maxRetries)
 }
 
 // UpsertConfigWithRoleYAML stores config artifacts (talosconfig, role templates) in the secret
