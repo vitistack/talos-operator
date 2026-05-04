@@ -42,8 +42,29 @@ var (
 	// still missing the operator re-triggers (likely the previous upgrade
 	// failed). Default: 10. Min: 1.
 	TALOS_EXTENSION_COOLDOWN_MINUTES = "TALOS_EXTENSION_COOLDOWN_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
-	VITISTACK_NAME                   = "VITISTACK_NAME"
-	NAME_KUBERNETES_PROVIDER         = "NAME_KUBERNETES_PROVIDER"
+
+	// TALOS_VERSION_ENFORCE_ENABLED toggles the version-enforcement
+	// reconciler that probes each node's running Talos version (via the
+	// Talos API) on every reconcile pass and triggers a `talosctl upgrade`
+	// when a node disagrees with TALOS_VERSION. Skipped when an
+	// annotation-driven rolling upgrade is in progress, and never downgrades
+	// (any node above the desired version surfaces a
+	// TalosVersionEnforcement=True/Downgrade condition and the pass is
+	// aborted). Default: true.
+	TALOS_VERSION_ENFORCE_ENABLED = "TALOS_VERSION_ENFORCE_ENABLED" //nolint:revive,stylecheck // consistent with other env var constants
+
+	// TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES is how long the operator waits
+	// after triggering a version-enforcement Talos upgrade on a node before
+	// considering another trigger for the same node + target version + image.
+	// Without this throttle, the 5s reconcile loop would re-issue the upgrade
+	// RPC every pass while the node is still mid-reboot/drain. The window has
+	// to cover Talos reboot + cordon/drain + API recovery; once it elapses,
+	// if the node is still on the wrong version the operator re-triggers
+	// (likely the previous upgrade failed). Default: 5. Min: 1.
+	TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES = "TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
+
+	VITISTACK_NAME           = "VITISTACK_NAME"
+	NAME_KUBERNETES_PROVIDER = "NAME_KUBERNETES_PROVIDER"
 
 	// MAX_CONCURRENT_RECONCILES is the maximum number of KubernetesCluster
 	// reconciliations that run in parallel. Default: 3.
@@ -117,16 +138,16 @@ type BootImageSource string
 
 const (
 	// BootImageSourcePXE uses PXE boot for machine provisioning.
-	// This is the default mode.
 	BootImageSourcePXE BootImageSource = "pxe"
 
 	// BootImageSourceBootImage uses a boot image (ISO/disk image) for machine provisioning.
 	// The imageID in the Machine spec will be used to create a DataVolume with CDI.
 	// This avoids PXE boot entirely - kubevirt and Proxmox operators handle the imageID.
+	// This is the default mode.
 	BootImageSourceBootImage BootImageSource = "bootimage"
 
 	// DefaultBootImageSource is the default boot image source
-	DefaultBootImageSource = BootImageSourcePXE
+	DefaultBootImageSource = BootImageSourceBootImage
 )
 
 // IsValidBootImageSource checks if the provided source is valid
@@ -256,6 +277,17 @@ const (
 	// Set by operator when nodes fail.
 	// Value: comma-separated list of node names (e.g., "worker-1,worker-2")
 	FailedNodesAnnotation = UpgradeAnnotationPrefix + "failed-nodes"
+
+	// TalosResetUpgradeStateAnnotation triggers a one-shot reset of the
+	// Talos upgrade bookkeeping. Use when an upgrade has stranded the state
+	// machine (e.g. upgrade_in_progress=true while upgrade_state.phase=failed,
+	// neither resume nor enforcement can advance). On reconcile the operator
+	// clears the secret's upgrade flags and JSON state, removes the Talos
+	// upgrade-status annotations, and removes this annotation. The next
+	// reconcile then runs reconcileTalosVersion against ground truth and
+	// re-derives the correct installer image.
+	// Value: "true" to reset
+	TalosResetUpgradeStateAnnotation = UpgradeAnnotationPrefix + "talos-reset-upgrade-state"
 )
 
 // UpgradeStatus constants for *-status annotations

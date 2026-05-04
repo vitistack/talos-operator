@@ -8,6 +8,11 @@ import (
 	yaml "gopkg.in/yaml.v3"
 )
 
+// testCustomInstallDisk is the install-disk path the tenant-override
+// fixtures patch onto the base config. Reused across multiple tests
+// (override-merges-nested, override-leaves-base-untouched, etc).
+const testCustomInstallDisk = "/dev/custom"
+
 func TestApplyTenantOverridesMergesNestedValues(t *testing.T) {
 	service := NewTalosConfigService()
 
@@ -21,7 +26,7 @@ func TestApplyTenantOverridesMergesNestedValues(t *testing.T) {
 	overrides := map[string]any{
 		"machine": map[string]any{
 			"install": map[string]any{
-				"disk": "/dev/custom",
+				"disk": testCustomInstallDisk,
 			},
 			"network": map[string]any{
 				"hostname":    "tenant-host",
@@ -50,7 +55,7 @@ func TestApplyTenantOverridesMergesNestedValues(t *testing.T) {
 		t.Fatalf("install section missing after merge")
 	}
 
-	if disk := install["disk"]; disk != "/dev/custom" {
+	if disk := install["disk"]; disk != testCustomInstallDisk {
 		t.Fatalf("expected disk to be overridden, got %v", disk)
 	}
 
@@ -89,7 +94,7 @@ func TestMergeRoleTemplateWithOverridesCreatesCopy(t *testing.T) {
 	overrides := map[string]any{
 		"machine": map[string]any{
 			"install": map[string]any{
-				"disk": "/dev/custom",
+				"disk": testCustomInstallDisk,
 			},
 		},
 	}

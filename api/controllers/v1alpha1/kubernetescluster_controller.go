@@ -107,6 +107,20 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 		return result, err
 	}
 
+	// Honour the talos-reset-upgrade-state escape hatch before any other
+	// state-aware logic runs. Clears the Talos upgrade bookkeeping (secret
+	// flags + JSON blob) and the user-facing upgrade-status annotations so
+	// the next reconcile starts clean and reconcileTalosVersion can re-derive
+	// the correct installer image from the cluster's pinned schematic.
+	if handled, err := r.UpgradeController.HandleTalosResetUpgradeState(ctx, kubernetesCluster); handled {
+		if err != nil {
+			vlog.Error("Failed to fully reset Talos upgrade state", err)
+			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
+		}
+		// Requeue immediately so the next pass sees the cleared state.
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Handle scale-down before machine reconciliation
 	// This ensures nodes are properly removed from etcd/VIP before Machine CRDs are deleted
 	if result, handled := r.handleScaleDown(ctx, kubernetesCluster); handled {

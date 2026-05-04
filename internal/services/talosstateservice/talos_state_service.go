@@ -104,6 +104,12 @@ func (s *TalosStateService) EnsureSecretExists(ctx context.Context, cluster *vit
 		// while a node is rebooting and skip nodes that are already in flight.
 		// JSON: {"<nodeName>":{"image":"...","triggeredAt":"<RFC3339>"}, ...}
 		"extension_upgrade_state": []byte(""),
+		// Per-node record of version-enforcement Talos upgrades the operator
+		// triggered. Same throttling intent as extension_upgrade_state but
+		// keyed on (image, targetVersion) so a TALOS_VERSION change forces
+		// an immediate re-trigger.
+		// JSON: {"<nodeName>":{"image":"...","targetVersion":"v1.12.7","triggeredAt":"<RFC3339>"}, ...}
+		"talos_version_enforce_state": []byte(""),
 	}
 	err = s.secretService.CreateTalosSecret(ctx, cluster, data)
 	if err == nil {
@@ -1076,23 +1082,113 @@ func (s *TalosStateService) RemoveExtensionUpgradeState(ctx context.Context, clu
 	})
 }
 
+// VersionEnforcementRecord captures one in-flight version-enforcement Talos
+// upgrade. The reconciler uses TriggeredAt + Image + TargetVersion to decide
+// whether to wait (cooldown still active for the same image+target) or
+// re-trigger (TALOS_VERSION changed, or installer image resolved differently
+// because the cluster's pinned image was updated).
+type VersionEnforcementRecord struct {
+	Image         string    `json:"image"`
+	TargetVersion string    `json:"targetVersion"`
+	TriggeredAt   time.Time `json:"triggeredAt"`
+}
+
+// GetVersionEnforcementStates returns the per-node record of
+// version-enforcement upgrades the operator has triggered for this cluster.
+// The map key is the Machine name. An empty / unset value yields an empty
+// map (not nil).
+func (s *TalosStateService) GetVersionEnforcementStates(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (map[string]VersionEnforcementRecord, error) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return nil, err
+	}
+	if secret.Data == nil {
+		return map[string]VersionEnforcementRecord{}, nil
+	}
+	raw := secret.Data["talos_version_enforce_state"]
+	if len(raw) == 0 {
+		return map[string]VersionEnforcementRecord{}, nil
+	}
+	out := map[string]VersionEnforcementRecord{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		// Treat a corrupted blob as empty rather than wedging the reconciler.
+		vlog.Warn(fmt.Sprintf("talos_version_enforce_state JSON corrupt for cluster %s, resetting: %v", cluster.Name, err))
+		return map[string]VersionEnforcementRecord{}, nil
+	}
+	return out, nil
+}
+
+// SetVersionEnforcementState upserts the record for nodeName, stamping
+// TriggeredAt with the current UTC time. Existing entries for other nodes
+// are preserved.
+func (s *TalosStateService) SetVersionEnforcementState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName, image, targetVersion string) error {
+	return s.mutateVersionEnforcementStates(ctx, cluster, func(m map[string]VersionEnforcementRecord) {
+		m[nodeName] = VersionEnforcementRecord{
+			Image:         image,
+			TargetVersion: targetVersion,
+			TriggeredAt:   time.Now().UTC(),
+		}
+	})
+}
+
+// RemoveVersionEnforcementState drops the record for nodeName (called once
+// the node is observed back in compliance, or when the Machine no longer
+// exists).
+func (s *TalosStateService) RemoveVersionEnforcementState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	return s.mutateVersionEnforcementStates(ctx, cluster, func(m map[string]VersionEnforcementRecord) {
+		delete(m, nodeName)
+	})
+}
+
+// ClearVersionEnforcementStates removes every record (called when the entire
+// cluster is observed in-sync — no more enforcement work to throttle).
+func (s *TalosStateService) ClearVersionEnforcementStates(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	return s.mutateVersionEnforcementStates(ctx, cluster, func(m map[string]VersionEnforcementRecord) {
+		for k := range m {
+			delete(m, k)
+		}
+	})
+}
+
+// mutateVersionEnforcementStates is the conflict-retried read-modify-write that
+// backs Set/Remove/Clear VersionEnforcementState.
+func (s *TalosStateService) mutateVersionEnforcementStates(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, mutate func(map[string]VersionEnforcementRecord)) error {
+	return mutateMapState(ctx, s.secretService, cluster, "talos_version_enforce_state", mutate)
+}
+
 // mutateExtensionUpgradeStates is the conflict-retried read-modify-write that
 // backs Set/Remove ExtensionUpgradeState.
 func (s *TalosStateService) mutateExtensionUpgradeStates(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, mutate func(map[string]ExtensionUpgradeRecord)) error {
+	return mutateMapState(ctx, s.secretService, cluster, "extension_upgrade_state", mutate)
+}
+
+// mutateMapState is the generic conflict-retried read-modify-write loop for
+// JSON-encoded map[string]T blobs stored under secretKey in the cluster's
+// Talos secret. A corrupt existing blob is treated as an empty map (logged at
+// the call site if needed). When the resulting map is empty after mutation,
+// the key is written back as an empty value rather than being deleted, to
+// keep the secret schema stable across reconciles.
+func mutateMapState[T any](
+	ctx context.Context,
+	secretService *secretservice.SecretService,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	secretKey string,
+	mutate func(map[string]T),
+) error {
 	maxRetries := 3
 	for attempt := range maxRetries {
-		secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+		secret, err := secretService.GetTalosSecret(ctx, cluster)
 		if err != nil {
 			return err
 		}
 		if secret.Data == nil {
 			secret.Data = map[string][]byte{}
 		}
-		state := map[string]ExtensionUpgradeRecord{}
-		if raw := secret.Data["extension_upgrade_state"]; len(raw) > 0 {
+		state := map[string]T{}
+		if raw := secret.Data[secretKey]; len(raw) > 0 {
 			if uerr := json.Unmarshal(raw, &state); uerr != nil {
 				// Corrupt blob — start over rather than failing the write.
-				state = map[string]ExtensionUpgradeRecord{}
+				state = map[string]T{}
 			}
 		}
 		mutate(state)
@@ -1101,12 +1197,12 @@ func (s *TalosStateService) mutateExtensionUpgradeStates(ctx context.Context, cl
 		if len(state) > 0 {
 			encoded, err = json.Marshal(state)
 			if err != nil {
-				return fmt.Errorf("failed to marshal extension_upgrade_state: %w", err)
+				return fmt.Errorf("failed to marshal %s: %w", secretKey, err)
 			}
 		}
-		secret.Data["extension_upgrade_state"] = encoded
+		secret.Data[secretKey] = encoded
 
-		err = s.secretService.UpdateTalosSecret(ctx, secret)
+		err = secretService.UpdateTalosSecret(ctx, secret)
 		if err == nil {
 			return nil
 		}
@@ -1116,7 +1212,7 @@ func (s *TalosStateService) mutateExtensionUpgradeStates(ctx context.Context, cl
 		}
 		return err
 	}
-	return fmt.Errorf("failed to update extension_upgrade_state after %d retries", maxRetries)
+	return fmt.Errorf("failed to update %s after %d retries", secretKey, maxRetries)
 }
 
 // UpsertConfigWithRoleYAML stores config artifacts (talosconfig, role templates) in the secret

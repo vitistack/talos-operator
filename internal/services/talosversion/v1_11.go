@@ -16,7 +16,7 @@ func NewV1_11Adapter() *V1_11Adapter {
 	return &V1_11Adapter{
 		baseAdapter: baseAdapter{
 			config: adapterConfig{
-				version:           "1.11.x",
+				version:           versionV1_11,
 				kubernetesVersion: "1.34.1",
 				etcdVersion:       "3.5.17",
 				etcdRegistry:      "gcr.io/etcd-development/etcd",

@@ -13,10 +13,10 @@ func NewV1_13Adapter() *V1_13Adapter {
 		multiDocAdapter: multiDocAdapter{
 			baseAdapter: baseAdapter{
 				config: adapterConfig{
-					version:           "1.13.x",
+					version:           versionV1_13,
 					kubernetesVersion: "1.36.0", // Estimated
-					etcdVersion:       "3.6.6",
-					etcdRegistry:      "registry.k8s.io/etcd",
+					etcdVersion:       defaultEtcdVersion,
+					etcdRegistry:      defaultEtcdRegistry,
 					multiDoc:          true,
 					grubUKICmdline:    true,
 				},

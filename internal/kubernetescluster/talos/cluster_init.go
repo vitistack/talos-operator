@@ -63,6 +63,17 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 				vlog.Warn(fmt.Sprintf("Error during node version reconciliation: %v", err))
 			}
 
+			// Enforce the configured Talos OS version: probes each node's
+			// running Talos version via the Talos API and reinstalls any
+			// node that doesn't match TALOS_VERSION (CPs first, then
+			// workers, one per pass). Never downgrades; surfaces a
+			// TalosVersionEnforcement condition for any newer-than-desired
+			// node. Bug recovery for the case where annotation/secret
+			// state has diverged from what's actually running on a node.
+			if err := t.reconcileTalosVersion(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Error during Talos version enforcement: %v", err))
+			}
+
 			// Reconcile required Talos system extensions: detects nodes that
 			// are missing entries from TALOS_REQUIRED_EXTENSIONS and triggers
 			// a Talos upgrade with the per-provider TALOS_VM_INSTALL_IMAGE_*

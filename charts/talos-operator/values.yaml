@@ -85,6 +85,22 @@ talos:
   # long enough to cover a Talos reboot + extension unpack + API recovery; once
   # the window elapses with extensions still missing, the operator re-triggers.
   extensionCooldownMinutes: 5
+  # Talos version enforcement reconciler: probes each node's running Talos
+  # version via the Talos API on every reconcile, and if a node disagrees
+  # with talos.version above triggers `talosctl upgrade` against it (CPs
+  # first, then workers, one per pass). Never downgrades — a node running a
+  # newer Talos than configured surfaces a
+  # TalosVersionEnforcement=True/Downgrade condition and the pass is
+  # aborted. Enabled by default; set to false to disable and rely solely on
+  # the annotation-driven upgrade flow.
+  versionEnforceEnabled: true
+  # Minutes between version-enforcement Talos upgrade triggers on the same
+  # node + target version + image. Without this throttle the 5s reconcile
+  # loop would re-issue the upgrade RPC every pass while the node is still
+  # rebooting/draining. Must cover Talos reboot + cordon/drain + API
+  # recovery; once it elapses with the node still on the wrong version the
+  # operator re-triggers (likely the previous upgrade failed). Min: 1.
+  versionEnforceCooldownMinutes: 5
 
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:

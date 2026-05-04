@@ -36,6 +36,17 @@ const (
 
 	// Exported phases for use by other packages
 	PhaseReady = phaseReady
+
+	// Condition status string used by metav1-style status conditions.
+	condStatusTrue = "True"
+
+	// Field names of the unstructured cluster-state map under
+	// .status.state.cluster.* — used as map keys when scaffolding the
+	// nested object graph and when traversing it to update resource usage.
+	stateFieldStatus    = "status"
+	stateFieldResources = "resources"
+	stateFieldCluster   = "cluster"
+	stateFieldState     = "state"
 )
 
 // StatusManager handles machine status updates and monitoring
@@ -156,19 +167,19 @@ func phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) strin
 func condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) []condSpec {
 	conds := []condSpec{
 		// Created condition is always true once the cluster resource exists
-		{"Created", "True", "ClusterCreated", "Kubernetes cluster resource has been created"},
+		{"Created", condStatusTrue, "ClusterCreated", "Kubernetes cluster resource has been created"},
 	}
 	if cfgPresent {
-		conds = append(conds, condSpec{"ConfigGenerated", "True", "Generated", "Talos client and role configs generated"})
+		conds = append(conds, condSpec{"ConfigGenerated", condStatusTrue, "Generated", "Talos client and role configs generated"})
 	}
 	if applied {
-		conds = append(conds, condSpec{"ConfigApplied", "True", "Applied", "Talos configs applied to all nodes"})
+		conds = append(conds, condSpec{"ConfigApplied", condStatusTrue, "Applied", "Talos configs applied to all nodes"})
 	}
 	if bootstrapped {
-		conds = append(conds, condSpec{"Bootstrapped", "True", "Done", "Talos cluster bootstrapped"})
+		conds = append(conds, condSpec{"Bootstrapped", condStatusTrue, "Done", "Talos cluster bootstrapped"})
 	}
 	if clusterAccess {
-		conds = append(conds, condSpec{"KubeconfigAvailable", "True", "Persisted", "Kubeconfig stored in Secret"})
+		conds = append(conds, condSpec{"KubeconfigAvailable", condStatusTrue, "Persisted", "Kubeconfig stored in Secret"})
 	}
 	return conds
 }
@@ -192,10 +203,10 @@ func (m *StatusManager) SetStateCreated(ctx context.Context, kc *vitistackv1alph
 		return err
 	}
 	createdStr := created.UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, createdStr, "status", "state", "created")
+	_ = unstructured.SetNestedField(u.Object, createdStr, stateFieldStatus, stateFieldState, "created")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+	_ = unstructured.SetNestedField(u.Object, now, stateFieldStatus, stateFieldState, "lastUpdated")
+	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
 
 	if err := m.Status().Update(ctx, u); err != nil {
 		if fallbackErr := m.Update(ctx, u); fallbackErr != nil {
@@ -254,20 +265,20 @@ func ensureStatusMap(u *unstructured.Unstructured) error {
 }
 
 func ensureStatusRoot(u *unstructured.Unstructured) error {
-	if _, found, _ := unstructured.NestedMap(u.Object, "status"); !found {
-		return unstructured.SetNestedMap(u.Object, map[string]any{}, "status")
+	if _, found, _ := unstructured.NestedMap(u.Object, stateFieldStatus); !found {
+		return unstructured.SetNestedMap(u.Object, map[string]any{}, stateFieldStatus)
 	}
 	return nil
 }
 
 func ensurePhaseAndConditions(u *unstructured.Unstructured) error {
-	if _, found, _ := unstructured.NestedString(u.Object, "status", "phase"); !found {
-		if err := unstructured.SetNestedField(u.Object, "Pending", "status", "phase"); err != nil {
+	if _, found, _ := unstructured.NestedString(u.Object, stateFieldStatus, "phase"); !found {
+		if err := unstructured.SetNestedField(u.Object, "Pending", stateFieldStatus, "phase"); err != nil {
 			return err
 		}
 	}
-	if _, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions"); !found {
-		if err := unstructured.SetNestedSlice(u.Object, []any{}, "status", "conditions"); err != nil {
+	if _, found, _ := unstructured.NestedSlice(u.Object, stateFieldStatus, "conditions"); !found {
+		if err := unstructured.SetNestedSlice(u.Object, []any{}, stateFieldStatus, "conditions"); err != nil {
 			return err
 		}
 	}
@@ -275,7 +286,7 @@ func ensurePhaseAndConditions(u *unstructured.Unstructured) error {
 }
 
 func ensureState(u *unstructured.Unstructured) error {
-	state, found, _ := unstructured.NestedMap(u.Object, "status", "state")
+	state, found, _ := unstructured.NestedMap(u.Object, stateFieldStatus, stateFieldState)
 	if !found || state == nil {
 		state = map[string]any{}
 	}
@@ -301,11 +312,11 @@ func ensureState(u *unstructured.Unstructured) error {
 	if _, ok := state["lastUpdatedBy"]; !ok {
 		state["lastUpdatedBy"] = "talos-operator"
 	}
-	return unstructured.SetNestedMap(u.Object, state, "status", "state")
+	return unstructured.SetNestedMap(u.Object, state, stateFieldStatus, stateFieldState)
 }
 
 func ensureStateCluster(state map[string]any) error {
-	cluster, ok := state["cluster"].(map[string]any)
+	cluster, ok := state[stateFieldCluster].(map[string]any)
 	if !ok || cluster == nil {
 		cluster = map[string]any{}
 	}
@@ -315,23 +326,23 @@ func ensureStateCluster(state map[string]any) error {
 	if _, ok := cluster["price"]; !ok {
 		cluster["price"] = map[string]any{"monthly": int64(0), "yearly": int64(0)}
 	}
-	if _, ok := cluster["resources"]; !ok {
-		cluster["resources"] = defaultResources()
+	if _, ok := cluster[stateFieldResources]; !ok {
+		cluster[stateFieldResources] = defaultResources()
 	}
 	if _, ok := cluster["controlplane"]; !ok {
 		cluster["controlplane"] = map[string]any{
-			"machineClass": "",
-			"message":      "",
-			"status":       "Pending",
-			"scale":        int64(0),
-			"nodes":        []any{},
-			"resources":    defaultResources(),
+			"machineClass":      "",
+			"message":           "",
+			stateFieldStatus:    "Pending",
+			"scale":             int64(0),
+			"nodes":             []any{},
+			stateFieldResources: defaultResources(),
 		}
 	}
 	if _, ok := cluster["nodepools"]; !ok {
 		cluster["nodepools"] = []any{}
 	}
-	state["cluster"] = cluster
+	state[stateFieldCluster] = cluster
 	return nil
 }
 
@@ -364,7 +375,7 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 	}
 
 	// Check if phase is already set to the desired value - skip update if unchanged
-	currentPhase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
+	currentPhase, _, _ := unstructured.NestedString(u.Object, stateFieldStatus, "phase")
 	if currentPhase == phase {
 		return nil // No change needed
 	}
@@ -373,14 +384,14 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 		vlog.Error("Failed to ensure status map exists: cluster="+kc.Name, err)
 		return err
 	}
-	if err := unstructured.SetNestedField(u.Object, phase, "status", "phase"); err != nil {
+	if err := unstructured.SetNestedField(u.Object, phase, stateFieldStatus, "phase"); err != nil {
 		vlog.Error("Failed to set nested field for phase: cluster="+kc.Name+" phase="+phase, err)
 		return err
 	}
 	// Update state.lastUpdated and lastUpdatedBy
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+	_ = unstructured.SetNestedField(u.Object, now, stateFieldStatus, stateFieldState, "lastUpdated")
+	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
 	// Do not set status.state here; it's an object in the CRD. ensureStatusMap already ensures it exists.
 	if err := m.Status().Update(ctx, u); err != nil {
 		// Check if this is a conflict error - if so, just log and skip
@@ -418,7 +429,7 @@ func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.Ku
 		return err
 	}
 
-	currentMessage, _, _ := unstructured.NestedString(u.Object, "status", "message")
+	currentMessage, _, _ := unstructured.NestedString(u.Object, stateFieldStatus, "message")
 	if currentMessage == message {
 		return nil
 	}
@@ -426,13 +437,13 @@ func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.Ku
 	if err := ensureStatusMap(u); err != nil {
 		return err
 	}
-	if err := unstructured.SetNestedField(u.Object, message, "status", "message"); err != nil {
+	if err := unstructured.SetNestedField(u.Object, message, stateFieldStatus, "message"); err != nil {
 		return err
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+	_ = unstructured.SetNestedField(u.Object, now, stateFieldStatus, stateFieldState, "lastUpdated")
+	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
 
 	if err := m.Status().Update(ctx, u); err != nil {
 		if apierrors.IsConflict(err) {
@@ -477,8 +488,8 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 
 	// Touch state.lastUpdated and lastUpdatedBy
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+	_ = unstructured.SetNestedField(u.Object, now, stateFieldStatus, stateFieldState, "lastUpdated")
+	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
 
 	return m.updateStatusWithConflictHandling(ctx, u, kc.Name, condType)
 }
@@ -500,21 +511,21 @@ func (m *StatusManager) ClearValidationError(ctx context.Context, kc *vitistackv
 	}
 
 	// Check current phase
-	currentPhase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
+	currentPhase, _, _ := unstructured.NestedString(u.Object, stateFieldStatus, "phase")
 	if currentPhase != PhaseValidationError {
 		return nil // Not in ValidationError state, nothing to do
 	}
 
 	// Reset phase to Pending so normal reconciliation can determine the correct phase
-	if err := unstructured.SetNestedField(u.Object, PhasePending, "status", "phase"); err != nil {
+	if err := unstructured.SetNestedField(u.Object, PhasePending, stateFieldStatus, "phase"); err != nil {
 		vlog.Error("Failed to reset phase from ValidationError: cluster="+kc.Name, err)
 		return err
 	}
 
 	// Touch state.lastUpdated and lastUpdatedBy
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+	_ = unstructured.SetNestedField(u.Object, now, stateFieldStatus, stateFieldState, "lastUpdated")
+	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
 
 	vlog.Info("Cleared ValidationError phase, resetting to Pending: cluster=" + kc.Name)
 	return m.updateStatusWithConflictHandling(ctx, u, kc.Name, "phase-reset")
@@ -523,7 +534,7 @@ func (m *StatusManager) ClearValidationError(ctx context.Context, kc *vitistackv
 // updateConditionInStatus updates the condition in the status.conditions slice
 // Returns (changed bool, error). changed is false if the condition already exists with the same values.
 func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, condType, status, reason, message, clusterName string) (bool, error) {
-	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	conds, found, _ := unstructured.NestedSlice(u.Object, stateFieldStatus, "conditions")
 	if !found {
 		conds = []any{}
 	}
@@ -531,7 +542,7 @@ func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, co
 	// Build new condition map
 	newCond := map[string]any{
 		"type":               condType,
-		"status":             status,
+		stateFieldStatus:     status,
 		"reason":             reason,
 		"message":            message,
 		"lastTransitionTime": time.Now().UTC().Format(time.RFC3339Nano),
@@ -546,7 +557,7 @@ func (m *StatusManager) updateConditionInStatus(u *unstructured.Unstructured, co
 	// Sort conditions by lastTransitionTime (newest first)
 	conds = sortConditionsByTime(conds)
 
-	if err := unstructured.SetNestedSlice(u.Object, conds, "status", "conditions"); err != nil {
+	if err := unstructured.SetNestedSlice(u.Object, conds, stateFieldStatus, "conditions"); err != nil {
 		vlog.Error("Failed to set nested slice for conditions: cluster="+clusterName+" condition="+condType, err)
 		return false, err
 	}
@@ -560,7 +571,7 @@ func replaceOrAppendCondition(conds []any, newCond map[string]any, condType stri
 		if cm, ok := ci.(map[string]any); ok {
 			if t, _ := cm["type"].(string); t == condType {
 				// Check if unchanged - if status, reason, and message are the same, no update needed
-				if cm["status"] == newCond["status"] && cm["reason"] == newCond["reason"] && cm["message"] == newCond["message"] {
+				if cm[stateFieldStatus] == newCond[stateFieldStatus] && cm["reason"] == newCond["reason"] && cm["message"] == newCond["message"] {
 					// No change needed - don't update lastTransitionTime
 					return conds, false
 				}
@@ -652,7 +663,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	cpReady := m.updateControlPlaneStatus(u, cpCount, cpRunning, cpNodes)
 
 	// Update worker count
-	_ = unstructured.SetNestedField(u.Object, workerCount, "status", "workers")
+	_ = unstructured.SetNestedField(u.Object, workerCount, stateFieldStatus, "workers")
 
 	// Update cluster resource aggregates
 	updateClusterResourceStatus(u, totalCPU, totalMem, diskCap, diskUsed)
@@ -709,17 +720,17 @@ func isControlPlaneMachine(m *vitistackv1alpha1.Machine) bool {
 // updateControlPlaneStatus updates the control plane status in the unstructured object.
 // Returns true if all control plane machines are running (caller should set phase to Ready).
 func (m *StatusManager) updateControlPlaneStatus(u *unstructured.Unstructured, cpCount, cpRunning int64, cpNodes []string) bool {
-	_ = unstructured.SetNestedField(u.Object, cpCount, "status", "state", "cluster", "controlplane", "scale")
+	_ = unstructured.SetNestedField(u.Object, cpCount, stateFieldStatus, stateFieldState, stateFieldCluster, "controlplane", "scale")
 
 	// Set control plane node names
 	nodesAny := make([]any, len(cpNodes))
 	for i, node := range cpNodes {
 		nodesAny[i] = node
 	}
-	_ = unstructured.SetNestedSlice(u.Object, nodesAny, "status", "state", "cluster", "controlplane", "nodes")
+	_ = unstructured.SetNestedSlice(u.Object, nodesAny, stateFieldStatus, stateFieldState, stateFieldCluster, "controlplane", "nodes")
 
 	cpStatus := determineControlPlaneStatus(cpCount, cpRunning)
-	_ = unstructured.SetNestedField(u.Object, cpStatus, "status", "state", "cluster", "controlplane", "status")
+	_ = unstructured.SetNestedField(u.Object, cpStatus, stateFieldStatus, stateFieldState, stateFieldCluster, "controlplane", stateFieldStatus)
 
 	return cpStatus == phaseRunning
 }
@@ -737,17 +748,17 @@ func determineControlPlaneStatus(cpCount, cpRunning int64) string {
 // updateClusterResourceStatus updates resource usage in the unstructured object
 func updateClusterResourceStatus(u *unstructured.Unstructured, totalCPU, totalMem, diskCap, diskUsed int64) {
 	// CPU and memory used are unknown here; set used=0, percentage=0
-	_ = setResourceUsage(u, []string{"status", "state", "cluster", "resources", "cpu"}, totalCPU, 0)
-	_ = setResourceUsage(u, []string{"status", "state", "cluster", "resources", "memory"}, totalMem, 0)
+	_ = setResourceUsage(u, []string{stateFieldStatus, stateFieldState, stateFieldCluster, stateFieldResources, "cpu"}, totalCPU, 0)
+	_ = setResourceUsage(u, []string{stateFieldStatus, stateFieldState, stateFieldCluster, stateFieldResources, "memory"}, totalMem, 0)
 	// Disk: can compute used percentage
-	_ = setResourceUsage(u, []string{"status", "state", "cluster", "resources", "disk"}, diskCap, diskUsed)
+	_ = setResourceUsage(u, []string{stateFieldStatus, stateFieldState, stateFieldCluster, stateFieldResources, "disk"}, diskCap, diskUsed)
 }
 
 // updateStatusTimestamps updates the lastUpdated and lastUpdatedBy fields
 func updateStatusTimestamps(u *unstructured.Unstructured) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, "status", "state", "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", "status", "state", "lastUpdatedBy")
+	_ = unstructured.SetNestedField(u.Object, now, stateFieldStatus, stateFieldState, "lastUpdated")
+	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
 }
 
 // updateStatus updates the status with fallback to regular update

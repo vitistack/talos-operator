@@ -290,14 +290,15 @@ This ensures compatibility between control plane and kubelet versions.
 
 ### Talos Upgrade Annotations
 
-| Annotation                             | Set By   | Description                                                  |
-| -------------------------------------- | -------- | ------------------------------------------------------------ |
-| `upgrade.vitistack.io/talos-available` | Operator | New Talos version available for upgrade                      |
-| `upgrade.vitistack.io/talos-current`   | Operator | Current running Talos version                                |
-| `upgrade.vitistack.io/talos-target`    | **User** | Target version to upgrade to (triggers upgrade)              |
-| `upgrade.vitistack.io/talos-status`    | Operator | Current status: `idle`, `in-progress`, `completed`, `failed` |
-| `upgrade.vitistack.io/talos-message`   | Operator | Human-readable status message                                |
-| `upgrade.vitistack.io/talos-progress`  | Operator | Progress indicator (e.g., "2/5" nodes upgraded)              |
+| Annotation                                        | Set By   | Description                                                                              |
+| ------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------- |
+| `upgrade.vitistack.io/talos-available`            | Operator | New Talos version available for upgrade                                                  |
+| `upgrade.vitistack.io/talos-current`              | Operator | Current running Talos version                                                            |
+| `upgrade.vitistack.io/talos-target`               | **User** | Target version to upgrade to (triggers upgrade)                                          |
+| `upgrade.vitistack.io/talos-status`               | Operator | Current status: `idle`, `in-progress`, `completed`, `failed`                             |
+| `upgrade.vitistack.io/talos-message`              | Operator | Human-readable status message                                                            |
+| `upgrade.vitistack.io/talos-progress`             | Operator | Progress indicator (e.g., "2/5" nodes upgraded)                                          |
+| `upgrade.vitistack.io/talos-reset-upgrade-state` | **User** | Set to `"true"` to clear stuck Talos upgrade bookkeeping. See [Resetting stuck upgrade state](#resetting-stuck-upgrade-state). One-shot — operator removes it after processing. |
 
 ### Kubernetes Upgrade Annotations
 
@@ -472,6 +473,72 @@ The cluster phase will be `UpgradeFailed`.
    kubectl annotate kubernetescluster my-cluster \
      upgrade.vitistack.io/talos-target="1.25.5"
    ```
+
+### Resetting stuck upgrade state
+
+A Talos upgrade can occasionally leave the cluster in a state where neither
+the rolling-upgrade controller nor the version-enforcement reconciler will
+make progress:
+
+- The cluster's Talos secret has `upgrade_in_progress=true` (which causes the
+  version-enforcement pass to skip the cluster), **and**
+- The `upgrade_state` JSON blob in the same secret has `phase: "failed"`
+  (which causes `HandleUpgrade` to skip the cluster too, because there is
+  nothing to "continue" and no `resume` annotation is set).
+
+In this state the cluster is effectively wedged: nothing logs and nothing
+advances on each reconcile. The most common trigger is a previous upgrade
+attempt that used the wrong installer image (e.g. the generic
+`ghcr.io/siderolabs/installer:<ver>` on a cluster that has Talos system
+extensions installed via the factory schematic) and stranded the state
+machine.
+
+The escape hatch is the `upgrade.vitistack.io/talos-reset-upgrade-state`
+annotation:
+
+```bash
+kubectl annotate kubernetescluster my-cluster \
+  upgrade.vitistack.io/talos-reset-upgrade-state="true"
+```
+
+On the next reconcile the operator will, in a single pass:
+
+1. Clear the per-key Talos upgrade flags in the cluster secret
+   (`upgrade_in_progress`, `upgrade_type`, `upgrade_target`,
+   `upgrade_last_node`, `upgrade_nodes_done`, `upgrade_nodes_total`).
+2. Delete the `upgrade_state` JSON blob in the secret (so the controller
+   does not try to resume from a stale plan that pins a broken installer
+   image).
+3. Remove the user-facing Talos upgrade-status annotations:
+   `talos-status`, `talos-message`, `talos-progress`, `talos-target`,
+   `failed-nodes`.
+4. Reset `status.phase` to `Ready`.
+5. Remove the `talos-reset-upgrade-state` annotation itself (one-shot — if
+   any earlier step errors transiently, the trigger annotation is left in
+   place so the next reconcile retries the reset).
+
+The next reconcile then runs the regular Talos version-enforcement pass
+against ground truth (current Talos version on each node, queried via the
+Talos API) and re-derives the correct installer image from the cluster's
+pinned schematic. If a node still does not match `TALOS_VERSION`, an
+upgrade is initiated using that resolved image — never the generic
+installer.
+
+What this annotation does **not** do:
+
+- It does **not** delete or modify any Kubernetes upgrade annotations or
+  state. It is Talos-specific.
+- It does **not** change the cluster's `talos-current` or `talos-available`
+  annotations. Those are re-derived by the operator from the running nodes.
+- It does **not** roll back any node that was already upgraded. Reset
+  cleans bookkeeping; node state on disk is unchanged.
+- It does **not** start an upgrade by itself. It just unblocks the regular
+  reconciliation paths so they can act.
+
+Use this when you have confirmed (e.g. via the operator logs or by
+inspecting the Talos secret) that the upgrade controller is wedged and
+needs the bookkeeping wiped. For an ordinary failed upgrade where the
+state machine still advances, prefer the retry recipe above instead.
 
 ## Upgrade Order and Best Practices
 

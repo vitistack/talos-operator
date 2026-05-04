@@ -27,6 +27,11 @@ import (
 const (
 	kcCondNetworkNamespaceReady            = "NetworkNamespaceReady"
 	kcCondControlPlaneVirtualSharedIPReady = "ControlPlaneVirtualSharedIPReady"
+
+	// vipInterfaceName is the NetworkConfiguration interface name we
+	// reserve for the cluster's control-plane Virtual Shared IP. Reused
+	// when creating the NC and when reading its allocation status.
+	vipInterfaceName = "vip"
 )
 
 const (
@@ -272,7 +277,7 @@ func (s *EndpointService) getEndpointsTalosVIP(ctx context.Context, cluster *vit
 			return nil, fmt.Errorf("failed to get VIP NetworkConfiguration: %w", err)
 		}
 
-		// Create a NetworkConfiguration with a single "vip" interface to reserve one IP
+		// Create a NetworkConfiguration with a single vipInterfaceName interface to reserve one IP
 		vipNC = &vitistackv1alpha1.NetworkConfiguration{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      vipNCName,
@@ -287,7 +292,7 @@ func (s *EndpointService) getEndpointsTalosVIP(ctx context.Context, cluster *vit
 				NetworkNamespaceName: networkNamespace.Name,
 				Provider:             vitistackv1alpha1.ProviderNameStaticIP,
 				NetworkInterfaces: []vitistackv1alpha1.NetworkConfigurationInterface{
-					{Name: "vip"},
+					{Name: vipInterfaceName},
 				},
 			},
 		}
@@ -332,9 +337,9 @@ func (s *EndpointService) waitForVIPIPAllocation(ctx context.Context, cluster *v
 				return "", fmt.Errorf("VIP NetworkConfiguration %s/%s failed: %s", cluster.Namespace, vipNCName, nc.Status.Message)
 			}
 
-			// Check if the "vip" interface has an allocated IP
+			// Check if the vipInterfaceName interface has an allocated IP
 			for i := range nc.Status.NetworkInterfaces {
-				if nc.Status.NetworkInterfaces[i].Name == "vip" && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
+				if nc.Status.NetworkInterfaces[i].Name == vipInterfaceName && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
 					return nc.Status.NetworkInterfaces[i].IPv4Addresses[0], nil
 				}
 			}
@@ -353,7 +358,7 @@ func (s *EndpointService) GetAllocatedVIPIP(ctx context.Context, cluster *vitist
 		return ""
 	}
 	for i := range nc.Status.NetworkInterfaces {
-		if nc.Status.NetworkInterfaces[i].Name == "vip" && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
+		if nc.Status.NetworkInterfaces[i].Name == vipInterfaceName && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
 			return nc.Status.NetworkInterfaces[i].IPv4Addresses[0]
 		}
 	}

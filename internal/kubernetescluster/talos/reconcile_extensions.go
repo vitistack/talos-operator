@@ -230,15 +230,12 @@ func (t *TalosManager) processMachineExtensions(
 		return extOutcomeSkipped, nil
 	}
 
-	// FAST PATH (silent at INFO, visible at DEBUG): same image, recent
-	// trigger → previous upgrade is still in flight. We'll re-evaluate
-	// after the cooldown window expires.
-	if !record.TriggeredAt.IsZero() && record.Image == image {
-		if since := time.Since(record.TriggeredAt); since < cooldown {
-			vlog.Debug(fmt.Sprintf("Extension cooldown active %s node=%s ip=%s image=%s triggered %s ago (cooldown %s)",
-				clusterTag, m.Name, nodeIP, image, since.Round(time.Second), cooldown))
-			return extOutcomeWaiting, nil
-		}
+	if extensionCooldownActive(record, image, cooldown, clusterTag, m.Name, nodeIP) {
+		return extOutcomeWaiting, nil
+	}
+
+	if t.versionEnforcementInFlight(ctx, cluster, clusterTag, m.Name) {
+		return extOutcomeWaiting, nil
 	}
 
 	// Per-node Talos client: connect straight to the target node's API. No
@@ -405,6 +402,64 @@ func normalizeExtensionName(name string) string {
 		return name[i+1:]
 	}
 	return name
+}
+
+// extensionCooldownActive reports whether the previously-persisted record
+// for this node points at the same image we'd use right now AND the trigger
+// is still inside the cooldown window — i.e. the previous extension upgrade
+// is still in flight and we should leave the node alone. Quiet at INFO,
+// visible at DEBUG so steady-state behaviour is observable without noise.
+func extensionCooldownActive(
+	record talosstateservice.ExtensionUpgradeRecord,
+	image string,
+	cooldown time.Duration,
+	clusterTag, nodeName, nodeIP string,
+) bool {
+	if record.TriggeredAt.IsZero() || record.Image != image {
+		return false
+	}
+	since := time.Since(record.TriggeredAt)
+	if since >= cooldown {
+		return false
+	}
+	vlog.Debug(fmt.Sprintf("Extension cooldown active %s node=%s ip=%s image=%s triggered %s ago (cooldown %s)",
+		clusterTag, nodeName, nodeIP, image, since.Round(time.Second), cooldown))
+	return true
+}
+
+// versionEnforcementInFlight reports whether the version-enforcement
+// reconciler triggered a Talos upgrade on nodeName within its cooldown
+// window. The two reconcilers use different schematics (version enforcer
+// preserves the cluster's pinned image, extension reconciler swaps to a
+// schematic that has the missing extensions), so we serialize per node:
+// whichever fires first owns the upgrade slot until cooldown elapses.
+// A read error is treated as "not in flight" — the worst case is the
+// extensions roll triggers an extra upgrade, which the next reconcile
+// will smooth out.
+func (t *TalosManager) versionEnforcementInFlight(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clusterTag, nodeName string,
+) bool {
+	cooldown := versionEnforceCooldown()
+	if cooldown <= 0 {
+		return false
+	}
+	veStates, err := t.stateService.GetVersionEnforcementStates(ctx, cluster)
+	if err != nil {
+		return false
+	}
+	rec, ok := veStates[nodeName]
+	if !ok || rec.TriggeredAt.IsZero() {
+		return false
+	}
+	since := time.Since(rec.TriggeredAt)
+	if since >= cooldown {
+		return false
+	}
+	vlog.Info(fmt.Sprintf("Extension upgrade deferred %s node=%s: version enforcer triggered Talos upgrade %s ago with image=%s (cooldown %s)",
+		clusterTag, nodeName, since.Round(time.Second), rec.Image, cooldown))
+	return true
 }
 
 // resolveProviderInstallImage picks the TALOS_VM_INSTALL_IMAGE env var that

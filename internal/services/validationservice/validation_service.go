@@ -7,6 +7,11 @@ import (
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 )
 
+// fieldControlPlaneReplicas is the spec field path reported in
+// ValidationError when a control-plane replica-count rule fails (must be
+// >= 1, must be odd for etcd quorum, etc).
+const fieldControlPlaneReplicas = "spec.topology.controlPlane.replicas"
+
 // ValidationService provides validation operations for Kubernetes resources
 type ValidationService struct{}
 
@@ -72,7 +77,7 @@ func validateControlPlaneReplicas(cluster *vitistackv1alpha1.KubernetesCluster) 
 	// Must be at least 1
 	if replicas < 1 {
 		return &ValidationError{
-			Field:   "spec.topology.controlPlane.replicas",
+			Field:   fieldControlPlaneReplicas,
 			Message: fmt.Sprintf("must be at least 1, got %d", replicas),
 		}
 	}
@@ -80,7 +85,7 @@ func validateControlPlaneReplicas(cluster *vitistackv1alpha1.KubernetesCluster) 
 	// Must be odd for etcd quorum
 	if replicas%2 == 0 {
 		return &ValidationError{
-			Field:   "spec.topology.controlPlane.replicas",
+			Field:   fieldControlPlaneReplicas,
 			Message: fmt.Sprintf("must be an odd number (1, 3, 5, etc.) to maintain etcd quorum, got %d", replicas),
 		}
 	}
@@ -97,7 +102,7 @@ func (s *ValidationService) ValidateControlPlaneScaleDown(currentCount, targetCo
 	// Cannot scale to 0
 	if targetCount < 1 {
 		errs = append(errs, ValidationError{
-			Field:   "spec.topology.controlPlane.replicas",
+			Field:   fieldControlPlaneReplicas,
 			Message: "cannot scale control planes to 0, minimum is 1",
 		})
 	}
@@ -105,7 +110,7 @@ func (s *ValidationService) ValidateControlPlaneScaleDown(currentCount, targetCo
 	// Target must be odd
 	if targetCount >= 1 && targetCount%2 == 0 {
 		errs = append(errs, ValidationError{
-			Field:   "spec.topology.controlPlane.replicas",
+			Field:   fieldControlPlaneReplicas,
 			Message: fmt.Sprintf("target replicas must be an odd number (1, 3, 5, etc.) to maintain etcd quorum, got %d", targetCount),
 		})
 	}
@@ -113,7 +118,7 @@ func (s *ValidationService) ValidateControlPlaneScaleDown(currentCount, targetCo
 	// Cannot skip quorum transitions (e.g., 5->1 is unsafe, should go 5->3->1)
 	if currentCount > 3 && targetCount == 1 {
 		errs = append(errs, ValidationError{
-			Field:   "spec.topology.controlPlane.replicas",
+			Field:   fieldControlPlaneReplicas,
 			Message: fmt.Sprintf("unsafe scale-down from %d to %d; scale down gradually (e.g., 5->3->1) to maintain quorum", currentCount, targetCount),
 		})
 	}

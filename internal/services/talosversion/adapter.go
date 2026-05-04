@@ -110,5 +110,5 @@ func GetCurrentTalosVersionAdapter() TalosVersionAdapter {
 
 // ListSupportedVersions returns a list of supported Talos version ranges.
 func ListSupportedVersions() []string {
-	return []string{"1.11.x", "1.12.x", "1.13.x"}
+	return []string{versionV1_11, versionV1_12, versionV1_13}
 }

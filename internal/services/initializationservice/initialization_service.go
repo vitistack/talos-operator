@@ -16,6 +16,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// API group + version of the vitistack.io CRDs the talos-operator
+// depends on. All required CRDs are at the same group+version, so a
+// single pair of constants covers the prerequisite check list.
+const (
+	apiGroupVitistack  = "vitistack.io"
+	apiVersionV1alpha1 = "v1alpha1"
+)
+
 // CheckPrerequisites verifies that required CRDs are installed before starting.
 // It exits the process with code 1 if mandatory APIs are missing.
 func CheckPrerequisites() {
@@ -23,13 +31,13 @@ func CheckPrerequisites() {
 
 	crdcheck.MustEnsureInstalled(context.TODO(),
 		// your CRD plural
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "machines"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "kubernetesclusters"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "kubernetesproviders"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "machineproviders"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "networknamespaces"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "networkconfigurations"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "vitistacks"},
+		crdcheck.Ref{Group: apiGroupVitistack, Version: apiVersionV1alpha1, Resource: "machines"},
+		crdcheck.Ref{Group: apiGroupVitistack, Version: apiVersionV1alpha1, Resource: "kubernetesclusters"},
+		crdcheck.Ref{Group: apiGroupVitistack, Version: apiVersionV1alpha1, Resource: "kubernetesproviders"},
+		crdcheck.Ref{Group: apiGroupVitistack, Version: apiVersionV1alpha1, Resource: "machineproviders"},
+		crdcheck.Ref{Group: apiGroupVitistack, Version: apiVersionV1alpha1, Resource: "networknamespaces"},
+		crdcheck.Ref{Group: apiGroupVitistack, Version: apiVersionV1alpha1, Resource: "networkconfigurations"},
+		crdcheck.Ref{Group: apiGroupVitistack, Version: apiVersionV1alpha1, Resource: "vitistacks"},
 	)
 
 	ValidateBootImageConfiguration()

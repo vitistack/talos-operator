@@ -125,10 +125,16 @@ func (c *UpgradeController) handleCompletedUpgrade(
 	if state.UpgradeType == UpgradeTypeTalos {
 		_ = c.upgradeService.CompleteTalosUpgrade(ctx, cluster, state.TargetVersion, state.InstallerImage)
 
-		// Regenerate machine configs after Talos upgrade (no K8s version override needed)
+		// Regenerate machine configs after Talos upgrade. Pass the
+		// cluster's CURRENT Kubernetes version as override so a prior
+		// in-place K8s upgrade above the spec value is preserved — without
+		// the override, getKubernetesVersion falls back to
+		// spec.topology.version (which K8s upgrades don't write to) and
+		// the regenerated config templates silently downgrade Kubernetes.
 		if clientConfig != nil {
 			endpointIPs := clientConfig.Contexts[clientConfig.Context].Endpoints
-			if err := c.upgradeService.RegenerateMachineConfigsAfterUpgrade(ctx, cluster, endpointIPs, state.TargetVersion, ""); err != nil {
+			k8sOverride := c.resolveCurrentKubernetesVersion(ctx, cluster)
+			if err := c.upgradeService.RegenerateMachineConfigsAfterUpgrade(ctx, cluster, endpointIPs, state.TargetVersion, k8sOverride); err != nil {
 				vlog.Warn(fmt.Sprintf("Failed to regenerate machine configs after upgrade: %v", err))
 			}
 		}
@@ -198,13 +204,18 @@ func (c *UpgradeController) startTalosUpgrade(
 
 	// Build installer image (preserves the cluster's pinned image base + any
 	// factory schematic so system extensions survive the upgrade).
-	installerImage := c.upgradeService.BuildTalosInstallerImage(ctx, cluster, upgState.TalosTarget)
+	installerImage, err := c.upgradeService.BuildTalosInstallerImage(ctx, cluster, clientConfig, upgState.TalosTarget)
+	if err != nil {
+		vlog.Error(fmt.Sprintf("Cannot determine Talos installer image for cluster %s", cluster.Name), err)
+		_ = c.upgradeService.FailTalosUpgrade(ctx, cluster, err.Error())
+		return 30 * time.Second, true, nil
+	}
 
 	// Build node lists
 	controlPlanes, workers := c.buildNodeLists(machines)
 
 	// Initialize upgrade state
-	_, err := c.stateManager.InitializeUpgradeState(
+	_, err = c.stateManager.InitializeUpgradeState(
 		ctx, cluster,
 		UpgradeTypeTalos,
 		upgState.TalosTarget,
@@ -386,6 +397,90 @@ func (c *UpgradeController) buildNodeLists(machines []vitistackv1alpha1.Machine)
 	}
 
 	return controlPlanes, workers
+}
+
+// resolveCurrentKubernetesVersion returns the cluster's currently-running
+// Kubernetes version, preferring the persisted secret over the annotation.
+// Returns "" when nothing is recorded — callers treat that as "no override"
+// and fall back to spec.topology.version.
+//
+// Source order:
+//  1. Secret kubernetes_version (written by InitializeCurrentVersions and
+//     CompleteKubernetesUpgrade — survives annotation drift).
+//  2. Annotation upgrade.vitistack.io/kubernetes-current.
+func (c *UpgradeController) resolveCurrentKubernetesVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) string {
+	if c.upgradeService != nil {
+		if versions, err := c.upgradeService.GetPersistedVersions(ctx, cluster); err == nil && versions != nil && versions.KubernetesVersion != "" {
+			return versions.KubernetesVersion
+		}
+	}
+	return c.upgradeService.GetUpgradeState(cluster).KubernetesCurrent
+}
+
+// HandleTalosResetUpgradeState clears stuck Talos upgrade bookkeeping when the
+// user sets the talos-reset-upgrade-state annotation. It is the escape hatch
+// for the two-layer deadlock where the secret's upgrade_in_progress flag
+// blocks reconcileTalosVersion while the upgrade_state JSON has phase=failed
+// (so HandleUpgrade also short-circuits) and no resume annotation is set.
+//
+// Returns (true, _) when the annotation was present and processing happened;
+// callers should requeue without running further reconcile logic. Returns
+// (false, nil) when the annotation is absent.
+//
+// Single-shot: removes the trigger annotation last so a transient error does
+// not silently swallow the request.
+func (c *UpgradeController) HandleTalosResetUpgradeState(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+) (bool, error) {
+	if cluster.GetAnnotations()[consts.TalosResetUpgradeStateAnnotation] != "true" {
+		return false, nil
+	}
+
+	vlog.Info(fmt.Sprintf("Resetting Talos upgrade state on user request: cluster=%s", cluster.Name))
+
+	// Clear the per-key flags (upgrade_in_progress, upgrade_type, ...).
+	// This unblocks reconcileTalosVersion on the next pass.
+	if err := c.upgradeService.ClearTalosUpgradeFlagState(ctx, cluster); err != nil {
+		return true, fmt.Errorf("failed to clear talos upgrade flag state: %w", err)
+	}
+
+	// Clear the upgrade_state JSON blob so HandleUpgrade does not try to
+	// resume from a stale plan with a stale (possibly broken) installer image.
+	if err := c.stateManager.ClearUpgradeState(ctx, cluster); err != nil {
+		return true, fmt.Errorf("failed to clear upgrade_state json: %w", err)
+	}
+
+	// Remove the user-facing Talos upgrade-status annotations so the UI does
+	// not show a stale "in-progress" / "failed" state. Done individually so a
+	// single Update conflict on one annotation does not block the others.
+	talosAnnotations := []string{
+		consts.TalosStatusAnnotation,
+		consts.TalosMessageAnnotation,
+		consts.TalosProgressAnnotation,
+		consts.TalosTargetAnnotation,
+		consts.FailedNodesAnnotation,
+	}
+	for _, key := range talosAnnotations {
+		if err := c.upgradeService.RemoveAnnotation(ctx, cluster, key); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to remove %s during reset: %v", key, err))
+		}
+	}
+
+	// Reset phase so a stale UpgradeFailed/UpgradingTalos doesn't keep the
+	// cluster locked out of the regular reconcile flow.
+	if err := c.statusManager.SetPhase(ctx, cluster, status.PhaseReady); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to reset phase after talos-reset-upgrade-state: %v", err))
+	}
+
+	// Remove the trigger annotation last so a partial failure leaves the
+	// request in place for the next reconcile to retry.
+	if err := c.upgradeService.RemoveAnnotation(ctx, cluster, consts.TalosResetUpgradeStateAnnotation); err != nil {
+		return true, fmt.Errorf("failed to remove %s annotation: %w", consts.TalosResetUpgradeStateAnnotation, err)
+	}
+
+	vlog.Info(fmt.Sprintf("Talos upgrade state reset complete: cluster=%s — reconcileTalosVersion will re-derive from ground truth on next pass", cluster.Name))
+	return true, nil
 }
 
 // GetStateManager returns the upgrade state manager for external access

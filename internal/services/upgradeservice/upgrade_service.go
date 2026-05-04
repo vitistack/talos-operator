@@ -11,9 +11,11 @@ package upgradeservice
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
+	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
@@ -105,6 +107,16 @@ func (s *UpgradeService) failUpgrade(ctx context.Context, cluster *vitistackv1al
 
 	if err := s.SetUpgradeAnnotations(ctx, cluster, updates); err != nil {
 		return err
+	}
+
+	// Clear the in-progress flag in the secret so extension reconcile and
+	// future user-triggered upgrades aren't stranded behind a permanently-stuck
+	// rolling-upgrade state. The annotation+condition above preserve the
+	// failure for diagnostics.
+	if s.stateService != nil {
+		if err := s.stateService.ClearUpgradeState(ctx, cluster); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to clear upgrade_in_progress after %s failure: %v", params.upgradeType, err))
+		}
 	}
 
 	// Update status phase and condition
@@ -512,29 +524,116 @@ func (s *UpgradeService) UpdateTalosUpgradeProgress(ctx context.Context, cluster
 //     upgrade) — repository/path is preserved (so a factory image with a
 //     custom schematic ID keeps its system extensions) and only the version
 //     tag is rewritten to targetVersion.
-//  2. The operator's TALOS_VM_INSTALL_IMAGE_DEFAULT env var, with the same
-//     tag rewrite. Used when the cluster predates the install_image pin.
-//  3. ghcr.io/siderolabs/installer at targetVersion as a final fallback.
+//  2. The image currently baked into a running control-plane node's machine
+//     config (live-fetch). Covers legacy clusters whose install_image was
+//     never persisted to the secret. Same tag-rewrite rules apply.
+//  3. The operator's TALOS_VM_INSTALL_IMAGE_DEFAULT env var, with the same
+//     tag rewrite. Used during initial bootstrap before any node exists.
+//
+// If none of the above resolves a base image we return an error rather than
+// fall back to ghcr.io/siderolabs/installer:<tag>: the generic image lacks
+// the cluster's system extensions and Talos refuses to roll a node onto it
+// (yielding cryptic "error validating installer image" failures that strand
+// the rolling-upgrade state machine).
+//
+// clientConfig may be nil — the live-fetch step is then skipped.
 //
 // targetVersion may be passed with or without a leading "v"; the returned
 // image always uses "v<version>".
-func (s *UpgradeService) BuildTalosInstallerImage(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, targetVersion string) string {
+func (s *UpgradeService) BuildTalosInstallerImage(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	targetVersion string,
+) (string, error) {
 	versionTag := "v" + strings.TrimPrefix(targetVersion, "v")
 
-	var base string
+	var base, source string
 	if s.stateService != nil {
 		if saved, err := s.stateService.GetInstallImage(ctx, cluster); err == nil && saved != "" {
 			base = saved
+			source = "secret"
+		}
+	}
+	if base == "" && clientConfig != nil {
+		if fetched := s.fetchInstallImageFromCluster(ctx, cluster, clientConfig); fetched != "" {
+			base = fetched
+			source = "live-fetch"
+			// Best-effort backfill so subsequent upgrades don't have to live-fetch.
+			if s.stateService != nil {
+				if err := s.stateService.SetInstallImage(ctx, cluster, fetched); err != nil {
+					vlog.Warn(fmt.Sprintf("Failed to backfill install_image after live-fetch: %v", err))
+				}
+			}
 		}
 	}
 	if base == "" {
-		base = viper.GetString(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT)
+		if env := viper.GetString(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT); env != "" {
+			base = env
+			source = "env"
+		}
 	}
 
 	if base == "" {
-		return "ghcr.io/siderolabs/installer:" + versionTag
+		return "", fmt.Errorf("no Talos installer image available for cluster %s: cluster secret has no install_image, no control plane is reachable to live-fetch one, and TALOS_VM_INSTALL_IMAGE_DEFAULT is unset; refusing to fall back to the generic installer (it would drop the cluster's system extensions)", cluster.Name)
 	}
-	return swapImageTag(base, versionTag)
+	resolved := swapImageTag(base, versionTag)
+	vlog.Info(fmt.Sprintf("Resolved Talos installer image for %s: %s (source=%s)", cluster.Name, resolved, source))
+	return resolved, nil
+}
+
+// fetchInstallImageFromCluster queries the active machine config of any
+// reachable control plane and returns its machine.install.image value.
+// Returns "" when no control plane is reachable or the field is unset.
+//
+// Mirrors talos.TalosManager.fetchInstallImageFromCluster but lives here so
+// the upgrade service can resolve installer images without depending on the
+// full TalosManager.
+func (s *UpgradeService) fetchInstallImageFromCluster(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+) string {
+	if s.machineService == nil || s.clientService == nil {
+		return ""
+	}
+	machines, err := s.machineService.GetClusterMachines(ctx, cluster)
+	if err != nil || len(machines) == 0 {
+		return ""
+	}
+	controlPlanes := s.machineService.FilterMachinesByRole(machines, "control-plane")
+	var ips []string
+	for _, m := range controlPlanes {
+		for _, addr := range m.Status.PublicIPAddresses {
+			if isIPv4(addr) {
+				ips = append(ips, addr)
+				break
+			}
+		}
+	}
+	if len(ips) == 0 {
+		return ""
+	}
+
+	tClient, err := s.clientService.CreateTalosClient(ctx, false, clientConfig, ips)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = tClient.Close() }()
+
+	for _, ip := range ips {
+		image, err := s.clientService.GetMachineInstallImage(ctx, tClient, ip)
+		if err == nil && image != "" {
+			return image
+		}
+	}
+	return ""
+}
+
+// isIPv4 reports whether s parses as an IPv4 address (IPv6 addresses return false).
+func isIPv4(s string) bool {
+	ip := net.ParseIP(s)
+	return ip != nil && ip.To4() != nil
 }
 
 // swapImageTag returns ref with its tag replaced by tag. If ref has no tag, tag
@@ -786,6 +885,16 @@ func (s *UpgradeService) FailTalosUpgradeWithNode(ctx context.Context, cluster *
 		return err
 	}
 
+	// Clear the in-progress flag in the secret so extension reconcile and
+	// future user-triggered upgrades aren't stranded behind a permanently-stuck
+	// rolling-upgrade state. The annotation+condition above preserve the
+	// failure for diagnostics.
+	if s.stateService != nil {
+		if err := s.stateService.ClearUpgradeState(ctx, cluster); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to clear upgrade_in_progress after Talos node failure: %v", err))
+		}
+	}
+
 	// Update status phase and condition
 	if err := s.statusManager.SetPhase(ctx, cluster, status.PhaseUpgradeFailed); err != nil {
 		vlog.Error("Failed to set phase to UpgradeFailed", err)
@@ -812,6 +921,19 @@ func (s *UpgradeService) ClearUpgradeControlAnnotations(ctx context.Context, clu
 		vlog.Warn(fmt.Sprintf("Failed to remove retry-failed-nodes annotation: %v", err))
 	}
 	return nil
+}
+
+// ClearTalosUpgradeFlagState clears the per-key Talos upgrade flags in the
+// cluster's Talos secret (upgrade_in_progress, upgrade_type, upgrade_target,
+// upgrade_last_node, upgrade_nodes_done, upgrade_nodes_total). It does NOT
+// clear the upgrade_state JSON blob — that is owned by UpgradeStateManager.
+// Used by the talos-reset-upgrade-state escape hatch when the two state
+// layers have diverged and stalled the upgrade pipeline.
+func (s *UpgradeService) ClearTalosUpgradeFlagState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	if s.stateService == nil {
+		return nil
+	}
+	return s.stateService.ClearUpgradeState(ctx, cluster)
 }
 
 // ClearFailedNodesForRetry clears failed nodes from secret for retry
