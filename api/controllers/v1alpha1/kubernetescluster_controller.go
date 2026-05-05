@@ -50,6 +50,7 @@ type KubernetesClusterReconciler struct {
 const (
 	KubernetesClusterFinalizer               = "kubernetescluster.vitistack.io/finalizer"
 	ControllerRequeueDelay     time.Duration = 5 * time.Second
+	SteadyStateRequeueDelay    time.Duration = 60 * time.Second
 	controlPlaneRole                         = "control-plane"
 )
 
@@ -91,6 +92,47 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "")
 
 	return r.reconcileTalosCluster(ctx, kubernetesCluster)
+}
+
+// isClusterSteadyState checks if a cluster is in a stable state where no active
+// work is needed. A steady-state cluster is Ready, has no upgrades in progress
+// or requested, and no failed upgrades awaiting resume. For these clusters we
+// use a longer requeue interval to reduce API load.
+func (r *KubernetesClusterReconciler) isClusterSteadyState(cluster *vitistackv1alpha1.KubernetesCluster) bool {
+	// Not steady-state if cluster isn't Ready
+	if cluster.Status.Phase != status.PhaseReady {
+		return false
+	}
+
+	annotations := cluster.GetAnnotations()
+	if annotations == nil {
+		return true
+	}
+
+	// Not steady-state if an upgrade is in progress
+	if annotations[consts.TalosStatusAnnotation] == string(consts.UpgradeStatusInProgress) ||
+		annotations[consts.KubernetesStatusAnnotation] == string(consts.UpgradeStatusInProgress) {
+		return false
+	}
+
+	// Not steady-state if an upgrade is requested
+	if annotations[consts.TalosTargetAnnotation] != "" ||
+		annotations[consts.KubernetesTargetAnnotation] != "" {
+		return false
+	}
+
+	// Not steady-state if a resume is requested
+	if annotations[consts.ResumeUpgradeAnnotation] != "" {
+		return false
+	}
+
+	// Not steady-state if an upgrade failed (needs attention)
+	if annotations[consts.TalosStatusAnnotation] == string(consts.UpgradeStatusFailed) ||
+		annotations[consts.KubernetesStatusAnnotation] == string(consts.UpgradeStatusFailed) {
+		return false
+	}
+
+	return true
 }
 
 // reconcileTalosCluster performs the main reconciliation logic for a Talos-managed cluster.
@@ -175,6 +217,13 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 
 	// Clear activity message on successful reconciliation
 	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "")
+
+	// Use a longer requeue interval for steady-state clusters to reduce API load.
+	// Active work (spec changes, Machine changes, annotation changes) triggers
+	// immediate reconciliation via watch events regardless of the timer.
+	if r.isClusterSteadyState(kubernetesCluster) {
+		return ctrl.Result{RequeueAfter: SteadyStateRequeueDelay}, nil
+	}
 
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 }
