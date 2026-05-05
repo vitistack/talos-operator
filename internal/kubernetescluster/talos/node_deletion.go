@@ -88,7 +88,7 @@ func (t *TalosManager) reconcileRemovedNodes(ctx context.Context, cluster *vitis
 	// Process removals
 	for _, nodeName := range nodesToRemove {
 		if err := t.removeNode(ctx, cluster, clientConfig, nodeName); err != nil {
-			vlog.Error(fmt.Sprintf("Failed to remove node %s: %v", nodeName, err), err)
+			vlog.Error(fmt.Sprintf("Failed to remove node %s %s: %v", nodeName, clusterLogTag(cluster), err), err)
 			// Continue with other nodes even if one fails
 			continue
 		}
@@ -173,26 +173,26 @@ func (t *TalosManager) removeControlPlaneNode(
 	// Get etcd member list to find the member ID for the node being removed
 	members, err := t.etcdService.MemberList(ctx, clientConfig, healthyCP)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to list etcd members, continuing with removal: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to list etcd members %s, continuing with removal: %v", clusterLogTag(cluster), err))
 	} else {
 		// Find the etcd member for this node
 		member := etcdservice.FindMemberByHostname(members, nodeName)
 		if member != nil {
 			// Remove from etcd
 			if err := t.etcdService.RemoveMemberByID(ctx, clientConfig, healthyCP, member.ID); err != nil {
-				vlog.Warn(fmt.Sprintf("Failed to remove etcd member %s (ID: %d): %v", nodeName, member.ID, err))
+				vlog.Warn(fmt.Sprintf("Failed to remove etcd member %s/%s (ID: %d): %v", clusterLogTag(cluster), nodeName, member.ID, err))
 				// Continue anyway - the member may already be gone
 			} else {
-				vlog.Info(fmt.Sprintf("Removed etcd member: node=%s memberID=%d", nodeName, member.ID))
+				vlog.Info(fmt.Sprintf("Removed etcd member: node=%s memberID=%d %s", nodeName, member.ID, clusterLogTag(cluster)))
 			}
 		} else {
-			vlog.Info(fmt.Sprintf("Etcd member not found for node %s, may already be removed", nodeName))
+			vlog.Info(fmt.Sprintf("Etcd member not found for node %s/%s, may already be removed", clusterLogTag(cluster), nodeName))
 		}
 	}
 
 	// Update VIP pool members
 	if err := t.updateVIPPoolMembers(ctx, cluster); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to update VIP pool members: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to update VIP pool members %s: %v", clusterLogTag(cluster), err))
 		// Continue anyway
 	}
 
@@ -335,33 +335,33 @@ func (t *TalosManager) executeControlPlaneDeletion(
 	// Step 1: Cordon, drain, and delete the Kubernetes node from the workload cluster
 	// This must happen FIRST to ensure pods are safely evacuated before any cluster changes
 	if err := t.deleteK8sNodeFromWorkloadCluster(ctx, cluster, nodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to delete Kubernetes node from workload cluster: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to delete Kubernetes node from workload cluster %s/%s: %v", clusterLogTag(cluster), nodeName, err))
 		// Continue - the node might not exist in K8s yet
 	} else {
 		result.K8sNodeDeleted = true
 	}
 
 	// Step 2: Forfeit etcd leadership if the node is the leader
-	vlog.Info(fmt.Sprintf("Forfeiting etcd leadership if node is leader: node=%s", nodeName))
+	vlog.Info(fmt.Sprintf("Forfeiting etcd leadership if node is leader: node=%s %s", nodeName, clusterLogTag(cluster)))
 	if err := t.etcdService.ForfeitLeadership(ctx, deleteCtx.clientConfig, deleteCtx.targetIP); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to forfeit etcd leadership (may not be leader): %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to forfeit etcd leadership %s/%s (may not be leader): %v", clusterLogTag(cluster), nodeName, err))
 	}
 
 	// Step 3: Remove from etcd cluster
-	if err := t.removeFromEtcdCluster(ctx, nodeName, deleteCtx, result); err != nil {
+	if err := t.removeFromEtcdCluster(ctx, cluster, nodeName, deleteCtx, result); err != nil {
 		return err
 	}
 
 	// Step 4: Update VIP pool members
 	if err := t.removeNodeFromVIPPool(ctx, cluster, deleteCtx.targetIP); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to update VIP pool members: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to update VIP pool members %s: %v", clusterLogTag(cluster), err))
 	} else {
 		result.VIPUpdated = true
 	}
 
 	// Step 5: Remove from configured nodes list (internal tracking)
 	if err := t.stateService.RemoveConfiguredNode(ctx, cluster, nodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to remove from configured nodes: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to remove from configured nodes %s/%s: %v", clusterLogTag(cluster), nodeName, err))
 	} else {
 		result.ConfigRemoved = true
 	}
@@ -372,6 +372,7 @@ func (t *TalosManager) executeControlPlaneDeletion(
 // removeFromEtcdCluster removes the node from the etcd cluster
 func (t *TalosManager) removeFromEtcdCluster(
 	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
 	nodeName string,
 	deleteCtx *controlPlaneDeletionContext,
 	result *NodeDeletionResult) error {
@@ -387,16 +388,16 @@ func (t *TalosManager) removeFromEtcdCluster(
 	}
 
 	if member == nil {
-		vlog.Warn(fmt.Sprintf("Etcd member not found for node %s, may already be removed", nodeName))
+		vlog.Warn(fmt.Sprintf("Etcd member not found for node %s/%s, may already be removed", clusterLogTag(cluster), nodeName))
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Removing etcd member: node=%s memberID=%d", nodeName, member.ID))
+	vlog.Info(fmt.Sprintf("Removing etcd member: node=%s memberID=%d %s", nodeName, member.ID, clusterLogTag(cluster)))
 	if err := t.etcdService.RemoveMemberByID(ctx, deleteCtx.clientConfig, deleteCtx.healthyCP, member.ID); err != nil {
 		return fmt.Errorf("failed to remove etcd member: %w", err)
 	}
 	result.EtcdRemoved = true
-	vlog.Info(fmt.Sprintf("Successfully removed etcd member: node=%s memberID=%d", nodeName, member.ID))
+	vlog.Info(fmt.Sprintf("Successfully removed etcd member: node=%s memberID=%d %s", nodeName, member.ID, clusterLogTag(cluster)))
 	return nil
 }
 
@@ -412,7 +413,7 @@ func (t *TalosManager) DeleteWorkerNode(
 	// Step 1: Cordon, drain, and delete the Kubernetes node from the workload cluster
 	// This must happen FIRST to ensure pods are safely evacuated before the machine is deleted
 	if err := t.deleteK8sNodeFromWorkloadCluster(ctx, cluster, nodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to delete Kubernetes node from workload cluster: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to delete Kubernetes node from workload cluster %s/%s: %v", clusterLogTag(cluster), nodeName, err))
 		// Continue - the node might not exist in K8s yet
 	} else {
 		result.K8sNodeDeleted = true
@@ -442,13 +443,13 @@ func (t *TalosManager) deleteK8sNodeFromWorkloadCluster(ctx context.Context, clu
 
 	// Step 1: Cordon the node (mark as unschedulable)
 	if err := t.cordonNode(ctx, clientset, nodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to cordon node %s: %v", nodeName, err))
+		vlog.Warn(fmt.Sprintf("Failed to cordon node %s/%s: %v", clusterLogTag(cluster), nodeName, err))
 		// Continue even if cordon fails - node might not exist yet in K8s
 	}
 
 	// Step 2: Drain the node (evict pods)
 	if err := t.drainNode(ctx, clientset, nodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to drain node %s: %v", nodeName, err))
+		vlog.Warn(fmt.Sprintf("Failed to drain node %s/%s: %v", clusterLogTag(cluster), nodeName, err))
 		// Continue with deletion even if drain fails
 	}
 
@@ -763,10 +764,11 @@ func (t *TalosManager) CleanupOrphanedK8sNodes(ctx context.Context, cluster *vit
 	}
 
 	// Find and delete orphaned nodes
+	clusterTag := clusterLogTag(cluster)
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
-		if err := t.deleteOrphanedNodeIfNeeded(ctx, clientset, node, machineNames, cluster.Name); err != nil {
-			vlog.Error(fmt.Sprintf("Error processing node %s: %v", node.Name, err), err)
+		if err := t.deleteOrphanedNodeIfNeeded(ctx, clientset, node, machineNames, clusterTag); err != nil {
+			vlog.Error(fmt.Sprintf("Error processing node %s/%s: %v", clusterTag, node.Name, err), err)
 		}
 	}
 
@@ -818,7 +820,7 @@ func (t *TalosManager) deleteOrphanedNodeIfNeeded(
 	clientset *kubernetes.Clientset,
 	node *corev1.Node,
 	machineNames map[string]bool,
-	clusterName string,
+	clusterTag string,
 ) error {
 	nodeName := node.Name
 
@@ -832,8 +834,8 @@ func (t *TalosManager) deleteOrphanedNodeIfNeeded(
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Found orphaned Kubernetes node (NotReady + SchedulingDisabled, no Machine CRD): node=%s cluster=%s",
-		nodeName, clusterName))
+	vlog.Info(fmt.Sprintf("Found orphaned Kubernetes node (NotReady + SchedulingDisabled, no Machine CRD): node=%s/%s",
+		clusterTag, nodeName))
 
 	if err := clientset.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -842,7 +844,7 @@ func (t *TalosManager) deleteOrphanedNodeIfNeeded(
 		return fmt.Errorf("failed to delete orphaned node %s: %w", nodeName, err)
 	}
 
-	vlog.Info(fmt.Sprintf("Successfully deleted orphaned Kubernetes node: node=%s cluster=%s", nodeName, clusterName))
+	vlog.Info(fmt.Sprintf("Successfully deleted orphaned Kubernetes node: node=%s/%s", clusterTag, nodeName))
 	return nil
 }
 
@@ -873,7 +875,7 @@ func (t *TalosManager) removeNodeFromVIPPool(ctx context.Context, cluster *vitis
 	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
 	if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip); err != nil {
 		if apierrors.IsNotFound(err) {
-			vlog.Warn(fmt.Sprintf("VIP %s not found, skipping pool member removal", vipName))
+			vlog.Warn(fmt.Sprintf("VIP %s not found %s, skipping pool member removal", vipName, clusterLogTag(cluster)))
 			return nil
 		}
 		return err

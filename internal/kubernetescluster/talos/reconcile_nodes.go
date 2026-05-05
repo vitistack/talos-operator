@@ -33,7 +33,7 @@ func (t *TalosManager) reconcileNewNodes(ctx context.Context, cluster *vitistack
 	// If they are still in Talos maintenance mode, remove them from the configured list
 	// so they get reconfigured on this pass.
 	if err := t.reconcileFailedNodes(ctx, cluster); err != nil {
-		vlog.Warn(fmt.Sprintf("Error during failed node reconciliation: %v", err))
+		vlog.Warn(fmt.Sprintf("Error during failed node reconciliation %s: %v", clusterLogTag(cluster), err))
 	}
 
 	newMachines, err := t.findUnconfiguredMachines(ctx, cluster)
@@ -92,7 +92,7 @@ func (t *TalosManager) updateVIPPoolMembers(ctx context.Context, cluster *vitist
 	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
 	if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip); err != nil {
 		if apierrors.IsNotFound(err) {
-			vlog.Warn(fmt.Sprintf("VIP %s not found, skipping pool member update", vipName))
+			vlog.Warn(fmt.Sprintf("VIP %s not found %s, skipping pool member update", vipName, clusterLogTag(cluster)))
 			return nil
 		}
 		return err
@@ -122,7 +122,7 @@ func (t *TalosManager) findUnconfiguredMachines(ctx context.Context, cluster *vi
 
 	configuredNodes, err := t.getConfiguredNodes(ctx, cluster)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to get configured nodes: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to get configured nodes %s: %v", clusterLogTag(cluster), err))
 		configuredNodes = nil
 	}
 
@@ -178,9 +178,9 @@ func (t *TalosManager) reconcileFailedNodes(ctx context.Context, cluster *vitist
 		}
 
 		if t.clientService.IsNodeInMaintenanceMode(ip) {
-			vlog.Warn(fmt.Sprintf("Node %s is marked as configured but still in maintenance mode, removing from configured list to retry configuration", nodeName))
+			vlog.Warn(fmt.Sprintf("Node %s/%s is marked as configured but still in maintenance mode, removing from configured list to retry configuration", clusterLogTag(cluster), nodeName))
 			if err := t.stateService.RemoveConfiguredNode(ctx, cluster, nodeName); err != nil {
-				vlog.Error(fmt.Sprintf("Failed to remove node %s from configured list: %v", nodeName, err), err)
+				vlog.Error(fmt.Sprintf("Failed to remove node %s/%s from configured list: %v", clusterLogTag(cluster), nodeName, err), err)
 			}
 		}
 	}

@@ -42,14 +42,14 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			// Reconcile removed nodes first (scale-down), then new nodes (scale-up)
 			_ = t.statusManager.SetMessage(ctx, cluster, "Reconciling removed nodes")
 			if err := t.reconcileRemovedNodes(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during node removal reconciliation: %v", err))
+				vlog.Warn(fmt.Sprintf("Error during node removal reconciliation %s: %v", clusterLogTag(cluster), err))
 				// Continue with new node reconciliation even if removal has issues
 			}
 
 			// Cleanup orphaned K8s nodes (NotReady + SchedulingDisabled with no Machine CRD)
 			_ = t.statusManager.SetMessage(ctx, cluster, "Cleaning up orphaned nodes")
 			if err := t.CleanupOrphanedK8sNodes(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during orphaned node cleanup: %v", err))
+				vlog.Warn(fmt.Sprintf("Error during orphaned node cleanup %s: %v", clusterLogTag(cluster), err))
 				// Continue even if cleanup has issues
 			}
 
@@ -60,7 +60,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 			// Reconcile Kubernetes version on nodes that joined with a stale config
 			if err := t.reconcileNodeVersions(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during node version reconciliation: %v", err))
+				vlog.Warn(fmt.Sprintf("Error during node version reconciliation %s: %v", clusterLogTag(cluster), err))
 			}
 
 			// Enforce the configured Talos OS version: probes each node's
@@ -71,7 +71,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			// node. Bug recovery for the case where annotation/secret
 			// state has diverged from what's actually running on a node.
 			if err := t.reconcileTalosVersion(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during Talos version enforcement: %v", err))
+				vlog.Warn(fmt.Sprintf("Error during Talos version enforcement %s: %v", clusterLogTag(cluster), err))
 			}
 
 			// Reconcile required Talos system extensions: detects nodes that
@@ -79,7 +79,7 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			// a Talos upgrade with the per-provider TALOS_VM_INSTALL_IMAGE_*
 			// image (one node per pass; rolling).
 			if err := t.reconcileExtensions(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during extension reconciliation: %v", err))
+				vlog.Warn(fmt.Sprintf("Error during extension reconciliation %s: %v", clusterLogTag(cluster), err))
 			}
 
 			return nil
@@ -508,7 +508,7 @@ func (t *TalosManager) stageApplyRemainingControlPlanes(
 
 	if len(remainingControlPlanes) > 0 {
 		if err := t.updateVIPPoolMembers(ctx, cluster); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to update VIP pool members after adding control planes: %v", err))
+			vlog.Warn(fmt.Sprintf("Failed to update VIP pool members after adding control planes %s: %v", clusterLogTag(cluster), err))
 		}
 	}
 	return nil
