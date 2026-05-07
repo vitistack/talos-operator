@@ -40,10 +40,21 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 		machineMap[m.Name] = m
 	}
 
-	// Resolve shared annotation values once
+	// Resolve shared annotation values once; track keys to skip on lookup failure
+	// so we don't clobber valid annotations with empty strings due to transient errors.
 	country, az := extractNodeAnnotationDatacenterInfo(cluster.Spec.Cluster.Datacenter)
-	networkNamespaceName := resolveNetworkNamespaceName(ctx, cluster)
-	infrastructure := resolveInfrastructure(ctx)
+	skipKeys := make(map[string]bool)
+
+	networkNamespaceName, err := resolveNetworkNamespaceName(ctx, cluster)
+	if err != nil {
+		skipKeys[vitistackv1alpha1.ClusterWorkspaceAnnotation] = true
+	}
+
+	infrastructure, err := resolveInfrastructure(ctx)
+	if err != nil {
+		skipKeys[vitistackv1alpha1.MachineInfrastructureAnnotation] = true
+		skipKeys[vitistackv1alpha1.InfrastructureAnnotation] = true //nolint:staticcheck // backward compatibility
+	}
 
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
@@ -53,6 +64,11 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 		}
 
 		desired := buildDesiredNodeAnnotations(cluster, m, country, az, networkNamespaceName, infrastructure)
+		// Remove keys that couldn't be resolved reliably to avoid
+		// overwriting valid annotations with empty strings.
+		for k := range skipKeys {
+			delete(desired, k)
+		}
 		patch := computeAnnotationPatch(node.Annotations, desired)
 		if len(patch) == 0 {
 			continue
@@ -168,30 +184,34 @@ func extractNodeAnnotationDatacenterInfo(datacenter string) (country string, az 
 }
 
 // resolveNetworkNamespaceName resolves the network namespace name for annotation use.
-func resolveNetworkNamespaceName(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) string {
+// Returns an error when the lookup fails so the caller can skip the key rather than
+// clobbering a valid annotation with an empty string.
+func resolveNetworkNamespaceName(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (string, error) {
 	if cluster.Spec.Cluster.NetworkNamespaceName != "" {
-		return cluster.Spec.Cluster.NetworkNamespaceName
+		return cluster.Spec.Cluster.NetworkNamespaceName, nil
 	}
 	ns, err := networknamespaceservice.FetchFirstNetworkNamespaceByNamespace(ctx, cluster.GetNamespace())
 	if err != nil {
 		vlog.Warn(fmt.Sprintf("failed to fetch NetworkNamespaces for namespace %q: %v", cluster.GetNamespace(), err))
-		return ""
+		return "", err
 	}
 	if ns != nil {
-		return ns.Name
+		return ns.Name, nil
 	}
-	return ""
+	return "", nil
 }
 
 // resolveInfrastructure resolves the infrastructure name from the Vitistack CR.
-func resolveInfrastructure(ctx context.Context) string {
+// Returns an error when the lookup fails so the caller can skip the key rather than
+// clobbering a valid annotation with an empty string.
+func resolveInfrastructure(ctx context.Context) (string, error) {
 	vitistack, err := vitistackservice.FetchVitistackByName(ctx, viper.GetString(consts.VITISTACK_NAME))
 	if err != nil {
 		vlog.Warn(fmt.Sprintf("failed to fetch Vitistack %q: %v", viper.GetString(consts.VITISTACK_NAME), err))
-		return ""
+		return "", err
 	}
 	if vitistack != nil && vitistack.Spec.Infrastructure != "" {
-		return vitistack.Spec.Infrastructure
+		return vitistack.Spec.Infrastructure, nil
 	}
-	return ""
+	return "", nil
 }
