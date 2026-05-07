@@ -63,6 +63,8 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 				"annotations": patch,
 			},
 		})
+		// Count actual updates (non-nil values) for the log message
+		updated, removed := countPatchOps(patch)
 		if err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to marshal annotation patch for node %s: %v", node.Name, err))
 			continue
@@ -73,7 +75,7 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 			continue
 		}
 
-		vlog.Info(fmt.Sprintf("Reconciled %d annotations on node %s", len(patch), node.Name))
+		vlog.Info(fmt.Sprintf("Reconciled annotations on node %s: %d updated, %d removed", node.Name, updated, removed))
 	}
 
 	return nil
@@ -110,15 +112,42 @@ func buildDesiredNodeAnnotations(
 	return annotations
 }
 
-// computeAnnotationPatch returns only the annotations that differ from current.
-func computeAnnotationPatch(current, desired map[string]string) map[string]string {
-	patch := make(map[string]string)
+// computeAnnotationPatch computes a JSON merge-patch for annotations.
+// It sets desired values that differ from current, and sets managed keys
+// (vitistack.io/* annotations) to nil when they are present on the node
+// but absent from the desired set — causing MergePatch to delete them.
+func computeAnnotationPatch(current, desired map[string]string) map[string]interface{} {
+	patch := make(map[string]interface{})
+
+	// Set or update desired annotations
 	for k, v := range desired {
 		if current[k] != v {
 			patch[k] = v
 		}
 	}
+
+	// Remove managed annotations that are no longer desired
+	for _, k := range vitistackv1alpha1.GetAllVitistackAnnotations() {
+		if _, isDesired := desired[k]; !isDesired {
+			if _, exists := current[k]; exists {
+				patch[k] = nil
+			}
+		}
+	}
+
 	return patch
+}
+
+// countPatchOps counts the number of updates and removals in a patch.
+func countPatchOps(patch map[string]interface{}) (updated, removed int) {
+	for _, v := range patch {
+		if v == nil {
+			removed++
+		} else {
+			updated++
+		}
+	}
+	return updated, removed
 }
 
 // extractNodeAnnotationDatacenterInfo splits a datacenter string into country and AZ.
