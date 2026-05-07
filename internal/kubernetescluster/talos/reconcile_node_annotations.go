@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/networknamespaceservice"
+	"github.com/vitistack/talos-operator/internal/services/talosconfigservice"
 	"github.com/vitistack/talos-operator/internal/services/vitistackservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,7 +42,7 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 
 	// Resolve shared annotation values once; track keys to skip on lookup failure
 	// so we don't clobber valid annotations with empty strings due to transient errors.
-	country, az := extractNodeAnnotationDatacenterInfo(cluster.Spec.Cluster.Datacenter)
+	country, az := talosconfigservice.ExtractDatacenterInfo(cluster.Spec.Cluster.Datacenter)
 	skipKeys := make(map[string]bool)
 
 	networkNamespaceName, err := resolveNetworkNamespaceName(ctx, cluster)
@@ -164,23 +164,6 @@ func countPatchOps(patch map[string]interface{}) (updated, removed int) {
 		}
 	}
 	return updated, removed
-}
-
-// extractNodeAnnotationDatacenterInfo splits a datacenter string into country and AZ.
-func extractNodeAnnotationDatacenterInfo(datacenter string) (country string, az string) {
-	parts := strings.Split(datacenter, "-")
-	switch {
-	case len(parts) >= 3:
-		country = parts[0]
-		az = parts[len(parts)-1]
-	case len(parts) == 2:
-		country = parts[0]
-		az = ""
-	default:
-		country = datacenter
-		az = ""
-	}
-	return country, az
 }
 
 // resolveNetworkNamespaceName resolves the network namespace name for annotation use.
