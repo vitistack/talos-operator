@@ -36,6 +36,8 @@ const (
 	// its Ready condition. Reconciliation by the upstream controller typically
 	// takes a few seconds; this delay backs off enough to avoid hot-looping.
 	dependentCRRequeueDelay = 15 * time.Second
+
+	vipInterfaceName = "vip"
 )
 
 // isResourceReady returns true when conds contains a Ready condition with
@@ -287,7 +289,7 @@ func (s *EndpointService) getEndpointsTalosVIP(ctx context.Context, cluster *vit
 				NetworkNamespaceName: networkNamespace.Name,
 				Provider:             vitistackv1alpha1.ProviderNameStaticIP,
 				NetworkInterfaces: []vitistackv1alpha1.NetworkConfigurationInterface{
-					{Name: "vip"},
+					{Name: vipInterfaceName},
 				},
 			},
 		}
@@ -334,7 +336,7 @@ func (s *EndpointService) waitForVIPIPAllocation(ctx context.Context, cluster *v
 
 			// Check if the "vip" interface has an allocated IP
 			for i := range nc.Status.NetworkInterfaces {
-				if nc.Status.NetworkInterfaces[i].Name == "vip" && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
+				if nc.Status.NetworkInterfaces[i].Name == vipInterfaceName && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
 					return nc.Status.NetworkInterfaces[i].IPv4Addresses[0], nil
 				}
 			}
@@ -353,7 +355,7 @@ func (s *EndpointService) GetAllocatedVIPIP(ctx context.Context, cluster *vitist
 		return ""
 	}
 	for i := range nc.Status.NetworkInterfaces {
-		if nc.Status.NetworkInterfaces[i].Name == "vip" && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
+		if nc.Status.NetworkInterfaces[i].Name == vipInterfaceName && nc.Status.NetworkInterfaces[i].IPAllocated && len(nc.Status.NetworkInterfaces[i].IPv4Addresses) > 0 {
 			return nc.Status.NetworkInterfaces[i].IPv4Addresses[0]
 		}
 	}

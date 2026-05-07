@@ -9,6 +9,17 @@ import (
 	"github.com/vitistack/talos-operator/pkg/consts"
 )
 
+// Supported Talos version ranges
+const (
+	VersionV1_11 = "1.11.x"
+	VersionV1_12 = "1.12.x"
+	VersionV1_13 = "1.13.x"
+
+	// Shared etcd configuration for v1.12+
+	etcdVersion612  = "3.6.6"
+	etcdRegistryK8s = "registry.k8s.io/etcd"
+)
+
 // TalosVersionAdapter provides version-specific configuration generation for different Talos versions.
 // Implement this interface to add support for new Talos versions with different config formats.
 type TalosVersionAdapter interface {
@@ -110,5 +121,5 @@ func GetCurrentTalosVersionAdapter() TalosVersionAdapter {
 
 // ListSupportedVersions returns a list of supported Talos version ranges.
 func ListSupportedVersions() []string {
-	return []string{"1.11.x", "1.12.x", "1.13.x"}
+	return []string{VersionV1_11, VersionV1_12, VersionV1_13}
 }

@@ -27,6 +27,11 @@ type MachineManager struct {
 	Scheme *runtime.Scheme
 }
 
+const (
+	roleControlPlane = "control-plane"
+	roleWorker       = "worker"
+)
+
 // getMachineOS returns the MachineOS configuration based on BOOT_IMAGE_SOURCE setting.
 // When BOOT_IMAGE_SOURCE is set to "bootimage", it populates the OS with the Talos image URL.
 // When BOOT_IMAGE_SOURCE is "pxe" (default), returns an empty MachineOS (PXE boot is used).
@@ -182,7 +187,7 @@ func (m *MachineManager) GetExcessMachines(ctx context.Context, cluster *vitista
 
 		role := machine.Labels[vitistackv1alpha1.NodeRoleAnnotation]
 
-		if role == "control-plane" {
+		if role == roleControlPlane {
 			// Control plane: check by name
 			if !desiredNames[machine.Name] {
 				excessControlPlanes = append(excessControlPlanes, machine)
@@ -314,7 +319,7 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 				Annotations: getBootImageAnnotations(),
 				Labels: map[string]string{
 					vitistackv1alpha1.ClusterIdAnnotation: clusterId,
-					vitistackv1alpha1.NodeRoleAnnotation:  "control-plane",
+					vitistackv1alpha1.NodeRoleAnnotation:  roleControlPlane,
 				},
 			},
 			Spec: vitistackv1alpha1.MachineSpec{
@@ -329,7 +334,7 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 				CloudInit: cloudInitOrNil(useCloudInit),
 				Tags: map[string]string{
 					"cluster": clusterId,
-					"role":    "control-plane",
+					"role":    roleControlPlane,
 				},
 			},
 		}
@@ -357,7 +362,7 @@ func buildWorkerIndexContext(existingMachines []vitistackv1alpha1.Machine, clust
 	for i := range existingMachines {
 		machine := &existingMachines[i]
 		// Only process workers
-		if machine.Labels[vitistackv1alpha1.NodeRoleAnnotation] != "worker" {
+		if machine.Labels[vitistackv1alpha1.NodeRoleAnnotation] != roleWorker {
 			continue
 		}
 		// Skip machines being deleted
@@ -401,7 +406,7 @@ func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass 
 			Annotations: annotations,
 			Labels: map[string]string{
 				vitistackv1alpha1.ClusterIdAnnotation: clusterId,
-				vitistackv1alpha1.NodeRoleAnnotation:  "worker",
+				vitistackv1alpha1.NodeRoleAnnotation:  roleWorker,
 			},
 		},
 		Spec: vitistackv1alpha1.MachineSpec{
@@ -416,7 +421,7 @@ func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass 
 			CloudInit: cloudInitOrNil(useCloudInit),
 			Tags: map[string]string{
 				"cluster":  clusterId,
-				"role":     "worker",
+				"role":     roleWorker,
 				"nodepool": nodePoolName,
 			},
 		},

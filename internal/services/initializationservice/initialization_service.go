@@ -21,15 +21,17 @@ import (
 func CheckPrerequisites() {
 	vlog.Info("Running prerequisite checks...")
 
+	const apiVersion = "v1alpha1"
+
 	crdcheck.MustEnsureInstalled(context.TODO(),
 		// your CRD plural
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "machines"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "kubernetesclusters"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "kubernetesproviders"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "machineproviders"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "networknamespaces"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "networkconfigurations"},
-		crdcheck.Ref{Group: "vitistack.io", Version: "v1alpha1", Resource: "vitistacks"},
+		crdcheck.Ref{Group: "vitistack.io", Version: apiVersion, Resource: "machines"},
+		crdcheck.Ref{Group: "vitistack.io", Version: apiVersion, Resource: "kubernetesclusters"},
+		crdcheck.Ref{Group: "vitistack.io", Version: apiVersion, Resource: "kubernetesproviders"},
+		crdcheck.Ref{Group: "vitistack.io", Version: apiVersion, Resource: "machineproviders"},
+		crdcheck.Ref{Group: "vitistack.io", Version: apiVersion, Resource: "networknamespaces"},
+		crdcheck.Ref{Group: "vitistack.io", Version: apiVersion, Resource: "networkconfigurations"},
+		crdcheck.Ref{Group: "vitistack.io", Version: apiVersion, Resource: "vitistacks"},
 	)
 
 	ValidateBootImageConfiguration()

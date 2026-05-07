@@ -8,6 +8,8 @@ import (
 	yaml "gopkg.in/yaml.v3"
 )
 
+const testDiskCustom = "/dev/custom"
+
 func TestApplyTenantOverridesMergesNestedValues(t *testing.T) {
 	service := NewTalosConfigService()
 
@@ -21,7 +23,7 @@ func TestApplyTenantOverridesMergesNestedValues(t *testing.T) {
 	overrides := map[string]any{
 		"machine": map[string]any{
 			"install": map[string]any{
-				"disk": "/dev/custom",
+				"disk": testDiskCustom,
 			},
 			"network": map[string]any{
 				"hostname":    "tenant-host",
@@ -50,7 +52,7 @@ func TestApplyTenantOverridesMergesNestedValues(t *testing.T) {
 		t.Fatalf("install section missing after merge")
 	}
 
-	if disk := install["disk"]; disk != "/dev/custom" {
+	if disk := install["disk"]; disk != testDiskCustom {
 		t.Fatalf("expected disk to be overridden, got %v", disk)
 	}
 
@@ -89,7 +91,7 @@ func TestMergeRoleTemplateWithOverridesCreatesCopy(t *testing.T) {
 	overrides := map[string]any{
 		"machine": map[string]any{
 			"install": map[string]any{
-				"disk": "/dev/custom",
+				"disk": testDiskCustom,
 			},
 		},
 	}

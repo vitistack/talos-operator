@@ -9,16 +9,22 @@ import (
 	"github.com/vitistack/talos-operator/pkg/consts"
 )
 
+const (
+	testNameV1_11 = "v1.11.x"
+	testNameV1_12 = "v1.12.x"
+	testNameV1_13 = "v1.13.x"
+)
+
 func TestGetTalosVersionAdapter_V1_11(t *testing.T) {
 	tests := []struct {
 		name    string
 		version string
 		want    string
 	}{
-		{"v1.11.0", "v1.11.0", "1.11.x"},
-		{"v1.11.6", "v1.11.6", "1.11.x"},
-		{"1.11.0", "1.11.0", "1.11.x"},
-		{"1.11.6", "1.11.6", "1.11.x"},
+		{"v1.11.0", "v1.11.0", VersionV1_11},
+		{"v1.11.6", "v1.11.6", VersionV1_11},
+		{"1.11.0", "1.11.0", VersionV1_11},
+		{"1.11.6", "1.11.6", VersionV1_11},
 	}
 
 	for _, tt := range tests {
@@ -37,12 +43,12 @@ func TestGetTalosVersionAdapter_V1_12(t *testing.T) {
 		version string
 		want    string
 	}{
-		{"v1.12.0", "v1.12.0", "1.12.x"},
-		{"v1.12.1", "v1.12.1", "1.12.x"},
-		{"v1.12.2", "v1.12.2", "1.12.x"},
-		{"1.12.0", "1.12.0", "1.12.x"},
-		{"1.12.2", "1.12.2", "1.12.x"},
-		{"1.12.5", "1.12.5", "1.12.x"},
+		{"v1.12.0", "v1.12.0", VersionV1_12},
+		{"v1.12.1", "v1.12.1", VersionV1_12},
+		{"v1.12.2", "v1.12.2", VersionV1_12},
+		{"1.12.0", "1.12.0", VersionV1_12},
+		{"1.12.2", "1.12.2", VersionV1_12},
+		{"1.12.5", "1.12.5", VersionV1_12},
 	}
 
 	for _, tt := range tests {
@@ -61,8 +67,8 @@ func TestGetTalosVersionAdapter_FutureVersions(t *testing.T) {
 		version string
 		want    string
 	}{
-		{"v1.13.0", "v1.13.0", "1.13.x"},
-		{"v1.14.0", "v1.14.0", "1.13.x"}, // Future versions use latest known adapter
+		{"v1.13.0", "v1.13.0", VersionV1_13},
+		{"v1.14.0", "v1.14.0", VersionV1_13}, // Future versions use latest known adapter
 	}
 
 	for _, tt := range tests {
@@ -78,8 +84,8 @@ func TestGetTalosVersionAdapter_FutureVersions(t *testing.T) {
 func TestGetTalosVersionAdapter_InvalidVersion(t *testing.T) {
 	// Invalid versions should fall back to 1.12.x
 	adapter := GetTalosVersionAdapter("invalid")
-	if got := adapter.Version(); got != "1.12.x" {
-		t.Errorf("GetTalosVersionAdapter(invalid).Version() = %q, want %q", got, "1.12.x")
+	if got := adapter.Version(); got != VersionV1_12 {
+		t.Errorf("GetTalosVersionAdapter(invalid).Version() = %q, want %q", got, VersionV1_12)
 	}
 }
 
@@ -89,8 +95,8 @@ func TestGetCurrentTalosVersionAdapter(t *testing.T) {
 	defer viper.Set(consts.TALOS_VERSION, "")
 
 	adapter := GetCurrentTalosVersionAdapter()
-	if got := adapter.Version(); got != "1.11.x" {
-		t.Errorf("GetCurrentTalosVersionAdapter().Version() = %q, want %q", got, "1.11.x")
+	if got := adapter.Version(); got != VersionV1_11 {
+		t.Errorf("GetCurrentTalosVersionAdapter().Version() = %q, want %q", got, VersionV1_11)
 	}
 }
 
@@ -199,9 +205,9 @@ func TestBuildInstallDiskPatch(t *testing.T) {
 		name    string
 		adapter TalosVersionAdapter
 	}{
-		{"v1.11.x", NewV1_11Adapter()},
-		{"v1.12.x", NewV1_12Adapter()},
-		{"v1.13.x", NewV1_13Adapter()},
+		{testNameV1_11, NewV1_11Adapter()},
+		{testNameV1_12, NewV1_12Adapter()},
+		{testNameV1_13, NewV1_13Adapter()},
 	}
 
 	expected := `machine:
@@ -224,9 +230,9 @@ func TestDefaultKubernetesVersion(t *testing.T) {
 		adapter TalosVersionAdapter
 		want    string
 	}{
-		{"v1.11.x", NewV1_11Adapter(), "1.34.1"},
-		{"v1.12.x", NewV1_12Adapter(), "1.35.3"},
-		{"v1.13.x", NewV1_13Adapter(), "1.36.0"},
+		{testNameV1_11, NewV1_11Adapter(), "1.34.1"},
+		{testNameV1_12, NewV1_12Adapter(), "1.35.3"},
+		{testNameV1_13, NewV1_13Adapter(), "1.36.0"},
 	}
 
 	for _, tt := range tests {
@@ -244,9 +250,9 @@ func TestDefaultEtcdVersion(t *testing.T) {
 		adapter TalosVersionAdapter
 		want    string
 	}{
-		{"v1.11.x", NewV1_11Adapter(), "3.5.17"},
-		{"v1.12.x", NewV1_12Adapter(), "3.6.6"},
-		{"v1.13.x", NewV1_13Adapter(), "3.6.6"},
+		{testNameV1_11, NewV1_11Adapter(), "3.5.17"},
+		{testNameV1_12, NewV1_12Adapter(), etcdVersion612},
+		{testNameV1_13, NewV1_13Adapter(), etcdVersion612},
 	}
 
 	for _, tt := range tests {
@@ -264,9 +270,9 @@ func TestEtcdImageRegistry(t *testing.T) {
 		adapter TalosVersionAdapter
 		want    string
 	}{
-		{"v1.11.x", NewV1_11Adapter(), "gcr.io/etcd-development/etcd"},
-		{"v1.12.x", NewV1_12Adapter(), "registry.k8s.io/etcd"},
-		{"v1.13.x", NewV1_13Adapter(), "registry.k8s.io/etcd"},
+		{testNameV1_11, NewV1_11Adapter(), "gcr.io/etcd-development/etcd"},
+		{testNameV1_12, NewV1_12Adapter(), etcdRegistryK8s},
+		{testNameV1_13, NewV1_13Adapter(), etcdRegistryK8s},
 	}
 
 	for _, tt := range tests {
@@ -284,9 +290,9 @@ func TestGrubUseUKICmdlineDefault(t *testing.T) {
 		adapter TalosVersionAdapter
 		want    bool
 	}{
-		{"v1.11.x", NewV1_11Adapter(), false},
-		{"v1.12.x", NewV1_12Adapter(), true},
-		{"v1.13.x", NewV1_13Adapter(), true},
+		{testNameV1_11, NewV1_11Adapter(), false},
+		{testNameV1_12, NewV1_12Adapter(), true},
+		{testNameV1_13, NewV1_13Adapter(), true},
 	}
 
 	for _, tt := range tests {
@@ -304,9 +310,9 @@ func TestSupportsMultiDocConfig(t *testing.T) {
 		adapter TalosVersionAdapter
 		want    bool
 	}{
-		{"v1.11.x", NewV1_11Adapter(), false},
-		{"v1.12.x", NewV1_12Adapter(), true},
-		{"v1.13.x", NewV1_13Adapter(), true},
+		{testNameV1_11, NewV1_11Adapter(), false},
+		{testNameV1_12, NewV1_12Adapter(), true},
+		{testNameV1_13, NewV1_13Adapter(), true},
 	}
 
 	for _, tt := range tests {
@@ -324,9 +330,9 @@ func TestSupportsHostnameConfigDocument(t *testing.T) {
 		adapter TalosVersionAdapter
 		want    bool
 	}{
-		{"v1.11.x", NewV1_11Adapter(), false},
-		{"v1.12.x", NewV1_12Adapter(), true},
-		{"v1.13.x", NewV1_13Adapter(), true},
+		{testNameV1_11, NewV1_11Adapter(), false},
+		{testNameV1_12, NewV1_12Adapter(), true},
+		{testNameV1_13, NewV1_13Adapter(), true},
 	}
 
 	for _, tt := range tests {
@@ -417,7 +423,7 @@ func TestListSupportedVersions(t *testing.T) {
 	}
 
 	// Check that expected versions are present
-	expected := []string{"1.11.x", "1.12.x", "1.13.x"}
+	expected := []string{VersionV1_11, VersionV1_12, VersionV1_13}
 	for _, v := range expected {
 		found := slices.Contains(versions, v)
 		if !found {

@@ -36,6 +36,14 @@ const (
 
 	// Exported phases for use by other packages
 	PhaseReady = phaseReady
+
+	// Condition status values
+	conditionTrue = "True"
+
+	// Status field keys used in unstructured status map
+	statusFieldKey    = "status"
+	resourcesFieldKey = "resources"
+	clusterFieldKey   = "cluster"
 )
 
 // StatusManager handles machine status updates and monitoring
@@ -156,19 +164,19 @@ func phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) strin
 func condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) []condSpec {
 	conds := []condSpec{
 		// Created condition is always true once the cluster resource exists
-		{"Created", "True", "ClusterCreated", "Kubernetes cluster resource has been created"},
+		{"Created", conditionTrue, "ClusterCreated", "Kubernetes cluster resource has been created"},
 	}
 	if cfgPresent {
-		conds = append(conds, condSpec{"ConfigGenerated", "True", "Generated", "Talos client and role configs generated"})
+		conds = append(conds, condSpec{"ConfigGenerated", conditionTrue, "Generated", "Talos client and role configs generated"})
 	}
 	if applied {
-		conds = append(conds, condSpec{"ConfigApplied", "True", "Applied", "Talos configs applied to all nodes"})
+		conds = append(conds, condSpec{"ConfigApplied", conditionTrue, "Applied", "Talos configs applied to all nodes"})
 	}
 	if bootstrapped {
-		conds = append(conds, condSpec{"Bootstrapped", "True", "Done", "Talos cluster bootstrapped"})
+		conds = append(conds, condSpec{"Bootstrapped", conditionTrue, "Done", "Talos cluster bootstrapped"})
 	}
 	if clusterAccess {
-		conds = append(conds, condSpec{"KubeconfigAvailable", "True", "Persisted", "Kubeconfig stored in Secret"})
+		conds = append(conds, condSpec{"KubeconfigAvailable", conditionTrue, "Persisted", "Kubeconfig stored in Secret"})
 	}
 	return conds
 }
@@ -305,7 +313,7 @@ func ensureState(u *unstructured.Unstructured) error {
 }
 
 func ensureStateCluster(state map[string]any) error {
-	cluster, ok := state["cluster"].(map[string]any)
+	cluster, ok := state[clusterFieldKey].(map[string]any)
 	if !ok || cluster == nil {
 		cluster = map[string]any{}
 	}
@@ -315,23 +323,23 @@ func ensureStateCluster(state map[string]any) error {
 	if _, ok := cluster["price"]; !ok {
 		cluster["price"] = map[string]any{"monthly": int64(0), "yearly": int64(0)}
 	}
-	if _, ok := cluster["resources"]; !ok {
-		cluster["resources"] = defaultResources()
+	if _, ok := cluster[resourcesFieldKey]; !ok {
+		cluster[resourcesFieldKey] = defaultResources()
 	}
 	if _, ok := cluster["controlplane"]; !ok {
 		cluster["controlplane"] = map[string]any{
-			"machineClass": "",
-			"message":      "",
-			"status":       "Pending",
-			"scale":        int64(0),
-			"nodes":        []any{},
-			"resources":    defaultResources(),
+			"machineClass":  "",
+			"message":       "",
+			statusFieldKey:  "Pending",
+			"scale":         int64(0),
+			"nodes":         []any{},
+			resourcesFieldKey: defaultResources(),
 		}
 	}
 	if _, ok := cluster["nodepools"]; !ok {
 		cluster["nodepools"] = []any{}
 	}
-	state["cluster"] = cluster
+	state[clusterFieldKey] = cluster
 	return nil
 }
 
@@ -709,17 +717,17 @@ func isControlPlaneMachine(m *vitistackv1alpha1.Machine) bool {
 // updateControlPlaneStatus updates the control plane status in the unstructured object.
 // Returns true if all control plane machines are running (caller should set phase to Ready).
 func (m *StatusManager) updateControlPlaneStatus(u *unstructured.Unstructured, cpCount, cpRunning int64, cpNodes []string) bool {
-	_ = unstructured.SetNestedField(u.Object, cpCount, "status", "state", "cluster", "controlplane", "scale")
+	_ = unstructured.SetNestedField(u.Object, cpCount, statusFieldKey, "state", clusterFieldKey, "controlplane", "scale")
 
 	// Set control plane node names
 	nodesAny := make([]any, len(cpNodes))
 	for i, node := range cpNodes {
 		nodesAny[i] = node
 	}
-	_ = unstructured.SetNestedSlice(u.Object, nodesAny, "status", "state", "cluster", "controlplane", "nodes")
+	_ = unstructured.SetNestedSlice(u.Object, nodesAny, statusFieldKey, "state", clusterFieldKey, "controlplane", "nodes")
 
 	cpStatus := determineControlPlaneStatus(cpCount, cpRunning)
-	_ = unstructured.SetNestedField(u.Object, cpStatus, "status", "state", "cluster", "controlplane", "status")
+	_ = unstructured.SetNestedField(u.Object, cpStatus, statusFieldKey, "state", clusterFieldKey, "controlplane", statusFieldKey)
 
 	return cpStatus == phaseRunning
 }
@@ -737,10 +745,10 @@ func determineControlPlaneStatus(cpCount, cpRunning int64) string {
 // updateClusterResourceStatus updates resource usage in the unstructured object
 func updateClusterResourceStatus(u *unstructured.Unstructured, totalCPU, totalMem, diskCap, diskUsed int64) {
 	// CPU and memory used are unknown here; set used=0, percentage=0
-	_ = setResourceUsage(u, []string{"status", "state", "cluster", "resources", "cpu"}, totalCPU, 0)
-	_ = setResourceUsage(u, []string{"status", "state", "cluster", "resources", "memory"}, totalMem, 0)
+	_ = setResourceUsage(u, []string{statusFieldKey, "state", clusterFieldKey, resourcesFieldKey, "cpu"}, totalCPU, 0)
+	_ = setResourceUsage(u, []string{statusFieldKey, "state", clusterFieldKey, resourcesFieldKey, "memory"}, totalMem, 0)
 	// Disk: can compute used percentage
-	_ = setResourceUsage(u, []string{"status", "state", "cluster", "resources", "disk"}, diskCap, diskUsed)
+	_ = setResourceUsage(u, []string{statusFieldKey, "state", clusterFieldKey, resourcesFieldKey, "disk"}, diskCap, diskUsed)
 }
 
 // updateStatusTimestamps updates the lastUpdated and lastUpdatedBy fields
