@@ -79,7 +79,7 @@ func TestBuildDesiredNodeAnnotations(t *testing.T) {
 		vitistackv1alpha1.MachineIdAnnotation:             "node-1",
 		vitistackv1alpha1.ClusterWorkspaceAnnotation:      "ws-ns",
 		vitistackv1alpha1.MachineInfrastructureAnnotation: "infra-prod",
-		vitistackv1alpha1.VMProviderAnnotation:            "kubevirt",    //nolint:staticcheck // testing deprecated annotation
+		vitistackv1alpha1.VMProviderAnnotation:            "kubevirt",   //nolint:staticcheck // testing deprecated annotation
 		vitistackv1alpha1.InfrastructureAnnotation:        "infra-prod", //nolint:staticcheck // testing deprecated annotation
 		vitistackv1alpha1.NodePoolAnnotation:              "pool-a",
 	}
@@ -122,12 +122,12 @@ func TestComputeAnnotationPatch_UpdatesChanged(t *testing.T) {
 	}
 
 	desired := map[string]string{
-		vitistackv1alpha1.ClusterNameAnnotation:    "new-name",       // changed
-		vitistackv1alpha1.EnvironmentAnnotation:    "dev",            // unchanged
+		vitistackv1alpha1.ClusterNameAnnotation:    "new-name", // changed
+		vitistackv1alpha1.EnvironmentAnnotation:    "dev",      // unchanged
 		vitistackv1alpha1.MachineClassAnnotation:   "large",    // changed
 		vitistackv1alpha1.MachineIdAnnotation:      "node-1",   // unchanged
-		vitistackv1alpha1.ClusterIdAnnotation:      "uuid-1",         // unchanged
-		vitistackv1alpha1.ClusterProjectAnnotation: "new-proj",       // changed
+		vitistackv1alpha1.ClusterIdAnnotation:      "uuid-1",   // unchanged
+		vitistackv1alpha1.ClusterProjectAnnotation: "new-proj", // changed
 	}
 
 	patch := computeAnnotationPatch(current, desired)
@@ -158,7 +158,7 @@ func TestComputeAnnotationPatch_DeletesManagedKeys(t *testing.T) {
 	current := map[string]string{
 		vitistackv1alpha1.ClusterNameAnnotation: "c",
 		vitistackv1alpha1.NodePoolAnnotation:    "pool-a", // managed key, not in desired
-		"some.other/annotation":                 "keep",       // unmanaged, should be ignored
+		"some.other/annotation":                 "keep",   // unmanaged, should be ignored
 	}
 
 	desired := map[string]string{
