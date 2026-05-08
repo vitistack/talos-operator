@@ -20,6 +20,7 @@ issues:
         - errcheck
         - dupl
         - gosec
+        - goconst
 
 linters:
   # Enable a balanced set of linters for a Kubernetes operator

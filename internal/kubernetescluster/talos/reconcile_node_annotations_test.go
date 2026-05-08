@@ -8,14 +8,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	testNodeName      = "node-1"
-	testRegion        = "europe"
-	testNodePool      = "pool-a"
-	testMachineClass  = "large"
-	testMachineProvider = "kubevirt"
-)
-
 func TestExtractDatacenterInfo(t *testing.T) {
 	t.Parallel()
 
@@ -56,7 +48,7 @@ func TestBuildDesiredNodeAnnotations(t *testing.T) {
 				ClusterId:   "uuid-123",
 				Project:     "myproject",
 				Environment: "prod",
-				Region:      testRegion,
+				Region:      "europe",
 				Provider:    "talos",
 			},
 		},
@@ -64,12 +56,12 @@ func TestBuildDesiredNodeAnnotations(t *testing.T) {
 
 	machine := &vitistackv1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        testNodeName,
-			Annotations: map[string]string{vitistackv1alpha1.NodePoolAnnotation: testNodePool},
+			Name:        "node-1",
+			Annotations: map[string]string{vitistackv1alpha1.NodePoolAnnotation: "pool-a"},
 		},
-		Spec: vitistackv1alpha1.MachineSpec{MachineClass: testMachineClass},
+		Spec: vitistackv1alpha1.MachineSpec{MachineClass: "large"},
 	}
-	machine.Status.Provider = vitistackv1alpha1.MachineProviderType(testMachineProvider)
+	machine.Status.Provider = "kubevirt"
 
 	result := buildDesiredNodeAnnotations(cluster, machine, "no", "1", "ws-ns", "infra-prod")
 
@@ -80,16 +72,16 @@ func TestBuildDesiredNodeAnnotations(t *testing.T) {
 		vitistackv1alpha1.EnvironmentAnnotation:           "prod",
 		vitistackv1alpha1.CountryAnnotation:               "no",
 		vitistackv1alpha1.AzAnnotation:                    "1",
-		vitistackv1alpha1.RegionAnnotation:                testRegion,
+		vitistackv1alpha1.RegionAnnotation:                "europe",
 		vitistackv1alpha1.KubernetesProviderAnnotation:    "talos",
-		vitistackv1alpha1.MachineProviderAnnotation:       testMachineProvider,
-		vitistackv1alpha1.MachineClassAnnotation:          testMachineClass,
-		vitistackv1alpha1.MachineIdAnnotation:             testNodeName,
+		vitistackv1alpha1.MachineProviderAnnotation:       "kubevirt",
+		vitistackv1alpha1.MachineClassAnnotation:          "large",
+		vitistackv1alpha1.MachineIdAnnotation:             "node-1",
 		vitistackv1alpha1.ClusterWorkspaceAnnotation:      "ws-ns",
 		vitistackv1alpha1.MachineInfrastructureAnnotation: "infra-prod",
-		vitistackv1alpha1.VMProviderAnnotation:            testMachineProvider, //nolint:staticcheck // testing deprecated annotation
-		vitistackv1alpha1.InfrastructureAnnotation:        "infra-prod",        //nolint:staticcheck // testing deprecated annotation
-		vitistackv1alpha1.NodePoolAnnotation:              testNodePool,
+		vitistackv1alpha1.VMProviderAnnotation:            "kubevirt",    //nolint:staticcheck // testing deprecated annotation
+		vitistackv1alpha1.InfrastructureAnnotation:        "infra-prod", //nolint:staticcheck // testing deprecated annotation
+		vitistackv1alpha1.NodePoolAnnotation:              "pool-a",
 	}
 
 	for k, want := range checks {
@@ -124,18 +116,18 @@ func TestComputeAnnotationPatch_UpdatesChanged(t *testing.T) {
 		vitistackv1alpha1.ClusterNameAnnotation:    "old-name",
 		vitistackv1alpha1.EnvironmentAnnotation:    "dev",
 		vitistackv1alpha1.MachineClassAnnotation:   "medium",
-		vitistackv1alpha1.MachineIdAnnotation:      testNodeName,
+		vitistackv1alpha1.MachineIdAnnotation:      "node-1",
 		vitistackv1alpha1.ClusterIdAnnotation:      "uuid-1",
 		vitistackv1alpha1.ClusterProjectAnnotation: "proj",
 	}
 
 	desired := map[string]string{
-		vitistackv1alpha1.ClusterNameAnnotation:    "new-name", // changed
-		vitistackv1alpha1.EnvironmentAnnotation:    "dev",      // unchanged
-		vitistackv1alpha1.MachineClassAnnotation:   testMachineClass, // changed
-		vitistackv1alpha1.MachineIdAnnotation:      testNodeName,     // unchanged
-		vitistackv1alpha1.ClusterIdAnnotation:      "uuid-1",   // unchanged
-		vitistackv1alpha1.ClusterProjectAnnotation: "new-proj", // changed
+		vitistackv1alpha1.ClusterNameAnnotation:    "new-name",       // changed
+		vitistackv1alpha1.EnvironmentAnnotation:    "dev",            // unchanged
+		vitistackv1alpha1.MachineClassAnnotation:   "large",    // changed
+		vitistackv1alpha1.MachineIdAnnotation:      "node-1",   // unchanged
+		vitistackv1alpha1.ClusterIdAnnotation:      "uuid-1",         // unchanged
+		vitistackv1alpha1.ClusterProjectAnnotation: "new-proj",       // changed
 	}
 
 	patch := computeAnnotationPatch(current, desired)
@@ -144,8 +136,8 @@ func TestComputeAnnotationPatch_UpdatesChanged(t *testing.T) {
 	if v, ok := patch[vitistackv1alpha1.ClusterNameAnnotation]; !ok || v != "new-name" {
 		t.Errorf("expected ClusterNameAnnotation = 'new-name', got %v", v)
 	}
-	if v, ok := patch[vitistackv1alpha1.MachineClassAnnotation]; !ok || v != testMachineClass {
-		t.Errorf("expected MachineClassAnnotation = %q, got %v", testMachineClass, v)
+	if v, ok := patch[vitistackv1alpha1.MachineClassAnnotation]; !ok || v != "large" {
+		t.Errorf("expected MachineClassAnnotation = 'large', got %v", v)
 	}
 	if v, ok := patch[vitistackv1alpha1.ClusterProjectAnnotation]; !ok || v != "new-proj" {
 		t.Errorf("expected ClusterProjectAnnotation = 'new-proj', got %v", v)
@@ -165,8 +157,8 @@ func TestComputeAnnotationPatch_DeletesManagedKeys(t *testing.T) {
 
 	current := map[string]string{
 		vitistackv1alpha1.ClusterNameAnnotation: "c",
-		vitistackv1alpha1.NodePoolAnnotation:    testNodePool, // managed key, not in desired
-		"some.other/annotation":                 "keep",   // unmanaged, should be ignored
+		vitistackv1alpha1.NodePoolAnnotation:    "pool-a", // managed key, not in desired
+		"some.other/annotation":                 "keep",       // unmanaged, should be ignored
 	}
 
 	desired := map[string]string{
@@ -221,8 +213,8 @@ func TestComputeAnnotationPatch_AddsNewAnnotations(t *testing.T) {
 	if v, ok := patch[vitistackv1alpha1.ClusterNameAnnotation]; !ok || v != "new-cluster" {
 		t.Errorf("expected ClusterNameAnnotation = 'new-cluster', got %v", v)
 	}
-	if v, ok := patch[vitistackv1alpha1.RegionAnnotation]; !ok || v != testRegion {
-		t.Errorf("expected RegionAnnotation = %q, got %v", testRegion, v)
+	if v, ok := patch[vitistackv1alpha1.RegionAnnotation]; !ok || v != "europe" {
+		t.Errorf("expected RegionAnnotation = 'europe', got %v", v)
 	}
 }
 
