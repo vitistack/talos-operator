@@ -63,6 +63,11 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 				vlog.Warn(fmt.Sprintf("Error during node version reconciliation %s: %v", clusterLogTag(cluster), err))
 			}
 
+			// Reconcile node annotations to keep them in sync with cluster/machine spec
+			if err := t.reconcileNodeAnnotations(ctx, cluster); err != nil {
+				vlog.Warn(fmt.Sprintf("Error during node annotation reconciliation %s: %v", clusterLogTag(cluster), err))
+			}
+
 			// Enforce the configured Talos OS version: probes each node's
 			// running Talos version via the Talos API and reinstalls any
 			// node that doesn't match TALOS_VERSION (CPs first, then

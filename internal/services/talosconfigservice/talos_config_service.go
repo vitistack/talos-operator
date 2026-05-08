@@ -493,7 +493,7 @@ func cidrToNetmask(cidr string) string {
 
 // buildNodeAnnotationsPatch builds a YAML patch for node annotations
 func (s *TalosConfigService) buildNodeAnnotationsPatch(cluster *vitistackv1alpha1.KubernetesCluster, m *vitistackv1alpha1.Machine) string {
-	country, az := extractDatacenterInfo(cluster.Spec.Cluster.Datacenter)
+	country, az := ExtractDatacenterInfo(cluster.Spec.Cluster.Datacenter)
 
 	annotations := map[string]string{
 		vitistackv1alpha1.ClusterIdAnnotation:          cluster.Spec.Cluster.ClusterId,
@@ -785,7 +785,8 @@ func ValidateTenantConfigYAML(raw string) error {
 	return nil
 }
 
-func extractDatacenterInfo(datacenter string) (country string, az string) {
+// ExtractDatacenterInfo splits a datacenter string (e.g. "no-east-1") into country and availability zone.
+func ExtractDatacenterInfo(datacenter string) (country string, az string) {
 	parts := strings.Split(datacenter, "-")
 	switch {
 	case len(parts) >= 3:
