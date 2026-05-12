@@ -144,12 +144,13 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 
 	// Reconcile Talos cluster after machines are created
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, kubernetesCluster); err != nil {
+		clusterTag := kubernetesClusterLogTag(kubernetesCluster)
 		// Check if this is a RequeueError (non-blocking wait signal)
 		if requeueErr, ok := talosclientservice.IsRequeueError(err); ok {
-			vlog.Info("Talos cluster reconcile needs requeue: " + requeueErr.Reason)
+			vlog.Infof("Talos cluster reconcile needs requeue %s: %s", clusterTag, requeueErr.Reason)
 			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 		}
-		vlog.Warn("Failed to reconcile Talos cluster ", err)
+		vlog.Warnf("Failed to reconcile Talos cluster %s: %v", clusterTag, err)
 		// Requeue for a later retry without surfacing an error
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
@@ -216,6 +217,18 @@ func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluste
 	}
 
 	return ctrl.Result{}, false
+}
+
+// kubernetesClusterLogTag builds a stable, grep-friendly identifier for log
+// lines. Mirrors the talos package's clusterLogTag: prefer spec.cluster.clusterId
+// (the persistent identifier), fall back to the resource name when clusterId
+// hasn't been set yet (very early in the cluster lifecycle).
+func kubernetesClusterLogTag(cluster *vitistackv1alpha1.KubernetesCluster) string {
+	clusterID := cluster.Spec.Cluster.ClusterId
+	if clusterID == "" {
+		clusterID = cluster.Name
+	}
+	return fmt.Sprintf("cluster=%s/%s", cluster.Namespace, clusterID)
 }
 
 // validateClusterSpec runs spec validation and sets the Valid condition. Returns
