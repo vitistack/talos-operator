@@ -180,7 +180,7 @@ func reconcilerManagedAnnotations() []string {
 		vitistackv1alpha1.MachineInfrastructureAnnotation,
 		vitistackv1alpha1.NodePoolAnnotation,
 		// Deprecated: kept for backward compatibility during transition
-		vitistackv1alpha1.VMProviderAnnotation,    //nolint:staticcheck // backward compatibility
+		vitistackv1alpha1.VMProviderAnnotation,     //nolint:staticcheck // backward compatibility
 		vitistackv1alpha1.InfrastructureAnnotation, //nolint:staticcheck // backward compatibility
 	}
 }

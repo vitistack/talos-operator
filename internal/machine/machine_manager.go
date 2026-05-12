@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
 	"github.com/vitistack/talos-operator/internal/services/machineclassservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -238,7 +239,7 @@ func (m *MachineManager) ListClusterMachines(ctx context.Context, cluster *vitis
 
 // DeleteMachine deletes a single machine resource
 func (m *MachineManager) DeleteMachine(ctx context.Context, machine *vitistackv1alpha1.Machine) error {
-	vlog.Info("Deleting machine resource: " + machine.Name)
+	vlog.Info(fmt.Sprintf("Deleting machine resource: %s %s", machine.Name, clusterlog.TagFromMachine(machine)))
 	if err := m.Delete(ctx, machine); err != nil {
 		if !errors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete machine %s: %w", machine.Name, err)
@@ -595,7 +596,7 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackv1a
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Machine doesn't exist, create it
-			vlog.Info("Creating machine: " + machine.Name)
+			vlog.Info(fmt.Sprintf("Creating machine: %s %s", machine.Name, clusterlog.Tag(cluster)))
 			if err := m.Create(ctx, machine); err != nil {
 				return fmt.Errorf("failed to create machine: %w", err)
 			}
@@ -632,7 +633,7 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackv1a
 			// If patch fails due to conflict, it's likely because status was updated
 			// Log as debug and skip - the spec should be reconciled on next iteration
 			if errors.IsConflict(err) {
-				vlog.Debug("Machine update conflict (object modified), will retry on next reconcile: machine=" + machine.Name)
+				vlog.Debug(fmt.Sprintf("Machine update conflict (object modified) %s, will retry on next reconcile: machine=%s", clusterlog.Tag(cluster), machine.Name))
 				return nil
 			}
 			return fmt.Errorf("failed to patch machine: %w", err)
@@ -723,7 +724,7 @@ func (m *MachineManager) CleanupMachines(ctx context.Context, clusterId, namespa
 	// Delete each machine
 	for i := range machineList.Items {
 		machine := &machineList.Items[i]
-		vlog.Info("Deleting machine: " + machine.Name)
+		vlog.Info(fmt.Sprintf("Deleting machine: %s cluster=%s/%s", machine.Name, namespace, clusterId))
 		if err := m.Delete(ctx, machine); err != nil {
 			if !errors.IsNotFound(err) {
 				return fmt.Errorf("failed to delete machine %s: %w", machine.Name, err)
@@ -731,7 +732,7 @@ func (m *MachineManager) CleanupMachines(ctx context.Context, clusterId, namespa
 		}
 	}
 
-	vlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s machineCount=%d", clusterId, len(machineList.Items)))
+	vlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s/%s machineCount=%d", namespace, clusterId, len(machineList.Items)))
 	return nil
 }
 

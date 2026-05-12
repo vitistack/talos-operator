@@ -9,6 +9,7 @@ import (
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
 	"github.com/vitistack/talos-operator/internal/helpers/nodehelper"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
@@ -119,7 +120,7 @@ func (c *UpgradeController) handleCompletedUpgrade(
 	clientConfig *clientconfig.Config,
 	state *ClusterUpgradeState,
 ) (time.Duration, bool, error) {
-	vlog.Info(fmt.Sprintf("Upgrade completed: cluster=%s type=%s targetVersion=%s", cluster.Name, state.UpgradeType, state.TargetVersion))
+	vlog.Info(fmt.Sprintf("Upgrade completed: %s type=%s targetVersion=%s", clusterlog.Tag(cluster), state.UpgradeType, state.TargetVersion))
 
 	// Mark upgrade as complete and regenerate configs
 	if state.UpgradeType == UpgradeTypeTalos {
@@ -135,7 +136,7 @@ func (c *UpgradeController) handleCompletedUpgrade(
 			endpointIPs := clientConfig.Contexts[clientConfig.Context].Endpoints
 			k8sOverride := c.resolveCurrentKubernetesVersion(ctx, cluster)
 			if err := c.upgradeService.RegenerateMachineConfigsAfterUpgrade(ctx, cluster, endpointIPs, state.TargetVersion, k8sOverride); err != nil {
-				vlog.Warn(fmt.Sprintf("Failed to regenerate machine configs after upgrade: %v", err))
+				vlog.Warn(fmt.Sprintf("Failed to regenerate machine configs after upgrade %s: %v", clusterlog.Tag(cluster), err))
 			}
 		}
 	} else {
@@ -149,7 +150,7 @@ func (c *UpgradeController) handleCompletedUpgrade(
 			talosVersion := c.upgradeService.GetUpgradeState(cluster).TalosCurrent
 			// Pass the upgraded K8s version as override since the cluster spec hasn't been updated
 			if err := c.upgradeService.RegenerateMachineConfigsAfterUpgrade(ctx, cluster, endpointIPs, talosVersion, state.TargetVersion); err != nil {
-				vlog.Warn(fmt.Sprintf("Failed to regenerate machine configs after upgrade: %v", err))
+				vlog.Warn(fmt.Sprintf("Failed to regenerate machine configs after upgrade %s: %v", clusterlog.Tag(cluster), err))
 			}
 		}
 	}
@@ -192,12 +193,12 @@ func (c *UpgradeController) startTalosUpgrade(
 	machines []vitistackv1alpha1.Machine,
 	upgState *UpgradeState,
 ) (time.Duration, bool, error) {
-	vlog.Info(fmt.Sprintf("Starting Talos upgrade: cluster=%s current=%s target=%s",
-		cluster.Name, upgState.TalosCurrent, upgState.TalosTarget))
+	vlog.Info(fmt.Sprintf("Starting Talos upgrade: %s current=%s target=%s",
+		clusterlog.Tag(cluster), upgState.TalosCurrent, upgState.TalosTarget))
 
 	// Validate upgrade
 	if err := c.upgradeService.ValidateUpgradeTarget(upgState.TalosCurrent, upgState.TalosTarget); err != nil {
-		vlog.Error(fmt.Sprintf("Invalid Talos upgrade target: %v", err), nil)
+		vlog.Errorf("Invalid Talos upgrade target %s: %v", clusterlog.Tag(cluster), err)
 		_ = c.upgradeService.FailTalosUpgrade(ctx, cluster, err.Error())
 		return 30 * time.Second, true, nil
 	}
@@ -206,7 +207,7 @@ func (c *UpgradeController) startTalosUpgrade(
 	// factory schematic so system extensions survive the upgrade).
 	installerImage, err := c.upgradeService.BuildTalosInstallerImage(ctx, cluster, clientConfig, upgState.TalosTarget)
 	if err != nil {
-		vlog.Error(fmt.Sprintf("Cannot determine Talos installer image for cluster %s", cluster.Name), err)
+		vlog.Error(fmt.Sprintf("Cannot determine Talos installer image for %s", clusterlog.Tag(cluster)), err)
 		_ = c.upgradeService.FailTalosUpgrade(ctx, cluster, err.Error())
 		return 30 * time.Second, true, nil
 	}
@@ -244,12 +245,12 @@ func (c *UpgradeController) startKubernetesUpgrade(
 	machines []vitistackv1alpha1.Machine,
 	upgState *UpgradeState,
 ) (time.Duration, bool, error) {
-	vlog.Info(fmt.Sprintf("Starting Kubernetes upgrade: cluster=%s current=%s target=%s",
-		cluster.Name, upgState.KubernetesCurrent, upgState.KubernetesTarget))
+	vlog.Info(fmt.Sprintf("Starting Kubernetes upgrade: %s current=%s target=%s",
+		clusterlog.Tag(cluster), upgState.KubernetesCurrent, upgState.KubernetesTarget))
 
 	// Validate upgrade
 	if err := c.upgradeService.ValidateKubernetesUpgradeTarget(upgState.KubernetesCurrent, upgState.KubernetesTarget); err != nil {
-		vlog.Error(fmt.Sprintf("Invalid Kubernetes upgrade target: %v", err), nil)
+		vlog.Errorf("Invalid Kubernetes upgrade target %s: %v", clusterlog.Tag(cluster), err)
 		_ = c.upgradeService.FailKubernetesUpgrade(ctx, cluster, err.Error())
 		return 30 * time.Second, true, nil
 	}
@@ -286,7 +287,7 @@ func (c *UpgradeController) resumeFailedUpgrade(
 	clientConfig *clientconfig.Config,
 	_ *UpgradeState, // upgState from service state; actual state is retrieved from secret
 ) (time.Duration, bool, error) {
-	vlog.Info(fmt.Sprintf("Resuming failed upgrade: cluster=%s", cluster.Name))
+	vlog.Info("Resuming failed upgrade: " + clusterlog.Tag(cluster))
 
 	// Get current state
 	state, err := c.stateManager.GetUpgradeState(ctx, cluster)
@@ -345,7 +346,7 @@ func (c *UpgradeController) handleUpgradeResult(
 	upgradeType UpgradeType,
 ) (time.Duration, bool, error) {
 	if result.Error != nil {
-		vlog.Error(fmt.Sprintf("Upgrade failed: %s", result.Message), result.Error)
+		vlog.Error(fmt.Sprintf("Upgrade failed %s: %s", clusterlog.Tag(cluster), result.Message), result.Error)
 
 		if upgradeType == UpgradeTypeTalos {
 			_ = c.upgradeService.FailTalosUpgrade(ctx, cluster, result.Error.Error())
@@ -365,7 +366,7 @@ func (c *UpgradeController) handleUpgradeResult(
 	}
 
 	if result.Continue {
-		vlog.Info(fmt.Sprintf("Upgrade in progress: cluster=%s %s", cluster.Name, result.Message))
+		vlog.Info(fmt.Sprintf("Upgrade in progress: %s %s", clusterlog.Tag(cluster), result.Message))
 		return result.RequeueAfter, true, nil
 	}
 
@@ -437,7 +438,7 @@ func (c *UpgradeController) HandleTalosResetUpgradeState(
 		return false, nil
 	}
 
-	vlog.Info(fmt.Sprintf("Resetting Talos upgrade state on user request: cluster=%s", cluster.Name))
+	vlog.Info("Resetting Talos upgrade state on user request: " + clusterlog.Tag(cluster))
 
 	// Clear the per-key flags (upgrade_in_progress, upgrade_type, ...).
 	// This unblocks reconcileTalosVersion on the next pass.
@@ -463,14 +464,14 @@ func (c *UpgradeController) HandleTalosResetUpgradeState(
 	}
 	for _, key := range talosAnnotations {
 		if err := c.upgradeService.RemoveAnnotation(ctx, cluster, key); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to remove %s during reset: %v", key, err))
+			vlog.Warn(fmt.Sprintf("Failed to remove %s during reset %s: %v", key, clusterlog.Tag(cluster), err))
 		}
 	}
 
 	// Reset phase so a stale UpgradeFailed/UpgradingTalos doesn't keep the
 	// cluster locked out of the regular reconcile flow.
 	if err := c.statusManager.SetPhase(ctx, cluster, status.PhaseReady); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to reset phase after talos-reset-upgrade-state: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to reset phase after talos-reset-upgrade-state %s: %v", clusterlog.Tag(cluster), err))
 	}
 
 	// Remove the trigger annotation last so a partial failure leaves the
@@ -479,7 +480,7 @@ func (c *UpgradeController) HandleTalosResetUpgradeState(
 		return true, fmt.Errorf("failed to remove %s annotation: %w", consts.TalosResetUpgradeStateAnnotation, err)
 	}
 
-	vlog.Info(fmt.Sprintf("Talos upgrade state reset complete: cluster=%s — reconcileTalosVersion will re-derive from ground truth on next pass", cluster.Name))
+	vlog.Info(fmt.Sprintf("Talos upgrade state reset complete: %s — reconcileTalosVersion will re-derive from ground truth on next pass", clusterlog.Tag(cluster)))
 	return true, nil
 }
 

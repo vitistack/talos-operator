@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/services/machineservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
@@ -336,7 +337,7 @@ func (s *UpgradeService) SetTalosUpgradeAvailable(ctx context.Context, cluster *
 		return err
 	}
 
-	vlog.Info(fmt.Sprintf("Talos upgrade available: cluster=%s current=%s available=%s", cluster.Name, state.TalosCurrent, availableVersion))
+	vlog.Info(fmt.Sprintf("Talos upgrade available: %s current=%s available=%s", clusterlog.Tag(cluster), state.TalosCurrent, availableVersion))
 	return nil
 }
 
@@ -378,7 +379,7 @@ func (s *UpgradeService) SetKubernetesUpgradeAvailable(ctx context.Context, clus
 		return err
 	}
 
-	vlog.Info(fmt.Sprintf("Kubernetes upgrade available: cluster=%s current=%s available=%s", cluster.Name, state.KubernetesCurrent, availableVersion))
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade available: %s current=%s available=%s", clusterlog.Tag(cluster), state.KubernetesCurrent, availableVersion))
 	return nil
 }
 
@@ -578,7 +579,7 @@ func (s *UpgradeService) BuildTalosInstallerImage(
 		return "", fmt.Errorf("no Talos installer image available for cluster %s: cluster secret has no install_image, no control plane is reachable to live-fetch one, and TALOS_VM_INSTALL_IMAGE_DEFAULT is unset; refusing to fall back to the generic installer (it would drop the cluster's system extensions)", cluster.Name)
 	}
 	resolved := swapImageTag(base, versionTag)
-	vlog.Info(fmt.Sprintf("Resolved Talos installer image for %s: %s (source=%s)", cluster.Name, resolved, source))
+	vlog.Info(fmt.Sprintf("Resolved Talos installer image for %s: %s (source=%s)", clusterlog.Tag(cluster), resolved, source))
 	return resolved, nil
 }
 
@@ -703,7 +704,7 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 		vlog.Error("Failed to set TalosUpgrade condition", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Talos upgrade completed: cluster=%s version=%s", cluster.Name, targetVersion))
+	vlog.Info(fmt.Sprintf("Talos upgrade completed: %s version=%s", clusterlog.Tag(cluster), targetVersion))
 	return nil
 }
 
@@ -1052,7 +1053,7 @@ func (s *UpgradeService) CompleteKubernetesUpgrade(ctx context.Context, cluster 
 		vlog.Error("Failed to set KubernetesUpgrade condition", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: cluster=%s version=%s", cluster.Name, targetVersion))
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: %s version=%s", clusterlog.Tag(cluster), targetVersion))
 	return nil
 }
 
@@ -1085,7 +1086,7 @@ func (s *UpgradeService) BlockKubernetesUpgrade(ctx context.Context, cluster *vi
 		vlog.Error("Failed to set KubernetesUpgrade condition", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Kubernetes upgrade blocked: cluster=%s reason=%s", cluster.Name, reason))
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade blocked: %s reason=%s", clusterlog.Tag(cluster), reason))
 	return nil
 }
 
@@ -1204,7 +1205,7 @@ func (s *UpgradeService) ResumeTalosUpgrade(ctx context.Context, cluster *vitist
 		vlog.Error("Failed to set phase to UpgradingTalos", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Talos upgrade resumed: cluster=%s target=%s", cluster.Name, state.TalosTarget))
+	vlog.Info(fmt.Sprintf("Talos upgrade resumed: %s target=%s", clusterlog.Tag(cluster), state.TalosTarget))
 	return nil
 }
 
@@ -1231,6 +1232,6 @@ func (s *UpgradeService) ResumeKubernetesUpgrade(ctx context.Context, cluster *v
 		vlog.Error("Failed to set phase to UpgradingKubernetes", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Kubernetes upgrade resumed: cluster=%s target=%s", cluster.Name, state.KubernetesTarget))
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade resumed: %s target=%s", clusterlog.Tag(cluster), state.KubernetesTarget))
 	return nil
 }

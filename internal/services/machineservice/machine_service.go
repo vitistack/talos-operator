@@ -8,6 +8,7 @@ import (
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -56,7 +57,9 @@ func (s *MachineService) GetClusterMachines(ctx context.Context,
 
 // WaitForMachinesReady waits for all machines to be in running state with IP addresses
 func (s *MachineService) WaitForMachinesReady(ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
 	machines []*vitistackv1alpha1.Machine) ([]*vitistackv1alpha1.Machine, error) {
+	clusterTag := clusterlog.Tag(cluster)
 	timeout := time.After(DefaultMachineTimeout)
 	ticker := time.NewTicker(DefaultMachineCheckInterval)
 	defer ticker.Stop()
@@ -70,10 +73,10 @@ func (s *MachineService) WaitForMachinesReady(ctx context.Context,
 		case <-ticker.C:
 			readyMachines, allReady := s.checkMachinesReady(ctx, machines)
 			if allReady {
-				vlog.Info(fmt.Sprintf("All machines are ready: count=%d", len(readyMachines)))
+				vlog.Info(fmt.Sprintf("All machines are ready %s: count=%d", clusterTag, len(readyMachines)))
 				return readyMachines, nil
 			}
-			vlog.Info(fmt.Sprintf("Waiting for machines to be ready: ready=%d total=%d", len(readyMachines), len(machines)))
+			vlog.Info(fmt.Sprintf("Waiting for machines to be ready %s: ready=%d total=%d", clusterTag, len(readyMachines), len(machines)))
 		}
 	}
 }
@@ -82,12 +85,14 @@ func (s *MachineService) WaitForMachinesReady(ctx context.Context,
 // Returns the first ready control plane, allowing cluster bootstrap to start immediately.
 // Returns (nil, nil) if no control plane machines exist yet - caller should requeue.
 func (s *MachineService) WaitForFirstControlPlaneReady(ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
 	machines []*vitistackv1alpha1.Machine) (*vitistackv1alpha1.Machine, error) {
+	clusterTag := clusterlog.Tag(cluster)
 	controlPlanes := s.FilterMachinesByRole(machines, "control-plane")
 	if len(controlPlanes) == 0 {
 		// No control planes exist yet - this is not an error, just means we need to wait
 		// Return nil so the reconciler can requeue and check again
-		vlog.Debug("No control plane machines found yet, will retry on next reconcile")
+		vlog.Debug("No control plane machines found yet " + clusterTag + ", will retry on next reconcile")
 		return nil, nil
 	}
 
@@ -101,7 +106,7 @@ func (s *MachineService) WaitForFirstControlPlaneReady(ctx context.Context,
 			return nil, ctx.Err()
 		case <-timeout:
 			// Timeout waiting for control plane to be ready - return nil so reconciler requeues
-			vlog.Debug(fmt.Sprintf("Control plane not ready yet, will retry: count=%d", len(controlPlanes)))
+			vlog.Debug(fmt.Sprintf("Control plane not ready yet %s, will retry: count=%d", clusterTag, len(controlPlanes)))
 			return nil, nil
 		case <-ticker.C:
 			// Check if any control plane is ready (they're already sorted by name)
@@ -114,11 +119,11 @@ func (s *MachineService) WaitForFirstControlPlaneReady(ctx context.Context,
 					continue
 				}
 				if s.IsMachineReady(updatedMachine) {
-					vlog.Info(fmt.Sprintf("First control plane is ready: %s", updatedMachine.Name))
+					vlog.Info(fmt.Sprintf("First control plane is ready: %s %s", updatedMachine.Name, clusterTag))
 					return updatedMachine, nil
 				}
 			}
-			vlog.Debug(fmt.Sprintf("Waiting for first control plane to be ready: total=%d", len(controlPlanes)))
+			vlog.Debug(fmt.Sprintf("Waiting for first control plane to be ready %s: total=%d", clusterTag, len(controlPlanes)))
 		}
 	}
 }

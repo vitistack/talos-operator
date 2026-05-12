@@ -77,7 +77,7 @@ func (t *TalosManager) reconcileRemovedNodes(ctx context.Context, cluster *vitis
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Found %d nodes to remove from cluster %s: %v", len(nodesToRemove), cluster.Name, nodesToRemove))
+	vlog.Info(fmt.Sprintf("Found %d nodes to remove from %s: %v", len(nodesToRemove), clusterLogTag(cluster), nodesToRemove))
 
 	// Load Talos artifacts for deletion operations
 	clientConfig, _, err := t.loadTalosArtifacts(ctx, cluster)
@@ -148,7 +148,7 @@ func (t *TalosManager) removeControlPlaneNode(
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	clientConfig *clientconfig.Config,
 	nodeName string) error {
-	vlog.Info(fmt.Sprintf("Removing control plane node from cluster: node=%s cluster=%s", nodeName, cluster.Name))
+	vlog.Info(fmt.Sprintf("Removing control plane node from cluster: node=%s %s", nodeName, clusterLogTag(cluster)))
 
 	// Get remaining control planes to find a healthy node to use for etcd operations
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
@@ -201,7 +201,7 @@ func (t *TalosManager) removeControlPlaneNode(
 		return fmt.Errorf("failed to remove node from configured nodes: %w", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Successfully removed control plane node: node=%s cluster=%s", nodeName, cluster.Name))
+	vlog.Info(fmt.Sprintf("Successfully removed control plane node: node=%s %s", nodeName, clusterLogTag(cluster)))
 	return nil
 }
 
@@ -212,14 +212,14 @@ func (t *TalosManager) removeWorkerNode(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	nodeName string) error {
-	vlog.Info(fmt.Sprintf("Removing worker node from cluster: node=%s cluster=%s", nodeName, cluster.Name))
+	vlog.Info(fmt.Sprintf("Removing worker node from cluster: node=%s %s", nodeName, clusterLogTag(cluster)))
 
 	// Remove from configured nodes list
 	if err := t.stateService.RemoveConfiguredNode(ctx, cluster, nodeName); err != nil {
 		return fmt.Errorf("failed to remove worker node from configured nodes: %w", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Successfully removed worker node: node=%s cluster=%s", nodeName, cluster.Name))
+	vlog.Info(fmt.Sprintf("Successfully removed worker node: node=%s %s", nodeName, clusterLogTag(cluster)))
 	return nil
 }
 
@@ -249,7 +249,7 @@ func (t *TalosManager) DeleteControlPlaneNode(
 	}
 
 	result.Success = true
-	vlog.Info(fmt.Sprintf("Successfully deleted control plane node: node=%s cluster=%s", nodeName, cluster.Name))
+	vlog.Info(fmt.Sprintf("Successfully deleted control plane node: node=%s %s", nodeName, clusterLogTag(cluster)))
 	return result, nil
 }
 
@@ -427,7 +427,7 @@ func (t *TalosManager) DeleteWorkerNode(
 	result.ConfigRemoved = true
 
 	result.Success = true
-	vlog.Info(fmt.Sprintf("Successfully deleted worker node: node=%s cluster=%s", nodeName, cluster.Name))
+	vlog.Info(fmt.Sprintf("Successfully deleted worker node: node=%s %s", nodeName, clusterLogTag(cluster)))
 	return result, nil
 }
 
@@ -457,13 +457,13 @@ func (t *TalosManager) deleteK8sNodeFromWorkloadCluster(ctx context.Context, clu
 	err = clientset.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			vlog.Info(fmt.Sprintf("Kubernetes node %s already deleted from workload cluster", nodeName))
+			vlog.Info(fmt.Sprintf("Kubernetes node %s already deleted from workload cluster %s", nodeName, clusterLogTag(cluster)))
 			return nil
 		}
 		return fmt.Errorf("failed to delete node %s from workload cluster: %w", nodeName, err)
 	}
 
-	vlog.Info(fmt.Sprintf("Successfully deleted Kubernetes node from workload cluster: node=%s cluster=%s", nodeName, cluster.Name))
+	vlog.Info(fmt.Sprintf("Successfully deleted Kubernetes node from workload cluster: node=%s %s", nodeName, clusterLogTag(cluster)))
 	return nil
 }
 
@@ -486,7 +486,7 @@ func (t *TalosManager) CordonAndDrainNode(ctx context.Context, cluster *vitistac
 	// Step 2: Drain the node (evict pods)
 	if err := t.drainNode(ctx, clientset, nodeName); err != nil {
 		// Log but don't fail - drain timeout shouldn't block upgrade
-		vlog.Warn(fmt.Sprintf("Drain completed with warnings for node %s: %v", nodeName, err))
+		vlog.Warn(fmt.Sprintf("Drain completed with warnings for node %s %s: %v", nodeName, clusterLogTag(cluster), err))
 	}
 
 	return nil
@@ -511,7 +511,7 @@ func (t *TalosManager) UncordonNode(ctx context.Context, cluster *vitistackv1alp
 	}
 
 	if !node.Spec.Unschedulable {
-		vlog.Debug(fmt.Sprintf("Node %s is already schedulable", nodeName))
+		vlog.Debug(fmt.Sprintf("Node %s %s is already schedulable", nodeName, clusterLogTag(cluster)))
 		return nil
 	}
 
@@ -521,7 +521,7 @@ func (t *TalosManager) UncordonNode(ctx context.Context, cluster *vitistackv1alp
 		return fmt.Errorf("failed to uncordon node %s: %w", nodeName, err)
 	}
 
-	vlog.Info(fmt.Sprintf("Uncordoned node: %s", nodeName))
+	vlog.Info(fmt.Sprintf("Uncordoned node: %s %s", nodeName, clusterLogTag(cluster)))
 	return nil
 }
 
@@ -834,8 +834,8 @@ func (t *TalosManager) deleteOrphanedNodeIfNeeded(
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Found orphaned Kubernetes node (NotReady + SchedulingDisabled, no Machine CRD): node=%s/%s",
-		clusterTag, nodeName))
+	vlog.Info(fmt.Sprintf("Found orphaned Kubernetes node (NotReady + SchedulingDisabled, no Machine CRD): node=%s %s",
+		nodeName, clusterTag))
 
 	if err := clientset.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -844,7 +844,7 @@ func (t *TalosManager) deleteOrphanedNodeIfNeeded(
 		return fmt.Errorf("failed to delete orphaned node %s: %w", nodeName, err)
 	}
 
-	vlog.Info(fmt.Sprintf("Successfully deleted orphaned Kubernetes node: node=%s/%s", clusterTag, nodeName))
+	vlog.Info(fmt.Sprintf("Successfully deleted orphaned Kubernetes node: node=%s %s", nodeName, clusterTag))
 	return nil
 }
 
@@ -867,7 +867,7 @@ func (t *TalosManager) removeNodeFromVIPPool(ctx context.Context, cluster *vitis
 	// Only update VIP pool members if using networkconfiguration endpoint mode
 	endpointMode := consts.EndpointMode(viper.GetString(consts.ENDPOINT_MODE))
 	if endpointMode != consts.EndpointModeNetworkConfiguration {
-		vlog.Info(fmt.Sprintf("Skipping VIP pool member removal: endpoint mode is '%s', not 'networkconfiguration'", endpointMode))
+		vlog.Info(fmt.Sprintf("Skipping VIP pool member removal %s: endpoint mode is '%s', not 'networkconfiguration'", clusterLogTag(cluster), endpointMode))
 		return nil
 	}
 
@@ -894,7 +894,7 @@ func (t *TalosManager) removeNodeFromVIPPool(ctx context.Context, cluster *vitis
 		if err := t.Update(ctx, vip); err != nil {
 			return fmt.Errorf("failed to update VIP pool members: %w", err)
 		}
-		vlog.Info(fmt.Sprintf("Removed IP from VIP pool members: vip=%s removedIP=%s remaining=%v", vipName, ipToRemove, newPoolMembers))
+		vlog.Info(fmt.Sprintf("Removed IP from VIP pool members %s: vip=%s removedIP=%s remaining=%v", clusterLogTag(cluster), vipName, ipToRemove, newPoolMembers))
 	}
 
 	return nil

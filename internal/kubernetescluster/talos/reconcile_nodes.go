@@ -44,10 +44,10 @@ func (t *TalosManager) reconcileNewNodes(ctx context.Context, cluster *vitistack
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Found %d new machines to configure for cluster %s", len(newMachines), cluster.Name))
+	vlog.Info(fmt.Sprintf("Found %d new machines to configure for %s", len(newMachines), clusterLogTag(cluster)))
 
 	// Wait for new machines to be ready
-	readyMachines, err := t.machineService.WaitForMachinesReady(ctx, newMachines)
+	readyMachines, err := t.machineService.WaitForMachinesReady(ctx, cluster, newMachines)
 	if err != nil {
 		return fmt.Errorf("failed waiting for new machines to be ready: %w", err)
 	}
@@ -76,7 +76,7 @@ func (t *TalosManager) updateVIPPoolMembers(ctx context.Context, cluster *vitist
 	// Only update VIP pool members if using networkconfiguration endpoint mode
 	endpointMode := consts.EndpointMode(viper.GetString(consts.ENDPOINT_MODE))
 	if endpointMode != consts.EndpointModeNetworkConfiguration {
-		vlog.Info(fmt.Sprintf("Skipping VIP pool member update: endpoint mode is '%s', not 'networkconfiguration'", endpointMode))
+		vlog.Info(fmt.Sprintf("Skipping VIP pool member update %s: endpoint mode is '%s', not 'networkconfiguration'", clusterLogTag(cluster), endpointMode))
 		return nil
 	}
 
@@ -103,7 +103,7 @@ func (t *TalosManager) updateVIPPoolMembers(ctx context.Context, cluster *vitist
 		if err := t.Update(ctx, vip); err != nil {
 			return fmt.Errorf("failed to update VIP pool members: %w", err)
 		}
-		vlog.Info(fmt.Sprintf("Updated VIP pool members: vip=%s members=%v", vipName, controlPlaneIPs))
+		vlog.Info(fmt.Sprintf("Updated VIP pool members %s: vip=%s members=%v", clusterLogTag(cluster), vipName, controlPlaneIPs))
 	}
 
 	return nil
@@ -138,7 +138,7 @@ func (t *TalosManager) findUnconfiguredMachines(ctx context.Context, cluster *vi
 		// recreated with the same name; the new Machine needs Talos config
 		// applied before kubevirt-operator strips its boot ISO.
 		if storedUID != "" && storedUID != m.UID {
-			vlog.Info(fmt.Sprintf("Machine %s reused configured name with new UID (stored=%s current=%s); will reconfigure", m.Name, storedUID, m.UID))
+			vlog.Info(fmt.Sprintf("Machine %s reused configured name with new UID %s (stored=%s current=%s); will reconfigure", m.Name, clusterLogTag(cluster), storedUID, m.UID))
 			newMachines = append(newMachines, m)
 		}
 	}
@@ -256,25 +256,25 @@ func (t *TalosManager) getEndpointIPForNewNodes(ctx context.Context, cluster *vi
 		t.mirrorVIPReadyToKC(ctx, cluster, vip)
 		if cond, ok := conditions.Get(vip.Status.Conditions, "Ready"); ok {
 			if cond.Status == metav1.ConditionFalse && cond.Reason == "Error" {
-				vlog.Warn(fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is in terminal failure state, spec change required: %s", vip.Namespace, vip.Name, cond.Message))
+				vlog.Warn(fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is in terminal failure state %s, spec change required: %s", vip.Namespace, vip.Name, clusterLogTag(cluster), cond.Message))
 				return "", fmt.Errorf("ControlPlaneVirtualSharedIP %s/%s is in a terminal failure state: %s", vip.Namespace, vip.Name, cond.Message)
 			}
 			if cond.Status != metav1.ConditionTrue {
-				vlog.Info(fmt.Sprintf("Waiting for ControlPlaneVirtualSharedIP %s/%s to reach Ready before configuring new nodes (phase=%s)", vip.Namespace, vip.Name, vip.Status.Phase))
+				vlog.Info(fmt.Sprintf("Waiting for ControlPlaneVirtualSharedIP %s/%s to reach Ready before configuring new nodes %s (phase=%s)", vip.Namespace, vip.Name, clusterLogTag(cluster), vip.Status.Phase))
 				return "", talosclientservice.NewRequeueError(
 					fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s not ready yet (phase=%s)", vip.Namespace, vip.Name, vip.Status.Phase),
 					dependentVIPRequeueDelay,
 				)
 			}
 		} else {
-			vlog.Info(fmt.Sprintf("Waiting for ControlPlaneVirtualSharedIP %s/%s to publish a Ready condition", vip.Namespace, vip.Name))
+			vlog.Info(fmt.Sprintf("Waiting for ControlPlaneVirtualSharedIP %s/%s to publish a Ready condition %s", vip.Namespace, vip.Name, clusterLogTag(cluster)))
 			return "", talosclientservice.NewRequeueError(
 				fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s has no Ready condition yet", vip.Namespace, vip.Name),
 				dependentVIPRequeueDelay,
 			)
 		}
 		if len(vip.Status.LoadBalancerIps) == 0 {
-			vlog.Warn(fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is Ready but has no LoadBalancerIps yet, waiting", vip.Namespace, vip.Name))
+			vlog.Warn(fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is Ready but has no LoadBalancerIps yet %s, waiting", vip.Namespace, vip.Name, clusterLogTag(cluster)))
 			return "", talosclientservice.NewRequeueError(
 				fmt.Sprintf("ControlPlaneVirtualSharedIP %s/%s is Ready but has no LoadBalancerIps yet", vip.Namespace, vip.Name),
 				dependentVIPRequeueDelay,
@@ -346,7 +346,7 @@ func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitis
 		return fmt.Errorf("failed to parse desired Kubernetes version %q: %w", desiredVersion, err)
 	}
 
-	candidates := collectNodeUpgradeCandidates(nodeList.Items, machineMap, desiredSemver, desiredVersion)
+	candidates := collectNodeUpgradeCandidates(nodeList.Items, machineMap, desiredSemver, desiredVersion, clusterLogTag(cluster))
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -368,7 +368,7 @@ func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitis
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodesToUpgrade := t.filterNodesNeedingUpgrade(ctx, tClient, candidates, desiredVersion)
+	nodesToUpgrade := t.filterNodesNeedingUpgrade(ctx, tClient, candidates, desiredVersion, clusterLogTag(cluster))
 	if len(nodesToUpgrade) == 0 {
 		return nil
 	}
@@ -380,8 +380,8 @@ func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitis
 		return fmt.Errorf("failed to upgrade node Kubernetes versions: %w", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Kubernetes version reconciliation complete: %d nodes upgraded to %s",
-		len(nodesToUpgrade), desiredVersion))
+	vlog.Info(fmt.Sprintf("Kubernetes version reconciliation complete %s: %d nodes upgraded to %s",
+		clusterLogTag(cluster), len(nodesToUpgrade), desiredVersion))
 	return nil
 }
 
@@ -394,6 +394,7 @@ func collectNodeUpgradeCandidates(
 	machineMap map[string]*vitistackv1alpha1.Machine,
 	desiredSemver *semver.Version,
 	desiredVersion string,
+	clusterTag string,
 ) []talosclientservice.NodeUpgradeInfo {
 	var candidates []talosclientservice.NodeUpgradeInfo
 	for i := range nodes {
@@ -405,14 +406,14 @@ func collectNodeUpgradeCandidates(
 
 		nodeSemver, err := semver.NewVersion(nodeVersion)
 		if err != nil {
-			vlog.Warn(fmt.Sprintf("Cannot parse node %s Kubernetes version %q, skipping", node.Name, nodeVersion))
+			vlog.Warn(fmt.Sprintf("Cannot parse node %s Kubernetes version %q %s, skipping", node.Name, nodeVersion, clusterTag))
 			continue
 		}
 
 		if !nodeSemver.LessThan(desiredSemver) {
 			if nodeSemver.GreaterThan(desiredSemver) {
-				vlog.Warn(fmt.Sprintf("Node %s is running Kubernetes %s which is newer than desired %s — downgrade is not supported, skipping",
-					node.Name, nodeVersion, desiredVersion))
+				vlog.Warn(fmt.Sprintf("Node %s is running Kubernetes %s which is newer than desired %s %s — downgrade is not supported, skipping",
+					node.Name, nodeVersion, desiredVersion, clusterTag))
 			}
 			continue
 		}
@@ -443,6 +444,7 @@ func (t *TalosManager) filterNodesNeedingUpgrade(
 	tClient *talosclient.Client,
 	candidates []talosclientservice.NodeUpgradeInfo,
 	desiredVersion string,
+	clusterTag string,
 ) []talosclientservice.NodeUpgradeInfo {
 	expectedKubeletImage := fmt.Sprintf("ghcr.io/siderolabs/kubelet:%s", desiredVersion)
 	var needUpgrade []talosclientservice.NodeUpgradeInfo
@@ -450,7 +452,7 @@ func (t *TalosManager) filterNodesNeedingUpgrade(
 		if t.clientService.NodeHasKubeletImage(ctx, tClient, c.IP, expectedKubeletImage) {
 			continue
 		}
-		vlog.Info(fmt.Sprintf("Node %s needs Kubernetes upgrade to %s", c.Name, desiredVersion))
+		vlog.Info(fmt.Sprintf("Node %s needs Kubernetes upgrade to %s %s", c.Name, desiredVersion, clusterTag))
 		needUpgrade = append(needUpgrade, c)
 	}
 	return needUpgrade

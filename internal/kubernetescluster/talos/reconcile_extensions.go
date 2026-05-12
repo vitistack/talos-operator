@@ -11,6 +11,7 @@ import (
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 
+	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 )
@@ -118,15 +119,9 @@ func (t *TalosManager) reconcileExtensions(ctx context.Context, cluster *vitista
 }
 
 // clusterLogTag builds a stable, grep-friendly identifier for log lines.
-// Uses spec.data.clusterId (the persistent identifier) and falls back to the
-// resource name when clusterId hasn't been set yet (very early in the cluster
-// lifecycle).
+// Delegates to clusterlog.Tag so every package shares the same format.
 func clusterLogTag(cluster *vitistackv1alpha1.KubernetesCluster) string {
-	clusterID := cluster.Spec.Cluster.ClusterId
-	if clusterID == "" {
-		clusterID = cluster.Name
-	}
-	return fmt.Sprintf("cluster=%s/%s", cluster.Namespace, clusterID)
+	return clusterlog.Tag(cluster)
 }
 
 // walkExtensionCandidates drives processMachineExtensions in priority order

@@ -74,7 +74,7 @@ func (t *TalosManager) ReconcileTalosCluster(ctx context.Context, cluster *vitis
 	err := initializeTalosCluster(ctx, t, cluster)
 	// Always update status based on current persisted flags/conditions
 	if sErr := t.statusManager.UpdateKubernetesClusterStatus(ctx, cluster); sErr != nil {
-		vlog.Error("failed to update Kubernetes cluster status", sErr)
+		vlog.Error("failed to update Kubernetes cluster status "+clusterLogTag(cluster), sErr)
 	}
 	return err
 }
@@ -88,7 +88,7 @@ func (t *TalosManager) ensureTalosConfiguration(ctx context.Context, cluster *vi
 	}
 
 	if fromSecret {
-		vlog.Info("Loaded Talos artifacts from Secret: cluster=" + cluster.Name)
+		vlog.Info("Loaded Talos artifacts from Secret: " + clusterLogTag(cluster))
 		return clientConfig, nil
 	}
 
@@ -114,7 +114,7 @@ func (t *TalosManager) ensureTalosConfiguration(ctx context.Context, cluster *vi
 		return nil, fmt.Errorf("failed to serialize secrets bundle: %w", err)
 	}
 
-	vlog.Info(fmt.Sprintf("Generated Talos config bundle: cluster=%s hasConfig=%t", cluster.Name, configBundle.ClientConfig != nil))
+	vlog.Info(fmt.Sprintf("Generated Talos config bundle: %s hasConfig=%t", clusterLogTag(cluster), configBundle.ClientConfig != nil))
 
 	// Update status phase: config generated
 	_ = t.statusManager.SetPhase(ctx, cluster, "ConfigGenerated")
@@ -229,7 +229,7 @@ func (t *TalosManager) buildVIPPatchIfNeeded(ctx context.Context, cluster *vitis
 
 	vipIP := t.endpointService.GetAllocatedVIPIP(ctx, cluster)
 	if vipIP == "" {
-		vlog.Warn(fmt.Sprintf("talosvip mode but no VIP IP allocated yet for cluster %s", cluster.Name))
+		vlog.Warn(fmt.Sprintf("talosvip mode but no VIP IP allocated yet for %s", clusterLogTag(cluster)))
 		return ""
 	}
 
@@ -240,7 +240,7 @@ func (t *TalosManager) buildVIPPatchIfNeeded(ctx context.Context, cluster *vitis
 
 	adapter := talosversion.GetCurrentTalosVersionAdapter()
 	patch := adapter.BuildVIPPatch(vipIP, link)
-	vlog.Info(fmt.Sprintf("Built VIP patch for cluster %s: vipIP=%s link=%s (adapter=%s)", cluster.Name, vipIP, link, adapter.Version()))
+	vlog.Info(fmt.Sprintf("Built VIP patch for %s: vipIP=%s link=%s (adapter=%s)", clusterLogTag(cluster), vipIP, link, adapter.Version()))
 	return patch
 }
 
@@ -415,8 +415,8 @@ func (t *TalosManager) applySingleNodeConfig(
 			talosconfigservice.BuildStaticNetworkPatch(staticCfg),
 			talosconfigservice.BuildStaticIPKernelArgPatch(staticCfg),
 		}
-		vlog.Info(fmt.Sprintf("Static IP config for node %s: ip=%s gw=%s iface=%s",
-			m.Name, staticCfg.IP, staticCfg.Gateway, staticCfg.Interface))
+		vlog.Info(fmt.Sprintf("Static IP config for node %s %s: ip=%s gw=%s iface=%s",
+			m.Name, clusterLogTag(cluster), staticCfg.IP, staticCfg.Gateway, staticCfg.Interface))
 	}
 
 	nodeConfig, err := t.configService.PrepareNodeConfig(cluster, roleYAML, installDisk, m, tenantOverrides, macAddress, installImage, staticIPPatches...)
@@ -458,7 +458,7 @@ func (t *TalosManager) persistInstallImageIfMissing(ctx context.Context, cluster
 		return
 	}
 	if err := t.stateService.SetInstallImage(ctx, cluster, image); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to persist install image for cluster %s: %v", cluster.Name, err))
+		vlog.Warn(fmt.Sprintf("Failed to persist install image for %s: %v", clusterLogTag(cluster), err))
 	}
 }
 
@@ -484,7 +484,7 @@ func (t *TalosManager) resolveClusterInstallImage(
 
 	if clientConfig != nil {
 		if image := t.fetchInstallImageFromCluster(ctx, cluster, clientConfig); image != "" {
-			vlog.Info(fmt.Sprintf("Resolved install image from running cluster %s: %s", cluster.Name, image))
+			vlog.Info(fmt.Sprintf("Resolved install image from running cluster %s: %s", clusterLogTag(cluster), image))
 			return image
 		}
 	}
@@ -540,7 +540,7 @@ func (t *TalosManager) applyConfigToMachineGroup(
 	grpCfg *nodeGroupConfig,
 ) error {
 	if len(machines) > 0 {
-		vlog.Info(fmt.Sprintf("Stage %d: Applying config to %ss: count=%d cluster=%s", grpCfg.stageNum, grpCfg.nodeType, len(machines), cluster.Name))
+		vlog.Info(fmt.Sprintf("Stage %d: Applying config to %ss: count=%d %s", grpCfg.stageNum, grpCfg.nodeType, len(machines), clusterLogTag(cluster)))
 		_ = t.statusManager.SetPhase(ctx, cluster, grpCfg.phase)
 		_ = t.statusManager.SetCondition(ctx, cluster, grpCfg.conditionName, "False", "Applying", fmt.Sprintf("Applying config to %ss", grpCfg.nodeType))
 
@@ -551,13 +551,13 @@ func (t *TalosManager) applyConfigToMachineGroup(
 				}
 			}
 		}
-		vlog.Info(fmt.Sprintf("Stage %d complete: Config applied to all %ss", grpCfg.stageNum, grpCfg.nodeType))
+		vlog.Info(fmt.Sprintf("Stage %d complete: Config applied to all %ss %s", grpCfg.stageNum, grpCfg.nodeType, clusterLogTag(cluster)))
 	} else {
-		vlog.Info(fmt.Sprintf("Stage %d: No %ss to configure", grpCfg.stageNum, grpCfg.nodeType))
+		vlog.Info(fmt.Sprintf("Stage %d: No %ss to configure %s", grpCfg.stageNum, grpCfg.nodeType, clusterLogTag(cluster)))
 	}
 
 	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{grpCfg.flagName: true}); err != nil {
-		vlog.Error(fmt.Sprintf("Failed to set %s flag in secret", grpCfg.flagName), err)
+		vlog.Error(fmt.Sprintf("Failed to set %s flag in secret %s", grpCfg.flagName, clusterLogTag(cluster)), err)
 		return fmt.Errorf("failed to persist %s flag: %w", grpCfg.flagName, err)
 	}
 	_ = t.statusManager.SetCondition(ctx, cluster, grpCfg.conditionName, "True", "Applied", fmt.Sprintf("Talos config applied to all %ss", grpCfg.nodeType))
@@ -577,21 +577,21 @@ func (t *TalosManager) applyConfigToSingleMachine(
 	grpCfg *nodeGroupConfig,
 ) error {
 	if t.isMachineConfigured(ctx, cluster, m) {
-		vlog.Info(fmt.Sprintf("%s already configured, skipping: node=%s", capitalizeFirst(grpCfg.nodeType), m.Name))
+		vlog.Info(fmt.Sprintf("%s already configured, skipping: node=%s %s", capitalizeFirst(grpCfg.nodeType), m.Name, clusterLogTag(cluster)))
 		t.markMachineOSInstalled(ctx, m)
 		return nil
 	}
 
 	nodeIP := getFirstIPv4(m)
 	if nodeIP == "" {
-		vlog.Warn(fmt.Sprintf("No IPv4 address found for %s %s, skipping", grpCfg.nodeType, m.Name))
+		vlog.Warn(fmt.Sprintf("No IPv4 address found for %s %s %s, skipping", grpCfg.nodeType, m.Name, clusterLogTag(cluster)))
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Applying config to %s: node=%s ip=%s", grpCfg.nodeType, m.Name, nodeIP))
+	vlog.Info(fmt.Sprintf("Applying config to %s: node=%s ip=%s %s", grpCfg.nodeType, m.Name, nodeIP, clusterLogTag(cluster)))
 	if err := t.applyPerNodeConfiguration(ctx, cluster, clientConfig, []*vitistackv1alpha1.Machine{m}, insecure, tenantOverrides, endpointIP); err != nil {
 		_ = t.statusManager.SetCondition(ctx, cluster, grpCfg.conditionName, "False", "ApplyError", fmt.Sprintf("Failed on node %s: %s", m.Name, err.Error()))
-		vlog.Error(fmt.Sprintf("Failed to apply config to %s %s", grpCfg.nodeType, m.Name), err)
+		vlog.Error(fmt.Sprintf("Failed to apply config to %s %s %s", grpCfg.nodeType, m.Name, clusterLogTag(cluster)), err)
 		return fmt.Errorf("failed to apply config to %s %s: %w", grpCfg.nodeType, m.Name, err)
 	}
 
@@ -609,14 +609,14 @@ func (t *TalosManager) handlePostConfigSteps(
 	grpCfg *nodeGroupConfig,
 ) {
 	if grpCfg.waitForReboot && insecure {
-		vlog.Info(fmt.Sprintf("Waiting for %s to reboot after config apply: node=%s ip=%s", grpCfg.nodeType, m.Name, nodeIP))
+		vlog.Info(fmt.Sprintf("Waiting for %s to reboot after config apply: node=%s ip=%s %s", grpCfg.nodeType, m.Name, nodeIP, clusterLogTag(cluster)))
 		if err := t.clientService.WaitForNodeRebootAfterApply(nodeIP, 10*secondDuration, 5*minuteDuration, 10*secondDuration); err != nil {
-			vlog.Warn(fmt.Sprintf("Warning: timeout waiting for %s %s to reboot, continuing anyway: %v", grpCfg.nodeType, m.Name, err))
+			vlog.Warn(fmt.Sprintf("Warning: timeout waiting for %s %s to reboot %s, continuing anyway: %v", grpCfg.nodeType, m.Name, clusterLogTag(cluster), err))
 		}
 	}
 
 	if err := t.addConfiguredMachine(ctx, cluster, m); err != nil {
-		vlog.Error(fmt.Sprintf("Failed to add %s %s to configured nodes", grpCfg.nodeType, m.Name), err)
+		vlog.Error(fmt.Sprintf("Failed to add %s %s to configured nodes %s", grpCfg.nodeType, m.Name, clusterLogTag(cluster)), err)
 	}
 
 	t.markMachineOSInstalled(ctx, m)
@@ -636,7 +636,7 @@ func (t *TalosManager) handlePostConfigSteps(
 func (t *TalosManager) backfillOSInstalledAnnotations(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) {
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to list machines for os-installed backfill on cluster %s: %v", cluster.Name, err))
+		vlog.Warn(fmt.Sprintf("Failed to list machines for os-installed backfill on %s: %v", clusterLogTag(cluster), err))
 		return
 	}
 	for _, m := range machines {
@@ -689,19 +689,19 @@ func (t *TalosManager) configureNewControlPlanes(ctx context.Context, cluster *v
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Configuring %d new control planes for cluster %s", len(nodes), cluster.Name))
+	vlog.Info(fmt.Sprintf("Configuring %d new control planes for %s", len(nodes), clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Configuring %d new control plane(s)", len(nodes)))
 	_ = t.statusManager.SetCondition(ctx, cluster, "NewControlPlanesConfiguring", "True", "Configuring", fmt.Sprintf("Configuring %d new control planes", len(nodes)))
 
 	for _, node := range nodes {
 		if err := t.configureNewNode(ctx, cluster, configCtx, node, "control plane"); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to configure new control plane %s", node.Name), err)
+			vlog.Warn(fmt.Sprintf("Failed to configure new control plane %s %s: %v", node.Name, clusterLogTag(cluster), err))
 			continue
 		}
 	}
 
 	if err := t.updateVIPPoolMembers(ctx, cluster); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to update VIP pool members: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to update VIP pool members %s: %v", clusterLogTag(cluster), err))
 	}
 
 	_ = t.statusManager.SetCondition(ctx, cluster, "NewControlPlanesConfiguring", "False", "Configured", "New control planes configured")
@@ -714,13 +714,13 @@ func (t *TalosManager) configureNewWorkers(ctx context.Context, cluster *vitista
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Configuring %d new workers for cluster %s", len(nodes), cluster.Name))
+	vlog.Info(fmt.Sprintf("Configuring %d new workers for %s", len(nodes), clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Configuring %d new worker(s)", len(nodes)))
 	_ = t.statusManager.SetCondition(ctx, cluster, "NewWorkersConfiguring", "True", "Configuring", fmt.Sprintf("Configuring %d new workers", len(nodes)))
 
 	for _, node := range nodes {
 		if err := t.configureNewNode(ctx, cluster, configCtx, node, "worker"); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to configure new worker %s", node.Name), err)
+			vlog.Warn(fmt.Sprintf("Failed to configure new worker %s %s: %v", node.Name, clusterLogTag(cluster), err))
 			continue
 		}
 	}
@@ -733,30 +733,30 @@ func (t *TalosManager) configureNewWorkers(ctx context.Context, cluster *vitista
 func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, configCtx *newNodeConfigContext, node *vitistackv1alpha1.Machine, nodeType string) error {
 	ip := getFirstIPv4(node)
 	if ip == "" {
-		vlog.Warn(fmt.Sprintf("New %s %s missing IPv4 address, skipping", nodeType, node.Name))
+		vlog.Warn(fmt.Sprintf("New %s %s %s missing IPv4 address, skipping", nodeType, node.Name, clusterLogTag(cluster)))
 		return nil
 	}
 
 	// Wait for Talos API to be reachable before attempting to apply config
 	// New nodes take time to boot and have the maintenance API available
 	if !t.clientService.IsTalosAPIReachable(ip) {
-		vlog.Info(fmt.Sprintf("Talos API not yet reachable on new %s, will retry: node=%s ip=%s", nodeType, node.Name, ip))
+		vlog.Info(fmt.Sprintf("Talos API not yet reachable on new %s, will retry: node=%s ip=%s %s", nodeType, node.Name, ip, clusterLogTag(cluster)))
 		return fmt.Errorf("talos API not yet reachable on %s, node still booting", ip)
 	}
 
-	vlog.Info(fmt.Sprintf("Applying config to new %s: node=%s ip=%s", nodeType, node.Name, ip))
+	vlog.Info(fmt.Sprintf("Applying config to new %s: node=%s ip=%s %s", nodeType, node.Name, ip, clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Applying config to %s %s", nodeType, node.Name))
 	// Use insecure mode for new nodes - they don't have the cluster CA yet
 	if err := t.applyPerNodeConfiguration(ctx, cluster, configCtx.clientConfig, []*vitistackv1alpha1.Machine{node}, true, configCtx.tenantOverrides, configCtx.endpointIP); err != nil {
 		return fmt.Errorf("failed to apply config: %w", err)
 	}
 	if err := t.addConfiguredMachine(ctx, cluster, node); err != nil {
-		vlog.Error(fmt.Sprintf("Failed to add new %s %s to configured nodes", nodeType, node.Name), err)
+		vlog.Error(fmt.Sprintf("Failed to add new %s %s to configured nodes %s", nodeType, node.Name, clusterLogTag(cluster)), err)
 	}
 
 	t.markMachineOSInstalled(ctx, node)
 
-	vlog.Info(fmt.Sprintf("New %s configured successfully: node=%s", nodeType, node.Name))
+	vlog.Info(fmt.Sprintf("New %s configured successfully: node=%s %s", nodeType, node.Name, clusterLogTag(cluster)))
 	return nil
 }
 

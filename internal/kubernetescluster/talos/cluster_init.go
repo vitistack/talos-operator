@@ -192,7 +192,7 @@ func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster
 	}
 
 	if len(machines) == 0 {
-		vlog.Info("No machines found for cluster, skipping Talos reconciliation: cluster=" + cluster.Name)
+		vlog.Info("No machines found for cluster, skipping Talos reconciliation: " + clusterLogTag(cluster))
 		_ = t.statusManager.SetPhase(ctx, cluster, "Pending")
 		_ = t.statusManager.SetCondition(ctx, cluster, "MachinesDiscovered", "False", "NoMachines", "No machines found yet for this cluster")
 		return nil, nil
@@ -200,7 +200,7 @@ func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster
 
 	// Wait only for the first control plane to be ready - don't block on all machines
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneReady", "False", "Waiting", "Waiting for first control plane to be running with IP address")
-	firstControlPlane, err := t.machineService.WaitForFirstControlPlaneReady(ctx, machines)
+	firstControlPlane, err := t.machineService.WaitForFirstControlPlaneReady(ctx, cluster, machines)
 	if err != nil {
 		_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneReady", "False", "Error", err.Error())
 		return nil, fmt.Errorf("failed waiting for first control plane to be ready: %w", err)
@@ -214,7 +214,7 @@ func (t *TalosManager) prepareClusterInitialization(ctx context.Context, cluster
 
 	// Get all currently ready machines (non-blocking)
 	readyMachines := t.machineService.GetReadyMachines(ctx, machines)
-	vlog.Info(fmt.Sprintf("Ready machines: %d/%d", len(readyMachines), len(machines)))
+	vlog.Info(fmt.Sprintf("Ready machines %s: %d/%d", clusterLogTag(cluster), len(readyMachines), len(machines)))
 
 	// Collect control planes and workers from ready machines only
 	controlPlanes := t.machineService.FilterMachinesByRole(readyMachines, controlPlaneRole)
@@ -310,12 +310,12 @@ func (t *TalosManager) stageApplyFirstControlPlane(
 ) error {
 	flags, _ := t.getTalosSecretFlags(ctx, cluster)
 	if flags.FirstControlPlaneApplied {
-		vlog.Info("Stage 1 already complete: First control plane config already applied, skipping: cluster=" + cluster.Name)
+		vlog.Info("Stage 1 already complete: First control plane config already applied, skipping: " + clusterLogTag(cluster))
 		t.markMachineOSInstalled(ctx, firstControlPlane)
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Stage 1: Applying config to first control plane: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+	vlog.Info(fmt.Sprintf("Stage 1: Applying config to first control plane: node=%s %s", firstControlPlane.Name, clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Applying config to first control plane %s", firstControlPlane.Name))
 	_ = t.statusManager.SetPhase(ctx, cluster, "ConfiguringFirstControlPlane")
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "False", "Applying", "Applying config to first control plane")
@@ -326,16 +326,16 @@ func (t *TalosManager) stageApplyFirstControlPlane(
 	}
 
 	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"first_controlplane_applied": true}); err != nil {
-		vlog.Error("Failed to set first_controlplane_applied flag in secret", err)
+		vlog.Error("Failed to set first_controlplane_applied flag in secret "+clusterLogTag(cluster), err)
 		return fmt.Errorf("failed to persist first_controlplane_applied flag: %w", err)
 	}
 	if err := t.addConfiguredMachine(ctx, cluster, firstControlPlane); err != nil {
-		vlog.Error("Failed to add first control plane to configured nodes", err)
+		vlog.Error("Failed to add first control plane to configured nodes "+clusterLogTag(cluster), err)
 	}
 
 	t.markMachineOSInstalled(ctx, firstControlPlane)
 
-	vlog.Info("Stage 1 complete: First control plane config applied: node=" + firstControlPlane.Name)
+	vlog.Info(fmt.Sprintf("Stage 1 complete: First control plane config applied: node=%s %s", firstControlPlane.Name, clusterLogTag(cluster)))
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneConfigApplied", "True", "Applied", "Config applied to first control plane")
 	return nil
 }
@@ -348,11 +348,11 @@ func (t *TalosManager) stageWaitFirstControlPlaneAPI(
 ) error {
 	flags, _ := t.getTalosSecretFlags(ctx, cluster)
 	if flags.FirstControlPlaneReady {
-		vlog.Info("Stage 2a already complete: First control plane already ready, skipping: cluster=" + cluster.Name)
+		vlog.Info("Stage 2a already complete: First control plane already ready, skipping: " + clusterLogTag(cluster))
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Stage 2a: Checking if first control plane Talos API is ready: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+	vlog.Info(fmt.Sprintf("Stage 2a: Checking if first control plane Talos API is ready: node=%s %s", firstControlPlane.Name, clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Waiting for Talos API on %s", firstControlPlane.Name))
 	_ = t.statusManager.SetPhase(ctx, cluster, "WaitingForFirstControlPlaneAPI")
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneTalosAPIReady", "False", "Waiting", "Waiting for Talos API on first control plane")
@@ -362,11 +362,11 @@ func (t *TalosManager) stageWaitFirstControlPlaneAPI(
 	}
 
 	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"first_controlplane_ready": true}); err != nil {
-		vlog.Error("Failed to set first_controlplane_ready flag in secret", err)
+		vlog.Error("Failed to set first_controlplane_ready flag in secret "+clusterLogTag(cluster), err)
 		return fmt.Errorf("failed to persist first_controlplane_ready flag: %w", err)
 	}
 
-	vlog.Info("Stage 2a complete: First control plane Talos API is ready: node=" + firstControlPlane.Name)
+	vlog.Info(fmt.Sprintf("Stage 2a complete: First control plane Talos API is ready: node=%s %s", firstControlPlane.Name, clusterLogTag(cluster)))
 	_ = t.statusManager.SetCondition(ctx, cluster, "FirstControlPlaneTalosAPIReady", "True", "Ready", "First control plane Talos API is ready")
 	return nil
 }
@@ -380,11 +380,11 @@ func (t *TalosManager) stageBootstrapCluster(
 ) error {
 	flags, _ := t.getTalosSecretFlags(ctx, cluster)
 	if flags.Bootstrapped {
-		vlog.Info("Stage 2b already complete: Cluster already bootstrapped, skipping: cluster=" + cluster.Name)
+		vlog.Info("Stage 2b already complete: Cluster already bootstrapped, skipping: " + clusterLogTag(cluster))
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Stage 2b: Bootstrapping cluster via first control plane: node=%s cluster=%s", firstControlPlane.Name, cluster.Name))
+	vlog.Info(fmt.Sprintf("Stage 2b: Bootstrapping cluster via first control plane: node=%s %s", firstControlPlane.Name, clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Bootstrapping cluster via %s", firstControlPlane.Name))
 	_ = t.statusManager.SetPhase(ctx, cluster, "Bootstrapping")
 	_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "False", "Bootstrapping", "Bootstrapping Talos cluster")
@@ -408,7 +408,7 @@ func (t *TalosManager) stageBootstrapCluster(
 		// previous cluster lifecycle. Reset state flags so the next reconcile re-applies
 		// config via insecure mode, which will install the correct CA on the node.
 		if talosclientservice.IsCACertMismatchError(err) {
-			vlog.Info(fmt.Sprintf("Stage 2b: CA certificate mismatch detected, node has stale CA — resetting to Stage 1: node=%s cluster=%s error=%s", firstControlPlane.Name, cluster.Name, err.Error()))
+			vlog.Info(fmt.Sprintf("Stage 2b: CA certificate mismatch detected, node has stale CA — resetting to Stage 1: node=%s %s error=%s", firstControlPlane.Name, clusterLogTag(cluster), err.Error()))
 			_ = t.setTalosSecretFlags(ctx, cluster, map[string]bool{
 				"first_controlplane_applied": false,
 				"first_controlplane_ready":   false,
@@ -426,11 +426,11 @@ func (t *TalosManager) stageBootstrapCluster(
 	}
 
 	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"bootstrapped": true}); err != nil {
-		vlog.Error("Failed to set bootstrapped flag in secret", err)
+		vlog.Error("Failed to set bootstrapped flag in secret "+clusterLogTag(cluster), err)
 		return fmt.Errorf("failed to persist bootstrapped flag: %w", err)
 	}
 
-	vlog.Info("Stage 2b complete: Cluster bootstrapped via first control plane: node=" + firstControlPlane.Name)
+	vlog.Info(fmt.Sprintf("Stage 2b complete: Cluster bootstrapped via first control plane: node=%s %s", firstControlPlane.Name, clusterLogTag(cluster)))
 	_ = t.statusManager.SetPhase(ctx, cluster, "Bootstrapped")
 	_ = t.statusManager.SetCondition(ctx, cluster, "Bootstrapped", "True", "Done", "Talos cluster bootstrapped")
 	return nil
@@ -447,7 +447,7 @@ func (t *TalosManager) stageRetrieveKubeconfig(
 	_, hasKubeconfig, _ := t.getTalosSecretState(ctx, cluster)
 
 	if flags.ClusterAccess {
-		vlog.Info("Stage 2c already complete: Kubeconfig already available, skipping: cluster=" + cluster.Name)
+		vlog.Info("Stage 2c already complete: Kubeconfig already available, skipping: " + clusterLogTag(cluster))
 		return nil
 	}
 
@@ -455,7 +455,7 @@ func (t *TalosManager) stageRetrieveKubeconfig(
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Stage 2c: Retrieving kubeconfig after bootstrap: cluster=%s", cluster.Name))
+	vlog.Info("Stage 2c: Retrieving kubeconfig after bootstrap: " + clusterLogTag(cluster))
 	_ = t.statusManager.SetMessage(ctx, cluster, "Retrieving kubeconfig")
 	_ = t.statusManager.SetPhase(ctx, cluster, "RetrievingKubeconfig")
 	_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "False", "Retrieving", "Retrieving kubeconfig from bootstrapped cluster")
@@ -471,15 +471,15 @@ func (t *TalosManager) stageRetrieveKubeconfig(
 		return fmt.Errorf("failed to update Talos config secret with kubeconfig: %w", err)
 	}
 	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"cluster_access": true}); err != nil {
-		vlog.Error("Failed to set cluster_access flag in secret", err)
+		vlog.Error("Failed to set cluster_access flag in secret "+clusterLogTag(cluster), err)
 		return fmt.Errorf("failed to persist cluster_access flag: %w", err)
 	}
 
-	vlog.Info("Stage 2c complete: Kubeconfig retrieved and stored: cluster=" + cluster.Name)
+	vlog.Info("Stage 2c complete: Kubeconfig retrieved and stored: " + clusterLogTag(cluster))
 	_ = t.statusManager.SetCondition(ctx, cluster, "KubeconfigAvailable", "True", "Persisted", "Kubeconfig stored in Secret")
 
 	if !hasKubeconfig {
-		vlog.Info("Kubeconfig stored in Secret: secret=" + secretservice.GetSecretName(cluster))
+		vlog.Info(fmt.Sprintf("Kubeconfig stored in Secret: secret=%s %s", secretservice.GetSecretName(cluster), clusterLogTag(cluster)))
 	}
 	return nil
 }
@@ -494,7 +494,7 @@ func (t *TalosManager) stageApplyRemainingControlPlanes(
 ) error {
 	flags, _ := t.getTalosSecretFlags(ctx, cluster)
 	if flags.ControlPlaneApplied {
-		vlog.Info("Stage 3 already complete: All control plane configs already applied, skipping: cluster=" + cluster.Name)
+		vlog.Info("Stage 3 already complete: All control plane configs already applied, skipping: " + clusterLogTag(cluster))
 		return nil
 	}
 
@@ -530,7 +530,7 @@ func (t *TalosManager) stageWaitAllControlPlanesReady(
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Checking if all control plane Talos APIs are ready: count=%d cluster=%s", len(controlPlanes), cluster.Name))
+	vlog.Info(fmt.Sprintf("Checking if all control plane Talos APIs are ready: count=%d %s", len(controlPlanes), clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Waiting for Talos API on %d control plane(s)", len(controlPlanes)))
 	_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "False", "Waiting", "Waiting for Talos API on all control planes")
 
@@ -540,7 +540,7 @@ func (t *TalosManager) stageWaitAllControlPlanesReady(
 
 	_ = t.statusManager.SetCondition(ctx, cluster, "TalosAPIReady", "True", "Ready", "Talos API reachable on all control planes")
 	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"talos_api_ready": true}); err != nil {
-		vlog.Error("Failed to set talos_api_ready flag in secret", err)
+		vlog.Error("Failed to set talos_api_ready flag in secret "+clusterLogTag(cluster), err)
 	}
 	return nil
 }
@@ -556,7 +556,7 @@ func (t *TalosManager) stageWaitKubernetesAPIReady(
 		return nil
 	}
 
-	vlog.Info(fmt.Sprintf("Checking if Kubernetes API server is ready: endpoint=%s cluster=%s", endpointIP, cluster.Name))
+	vlog.Info(fmt.Sprintf("Checking if Kubernetes API server is ready: endpoint=%s %s", endpointIP, clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, "Waiting for Kubernetes API server")
 	_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "False", "Waiting", "Waiting for Kubernetes API server to be ready")
 
@@ -566,7 +566,7 @@ func (t *TalosManager) stageWaitKubernetesAPIReady(
 
 	_ = t.statusManager.SetCondition(ctx, cluster, "KubernetesAPIReady", "True", "Ready", "Kubernetes API server is ready")
 	if err := t.setTalosSecretFlags(ctx, cluster, map[string]bool{"kubernetes_api_ready": true}); err != nil {
-		vlog.Error("Failed to set kubernetes_api_ready flag in secret", err)
+		vlog.Error("Failed to set kubernetes_api_ready flag in secret "+clusterLogTag(cluster), err)
 	}
 	return nil
 }
@@ -581,7 +581,7 @@ func (t *TalosManager) stageApplyWorkers(
 ) error {
 	flags, _ := t.getTalosSecretFlags(ctx, cluster)
 	if flags.WorkerApplied {
-		vlog.Info("Stage 4 already complete: Worker configs already applied, skipping: cluster=" + cluster.Name)
+		vlog.Info("Stage 4 already complete: Worker configs already applied, skipping: " + clusterLogTag(cluster))
 		return nil
 	}
 
@@ -612,18 +612,18 @@ func (t *TalosManager) stageFinalizeCluster(
 	allMachines := make([]*vitistackv1alpha1.Machine, 0, len(prep.controlPlanes)+len(prep.workers))
 	allMachines = append(allMachines, prep.controlPlanes...)
 	allMachines = append(allMachines, prep.workers...)
-	vlog.Info(fmt.Sprintf("Stage 5: All %d nodes configured, marking cluster as ready: cluster=%s", len(allMachines), cluster.Name))
+	vlog.Info(fmt.Sprintf("Stage 5: All %d nodes configured, marking cluster as ready: %s", len(allMachines), clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, "Finalizing cluster")
 
 	if err := t.setSecretTimestamp(ctx, cluster, "ready_at"); err != nil {
-		vlog.Error("Failed to set ready_at timestamp in secret", err)
+		vlog.Error("Failed to set ready_at timestamp in secret "+clusterLogTag(cluster), err)
 	} else {
-		vlog.Info("Secret timestamp updated: ready_at, cluster=" + cluster.Name)
+		vlog.Info("Secret timestamp updated: ready_at, " + clusterLogTag(cluster))
 	}
 
 	_ = t.statusManager.SetPhase(ctx, cluster, "Ready")
 	_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "True", "Ready", fmt.Sprintf("All %d nodes are configured and ready", len(allMachines)))
-	vlog.Info("Stage 5 complete: Cluster is ready: cluster=" + cluster.Name)
+	vlog.Info("Stage 5 complete: Cluster is ready: " + clusterLogTag(cluster))
 
 	return nil
 }

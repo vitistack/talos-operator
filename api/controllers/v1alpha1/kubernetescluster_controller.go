@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
 	"github.com/vitistack/talos-operator/internal/helpers/nodehelper"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
@@ -77,13 +78,13 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	// Skip reconciliation if do-not-reconcile annotation is set
 	if kubernetesCluster.Annotations["upgrade.vitistack.io/do-not-reconcile"] != "" {
-		vlog.Info("Skipping KubernetesCluster: do-not-reconcile annotation set: cluster=" + kubernetesCluster.GetName())
+		vlog.Info("Skipping KubernetesCluster: do-not-reconcile annotation set: " + clusterlog.Tag(kubernetesCluster))
 		return ctrl.Result{}, nil
 	}
 
 	// Only reconcile clusters with spec.cluster.provider == "talos"
 	if !r.isTalosProvider(kubernetesCluster) {
-		vlog.Info("Skipping KubernetesCluster: unsupported provider (need 'talos'): cluster=" + kubernetesCluster.GetName())
+		vlog.Info("Skipping KubernetesCluster: unsupported provider (need 'talos'): " + clusterlog.Tag(kubernetesCluster))
 		return ctrl.Result{}, nil
 	}
 
@@ -114,7 +115,7 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 	// the correct installer image from the cluster's pinned schematic.
 	if handled, err := r.UpgradeController.HandleTalosResetUpgradeState(ctx, kubernetesCluster); handled {
 		if err != nil {
-			vlog.Error("Failed to fully reset Talos upgrade state", err)
+			vlog.Error("Failed to fully reset Talos upgrade state "+clusterlog.Tag(kubernetesCluster), err)
 			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 		}
 		// Requeue immediately so the next pass sees the cleared state.
@@ -138,7 +139,7 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 
 	// Reconcile machines based on cluster spec (creates/updates desired machines)
 	if err := r.MachineManager.ReconcileMachines(ctx, kubernetesCluster); err != nil {
-		vlog.Error("Failed to reconcile machines", err)
+		vlog.Error("Failed to reconcile machines "+clusterlog.Tag(kubernetesCluster), err)
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
@@ -146,10 +147,10 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, kubernetesCluster); err != nil {
 		// Check if this is a RequeueError (non-blocking wait signal)
 		if requeueErr, ok := talosclientservice.IsRequeueError(err); ok {
-			vlog.Info("Talos cluster reconcile needs requeue: " + requeueErr.Reason)
+			vlog.Info(fmt.Sprintf("Talos cluster reconcile needs requeue %s: %s", clusterlog.Tag(kubernetesCluster), requeueErr.Reason))
 			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 		}
-		vlog.Warn("Failed to reconcile Talos cluster ", err)
+		vlog.Warnf("Failed to reconcile Talos cluster %s: %v", clusterlog.Tag(kubernetesCluster), err)
 		// Requeue for a later retry without surfacing an error
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
@@ -162,7 +163,7 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 	// Update KubernetesCluster status (skip if being deleted)
 	if kubernetesCluster.GetDeletionTimestamp() == nil {
 		if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, kubernetesCluster); err != nil {
-			vlog.Error("Failed to update KubernetesCluster status", err)
+			vlog.Error("Failed to update KubernetesCluster status "+clusterlog.Tag(kubernetesCluster), err)
 		}
 	}
 
@@ -193,21 +194,21 @@ func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluste
 	// Get Talos client config
 	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to get Talos client config for upgrade: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to get Talos client config for upgrade %s: %v", clusterlog.Tag(cluster), err))
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, false
 	}
 
 	// Get machines for this cluster
 	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to list machines for upgrade: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to list machines for upgrade %s: %v", clusterlog.Tag(cluster), err))
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, false
 	}
 
 	// Use the new upgrade controller
 	requeueAfter, handled, err := r.UpgradeController.HandleUpgrade(ctx, cluster, clientConfig, machines)
 	if err != nil {
-		vlog.Error(fmt.Sprintf("Upgrade error: %v", err), err)
+		vlog.Errorf("Upgrade error %s: %v", clusterlog.Tag(cluster), err)
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 	}
 
@@ -223,7 +224,7 @@ func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluste
 // must fix the spec). Returns false when validation passed.
 func (r *KubernetesClusterReconciler) validateClusterSpec(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) bool {
 	if err := r.ValidatorService.ValidateKubernetesCluster(cluster); err != nil {
-		vlog.Error("KubernetesCluster validation failed", err)
+		vlog.Error("KubernetesCluster validation failed "+clusterlog.Tag(cluster), err)
 		_ = r.StatusManager.SetPhase(ctx, cluster, status.PhaseValidationError)
 		_ = r.StatusManager.SetCondition(ctx, cluster, "Valid", "False", "ValidationFailed", err.Error())
 		return true
@@ -240,7 +241,7 @@ func (r *KubernetesClusterReconciler) validateClusterSpec(ctx context.Context, c
 func (r *KubernetesClusterReconciler) ensureFinalizerOrRequeue(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, bool, error) {
 	requeue, err := r.ensureFinalizer(ctx, cluster)
 	if err != nil {
-		vlog.Error("Failed to add finalizer", err)
+		vlog.Error("Failed to add finalizer "+clusterlog.Tag(cluster), err)
 		return ctrl.Result{}, true, err
 	}
 	if requeue {
@@ -258,10 +259,10 @@ func (r *KubernetesClusterReconciler) gateOnNetworkNamespaceReady(ctx context.Co
 		return ctrl.Result{}, false
 	}
 	if requeueErr, ok := talosclientservice.IsRequeueError(err); ok {
-		vlog.Info("Holding off Machine reconciliation: " + requeueErr.Reason)
+		vlog.Info(fmt.Sprintf("Holding off Machine reconciliation %s: %s", clusterlog.Tag(cluster), requeueErr.Reason))
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 	}
-	vlog.Error("NetworkNamespace prerequisite failed", err)
+	vlog.Error("NetworkNamespace prerequisite failed "+clusterlog.Tag(cluster), err)
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 }
 
@@ -270,22 +271,22 @@ func (r *KubernetesClusterReconciler) gateOnNetworkNamespaceReady(ctx context.Co
 func (r *KubernetesClusterReconciler) handleScaleDown(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, bool) {
 	excessCPs, excessWorkers, err := r.MachineManager.GetExcessMachines(ctx, cluster)
 	if err != nil {
-		vlog.Error("Failed to get excess machines", err)
+		vlog.Error("Failed to get excess machines "+clusterlog.Tag(cluster), err)
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 	}
 
 	// Handle control plane scale-down (one at a time for safety)
 	if len(excessCPs) > 0 {
 		cpToRemove := excessCPs[len(excessCPs)-1] // Remove highest numbered first
-		vlog.Info(fmt.Sprintf("Scale-down: removing control plane %s (1 of %d excess)", cpToRemove.Name, len(excessCPs)))
+		vlog.Info(fmt.Sprintf("Scale-down: removing control plane %s %s (1 of %d excess)", cpToRemove.Name, clusterlog.Tag(cluster), len(excessCPs)))
 
 		if _, err := r.TalosManager.DeleteControlPlaneNode(ctx, cluster, cpToRemove.Name); err != nil {
-			vlog.Error(fmt.Sprintf("Failed to delete control plane node %s from Talos cluster", cpToRemove.Name), err)
+			vlog.Error(fmt.Sprintf("Failed to delete control plane node %s from Talos cluster %s", cpToRemove.Name, clusterlog.Tag(cluster)), err)
 			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 		}
 
 		if err := r.MachineManager.DeleteMachine(ctx, cpToRemove); err != nil {
-			vlog.Error(fmt.Sprintf("Failed to delete machine CRD %s", cpToRemove.Name), err)
+			vlog.Error(fmt.Sprintf("Failed to delete machine CRD %s %s", cpToRemove.Name, clusterlog.Tag(cluster)), err)
 			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 		}
 
@@ -295,15 +296,15 @@ func (r *KubernetesClusterReconciler) handleScaleDown(ctx context.Context, clust
 	// Handle worker scale-down (one at a time for safety)
 	if len(excessWorkers) > 0 {
 		workerToRemove := excessWorkers[len(excessWorkers)-1] // Remove highest numbered first
-		vlog.Info(fmt.Sprintf("Scale-down: removing worker %s (1 of %d excess)", workerToRemove.Name, len(excessWorkers)))
+		vlog.Info(fmt.Sprintf("Scale-down: removing worker %s %s (1 of %d excess)", workerToRemove.Name, clusterlog.Tag(cluster), len(excessWorkers)))
 
 		if _, err := r.TalosManager.DeleteWorkerNode(ctx, cluster, workerToRemove.Name); err != nil {
-			vlog.Error(fmt.Sprintf("Failed to delete worker node %s from Talos cluster", workerToRemove.Name), err)
+			vlog.Error(fmt.Sprintf("Failed to delete worker node %s from Talos cluster %s", workerToRemove.Name, clusterlog.Tag(cluster)), err)
 			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 		}
 
 		if err := r.MachineManager.DeleteMachine(ctx, workerToRemove); err != nil {
-			vlog.Error(fmt.Sprintf("Failed to delete machine CRD %s", workerToRemove.Name), err)
+			vlog.Error(fmt.Sprintf("Failed to delete machine CRD %s %s", workerToRemove.Name, clusterlog.Tag(cluster)), err)
 			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 		}
 
@@ -347,7 +348,7 @@ func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *v
 		}
 
 		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
-			vlog.Warn("Conflict adding finalizer, retrying...")
+			vlog.Warn("Conflict adding finalizer, retrying... " + clusterlog.Tag(kc))
 			continue
 		}
 		return false, err
@@ -362,7 +363,7 @@ func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vi
 	}
 
 	if err := r.performCleanup(ctx, kc); err != nil {
-		vlog.Error("Failed to perform cleanup, will retry", err)
+		vlog.Error("Failed to perform cleanup, will retry "+clusterlog.Tag(kc), err)
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
@@ -380,10 +381,10 @@ func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vi
 		},
 	}
 	if err := r.Delete(ctx, vip); err != nil && !apierrors.IsNotFound(err) {
-		vlog.Error("Failed to delete ControlPlaneVirtualSharedIP: "+vipName, err)
+		vlog.Error(fmt.Sprintf("Failed to delete ControlPlaneVirtualSharedIP %s %s", vipName, clusterlog.Tag(kc)), err)
 		return err
 	}
-	vlog.Info("Deleted ControlPlaneVirtualSharedIP: " + vipName)
+	vlog.Info(fmt.Sprintf("Deleted ControlPlaneVirtualSharedIP: %s %s", vipName, clusterlog.Tag(kc)))
 
 	// Delete VIP NetworkConfiguration (created by talosvip endpoint mode)
 	vipNCName := kc.Spec.Cluster.ClusterId + "-vip"
@@ -394,23 +395,23 @@ func (r *KubernetesClusterReconciler) performCleanup(ctx context.Context, kc *vi
 		},
 	}
 	if err := r.Delete(ctx, vipNC); err != nil && !apierrors.IsNotFound(err) {
-		vlog.Error("Failed to delete VIP NetworkConfiguration: "+vipNCName, err)
+		vlog.Error(fmt.Sprintf("Failed to delete VIP NetworkConfiguration %s %s", vipNCName, clusterlog.Tag(kc)), err)
 		return err
 	}
-	vlog.Info("Deleted VIP NetworkConfiguration: " + vipNCName)
+	vlog.Info(fmt.Sprintf("Deleted VIP NetworkConfiguration: %s %s", vipNCName, clusterlog.Tag(kc)))
 
 	// Delete Talos Secret
 	secretName := viper.GetString(consts.SECRET_PREFIX) + kc.Spec.Cluster.ClusterId
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: kc.GetNamespace()}}
 	if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-		vlog.Error("Failed to delete Talos secret: "+secretName, err)
+		vlog.Error(fmt.Sprintf("Failed to delete Talos secret %s %s", secretName, clusterlog.Tag(kc)), err)
 		return err
 	}
-	vlog.Info("Deleted Talos secret: " + secretName)
+	vlog.Info(fmt.Sprintf("Deleted Talos secret: %s %s", secretName, clusterlog.Tag(kc)))
 
 	// Clean up machines
 	if err := r.MachineManager.CleanupMachines(ctx, kc.Spec.Cluster.ClusterId, kc.GetNamespace()); err != nil {
-		vlog.Error("Failed to cleanup machines during deletion", err)
+		vlog.Error("Failed to cleanup machines during deletion "+clusterlog.Tag(kc), err)
 		return err
 	}
 
@@ -439,24 +440,24 @@ func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *v
 		controllerutil.RemoveFinalizer(kc, KubernetesClusterFinalizer)
 		err := r.Patch(ctx, kc, patch)
 		if err == nil {
-			vlog.Info("Successfully deleted KubernetesCluster: cluster=" + kc.GetName())
+			vlog.Info("Successfully deleted KubernetesCluster: " + clusterlog.Tag(kc))
 			return ctrl.Result{}, nil
 		}
 
 		// Resource was already deleted - this is fine during deletion
 		if apierrors.IsNotFound(err) {
-			vlog.Info("KubernetesCluster already deleted: cluster=" + kc.GetName())
+			vlog.Info("KubernetesCluster already deleted: " + clusterlog.Tag(kc))
 			return ctrl.Result{}, nil
 		}
 
 		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
-			vlog.Warn("Conflict removing finalizer, retrying...")
+			vlog.Warn("Conflict removing finalizer, retrying... " + clusterlog.Tag(kc))
 			continue
 		}
-		vlog.Error("Failed to remove finalizer, will retry", err)
+		vlog.Error("Failed to remove finalizer, will retry "+clusterlog.Tag(kc), err)
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
-	vlog.Warn(fmt.Sprintf("Failed to remove finalizer after %d retries, will retry later", maxRetries))
+	vlog.Warn(fmt.Sprintf("Failed to remove finalizer after %d retries %s, will retry later", maxRetries, clusterlog.Tag(kc)))
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 }
 
@@ -542,20 +543,20 @@ func (r *KubernetesClusterReconciler) initializeUpgradeAnnotations(ctx context.C
 	// Get Talos client config
 	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to get Talos config for version detection: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to get Talos config for version detection %s: %v", clusterlog.Tag(cluster), err))
 		return
 	}
 
 	// Get machines to find a control plane IP
 	machines, err := r.MachineManager.ListClusterMachines(ctx, cluster)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to list machines for version detection: %v", err))
+		vlog.Warn(fmt.Sprintf("Failed to list machines for version detection %s: %v", clusterlog.Tag(cluster), err))
 		return
 	}
 
 	controlPlaneIP := r.getFirstControlPlaneIP(machines)
 	if controlPlaneIP == "" {
-		vlog.Warn("No control plane IP available for version detection")
+		vlog.Warn("No control plane IP available for version detection " + clusterlog.Tag(cluster))
 		return
 	}
 
@@ -581,15 +582,15 @@ func (r *KubernetesClusterReconciler) initializeUpgradeAnnotations(ctx context.C
 	if talosVersion != "" || k8sVersion != "" {
 		freshCluster := &vitistackv1alpha1.KubernetesCluster{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), freshCluster); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to re-fetch cluster for annotation update: %v", err))
+			vlog.Warn(fmt.Sprintf("Failed to re-fetch cluster for annotation update %s: %v", clusterlog.Tag(cluster), err))
 			return
 		}
 
 		if err := r.UpgradeService.InitializeCurrentVersions(ctx, freshCluster, talosVersion, k8sVersion); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to initialize upgrade annotations (will retry): %v", err))
+			vlog.Warn(fmt.Sprintf("Failed to initialize upgrade annotations (will retry) %s: %v", clusterlog.Tag(cluster), err))
 		} else {
-			vlog.Info(fmt.Sprintf("Initialized upgrade annotations: cluster=%s talos=%s k8s=%s",
-				cluster.Name, talosVersion, k8sVersion))
+			vlog.Info(fmt.Sprintf("Initialized upgrade annotations: %s talos=%s k8s=%s",
+				clusterlog.Tag(cluster), talosVersion, k8sVersion))
 		}
 	}
 }

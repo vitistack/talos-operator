@@ -10,6 +10,7 @@ import (
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 )
@@ -730,7 +731,7 @@ func (o *UpgradeOrchestrator) buildCompletionResult(ctx context.Context, cluster
 		vlog.Warn(fmt.Sprintf("Upgrade completed with skipped nodes: cluster=%s upgraded=%d skipped=%d nodes=%v",
 			cluster.Name, state.nodesUpgraded, len(state.skippedNodes), state.skippedNodes))
 	} else {
-		vlog.Info(fmt.Sprintf("All nodes upgraded: cluster=%s nodes=%d", cluster.Name, state.nodesUpgraded))
+		vlog.Info(fmt.Sprintf("All nodes upgraded: %s nodes=%d", clusterlog.Tag(cluster), state.nodesUpgraded))
 	}
 	return &UpgradeResult{
 		Success:       true,
@@ -817,7 +818,7 @@ func (o *UpgradeOrchestrator) PerformKubernetesUpgrade(
 	// Uncordon all nodes after successful Kubernetes upgrade
 	// Nodes may have been cordoned during Talos upgrade
 	if o.nodeDrainer != nil {
-		vlog.Info(fmt.Sprintf("Uncordoning all nodes after Kubernetes upgrade: cluster=%s", cluster.Name))
+		vlog.Info("Uncordoning all nodes after Kubernetes upgrade: " + clusterlog.Tag(cluster))
 		for _, node := range nodes {
 			if node.Name == "" {
 				vlog.Warn(fmt.Sprintf("Skipping uncordon for node with IP %s - no name available", node.IP))
@@ -830,7 +831,7 @@ func (o *UpgradeOrchestrator) PerformKubernetesUpgrade(
 		}
 	}
 
-	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: cluster=%s version=%s", cluster.Name, targetVersion))
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade completed: %s version=%s", clusterlog.Tag(cluster), targetVersion))
 	return &UpgradeResult{
 		Success:      true,
 		NeedsRequeue: false,
@@ -969,7 +970,7 @@ func (o *UpgradeOrchestrator) PreflightChecks(
 	if len(issues) > 0 {
 		healthState.Message = fmt.Sprintf("Health check failed: %s", strings.Join(issues, "; "))
 		healthState.Passed = false
-		vlog.Error(fmt.Sprintf("Pre-upgrade health check FAILED: cluster=%s issues=%v", cluster.Name, issues), nil)
+		vlog.Errorf("Pre-upgrade health check FAILED: %s issues=%v", clusterlog.Tag(cluster), issues)
 	} else {
 		healthState.Message = "All health checks passed"
 		healthState.Passed = true
@@ -1002,7 +1003,7 @@ func (o *UpgradeOrchestrator) SyncMachineConfigsAfterUpgrade(
 	workerIP string,
 	talosVersion string,
 ) error {
-	vlog.Info(fmt.Sprintf("Syncing machine configs after upgrade: cluster=%s version=%s", cluster.Name, talosVersion))
+	vlog.Info(fmt.Sprintf("Syncing machine configs after upgrade: %s version=%s", clusterlog.Tag(cluster), talosVersion))
 
 	// Fetch configs from nodes
 	controlPlaneYAML, cpErr := o.fetchNodeConfig(ctx, clientConfig, controlPlaneIP, "control-plane")

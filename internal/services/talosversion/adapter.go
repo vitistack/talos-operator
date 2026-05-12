@@ -81,7 +81,7 @@ func GetTalosVersionAdapter(version string) TalosVersionAdapter {
 	// Parse the version
 	v, err := semver.NewVersion(cleanVersion)
 	if err != nil {
-		vlog.Warn("Failed to parse Talos version \"%s\", using latest adapter (1.12.x): %v", version, err)
+		vlog.Warnf("Failed to parse Talos version %q, using latest adapter (1.12.x): %v", version, err)
 		return NewV1_12Adapter()
 	}
 
@@ -90,14 +90,14 @@ func GetTalosVersionAdapter(version string) TalosVersionAdapter {
 
 	switch {
 	case minor <= 11:
-		vlog.Info("Using Talos v1.11.x adapter for version %s", cleanVersion)
+		vlog.Infof("Using Talos v1.11.x adapter for version %s", cleanVersion)
 		return NewV1_11Adapter()
 	case minor == 12:
-		vlog.Info("Using Talos v1.12.x adapter for version %s", cleanVersion)
+		vlog.Infof("Using Talos v1.12.x adapter for version %s", cleanVersion)
 		return NewV1_12Adapter()
 	default:
 		// For v1.13+ use the latest known adapter
-		vlog.Info("Using Talos v1.13.x adapter for version %s (future version)", cleanVersion)
+		vlog.Infof("Using Talos v1.13.x adapter for version %s (future version)", cleanVersion)
 		return NewV1_13Adapter()
 	}
 }
