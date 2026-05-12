@@ -79,12 +79,11 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 				"annotations": patch,
 			},
 		})
-		// Count actual updates (non-nil values) for the log message
-		updated, removed := countPatchOps(patch)
 		if err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to marshal annotation patch for node %s: %v", node.Name, err))
 			continue
 		}
+		updated, removed := countPatchOps(patch)
 
 		if _, err := clientset.CoreV1().Nodes().Patch(ctx, node.Name, k8stypes.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to patch annotations on node %s: %v", node.Name, err))
@@ -129,9 +128,9 @@ func buildDesiredNodeAnnotations(
 }
 
 // computeAnnotationPatch computes a JSON merge-patch for annotations.
-// It sets desired values that differ from current, and sets managed keys
-// (vitistack.io/* annotations) to nil when they are present on the node
-// but absent from the desired set — causing MergePatch to delete them.
+// It sets desired values that differ from current, and sets keys this
+// reconciler owns to nil when they are present on the node but absent
+// from the desired set — causing MergePatch to delete them.
 func computeAnnotationPatch(current, desired map[string]string) map[string]interface{} {
 	patch := make(map[string]interface{})
 
@@ -142,8 +141,8 @@ func computeAnnotationPatch(current, desired map[string]string) map[string]inter
 		}
 	}
 
-	// Remove managed annotations that are no longer desired
-	for _, k := range vitistackv1alpha1.GetAllVitistackAnnotations() {
+	// Remove reconciler-owned annotations that are no longer desired
+	for _, k := range reconcilerManagedAnnotations() {
 		if _, isDesired := desired[k]; !isDesired {
 			if _, exists := current[k]; exists {
 				patch[k] = nil
@@ -152,6 +151,38 @@ func computeAnnotationPatch(current, desired map[string]string) map[string]inter
 	}
 
 	return patch
+}
+
+// reconcilerManagedAnnotations returns the annotation keys this reconciler
+// is responsible for syncing on workload-cluster Nodes. Any key in this set
+// that is present on a Node but absent from the desired map will be removed.
+//
+// This is intentionally narrower than vitistackv1alpha1.GetAllVitistackAnnotations:
+// keys like K8sEndpointAnnotation, NodeRoleAnnotation, NodeFQDNAnnotation,
+// ClusterFQDNAnnotation and VMIdAnnotation are set by other actors (Talos
+// machine-config nodeAnnotations, kubelet, etc.) and must not be touched
+// here — otherwise this reconciler and the owner fight in a loop on every
+// pass.
+func reconcilerManagedAnnotations() []string {
+	return []string{
+		vitistackv1alpha1.ClusterIdAnnotation,
+		vitistackv1alpha1.ClusterNameAnnotation,
+		vitistackv1alpha1.ClusterProjectAnnotation,
+		vitistackv1alpha1.EnvironmentAnnotation,
+		vitistackv1alpha1.CountryAnnotation,
+		vitistackv1alpha1.AzAnnotation,
+		vitistackv1alpha1.RegionAnnotation,
+		vitistackv1alpha1.KubernetesProviderAnnotation,
+		vitistackv1alpha1.MachineProviderAnnotation,
+		vitistackv1alpha1.MachineClassAnnotation,
+		vitistackv1alpha1.MachineIdAnnotation,
+		vitistackv1alpha1.ClusterWorkspaceAnnotation,
+		vitistackv1alpha1.MachineInfrastructureAnnotation,
+		vitistackv1alpha1.NodePoolAnnotation,
+		// Deprecated: kept for backward compatibility during transition
+		vitistackv1alpha1.VMProviderAnnotation,    //nolint:staticcheck // backward compatibility
+		vitistackv1alpha1.InfrastructureAnnotation, //nolint:staticcheck // backward compatibility
+	}
 }
 
 // countPatchOps counts the number of updates and removals in a patch.
