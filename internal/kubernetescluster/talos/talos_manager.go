@@ -744,6 +744,22 @@ func (t *TalosManager) configureNewNode(ctx context.Context, cluster *vitistackv
 		return fmt.Errorf("talos API not yet reachable on %s, node still booting", ip)
 	}
 
+	// Self-heal: a "new" node that is already out of maintenance mode means a
+	// previous reconcile applied config successfully but the gRPC response was
+	// lost (e.g. TCP reset when the node rebooted into the secured config), so
+	// addConfiguredMachine was never called. Re-applying insecure now would
+	// fail forever with "tls: certificate required". Record the node as
+	// configured and move on.
+	if !t.clientService.IsNodeInMaintenanceMode(ip) {
+		vlog.Warn(fmt.Sprintf("New %s is already out of maintenance mode (secured); recording as configured to heal stale tracking: node=%s ip=%s %s",
+			nodeType, node.Name, ip, clusterLogTag(cluster)))
+		if err := t.addConfiguredMachine(ctx, cluster, node); err != nil {
+			return fmt.Errorf("failed to record already-secured node as configured: %w", err)
+		}
+		t.markMachineOSInstalled(ctx, node)
+		return nil
+	}
+
 	vlog.Info(fmt.Sprintf("Applying config to new %s: node=%s ip=%s %s", nodeType, node.Name, ip, clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Applying config to %s %s", nodeType, node.Name))
 	// Use insecure mode for new nodes - they don't have the cluster CA yet
