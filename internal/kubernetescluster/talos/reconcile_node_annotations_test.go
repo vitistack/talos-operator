@@ -130,7 +130,7 @@ func TestComputeAnnotationPatch_UpdatesChanged(t *testing.T) {
 		vitistackv1alpha1.ClusterProjectAnnotation: "new-proj", // changed
 	}
 
-	patch := computeAnnotationPatch(current, desired)
+	patch := computeAnnotationPatch(current, desired, nil)
 
 	// Should contain the 3 changed keys
 	if v, ok := patch[vitistackv1alpha1.ClusterNameAnnotation]; !ok || v != "new-name" {
@@ -165,7 +165,7 @@ func TestComputeAnnotationPatch_DeletesManagedKeys(t *testing.T) {
 		vitistackv1alpha1.ClusterNameAnnotation: "c", // unchanged
 	}
 
-	patch := computeAnnotationPatch(current, desired)
+	patch := computeAnnotationPatch(current, desired, nil)
 
 	// NodePoolAnnotation is managed and missing from desired → should be nil (delete)
 	v, ok := patch[vitistackv1alpha1.NodePoolAnnotation]
@@ -192,7 +192,7 @@ func TestComputeAnnotationPatch_NoPatchWhenInSync(t *testing.T) {
 		vitistackv1alpha1.MachineIdAnnotation:   "n",
 	}
 
-	patch := computeAnnotationPatch(annotations, annotations)
+	patch := computeAnnotationPatch(annotations, annotations, nil)
 
 	if len(patch) != 0 {
 		t.Errorf("expected empty patch when in sync, got %d entries", len(patch))
@@ -208,13 +208,79 @@ func TestComputeAnnotationPatch_AddsNewAnnotations(t *testing.T) {
 		vitistackv1alpha1.RegionAnnotation:      "europe",
 	}
 
-	patch := computeAnnotationPatch(current, desired)
+	patch := computeAnnotationPatch(current, desired, nil)
 
 	if v, ok := patch[vitistackv1alpha1.ClusterNameAnnotation]; !ok || v != "new-cluster" {
 		t.Errorf("expected ClusterNameAnnotation = 'new-cluster', got %v", v)
 	}
 	if v, ok := patch[vitistackv1alpha1.RegionAnnotation]; !ok || v != "europe" {
 		t.Errorf("expected RegionAnnotation = 'europe', got %v", v)
+	}
+}
+
+func TestComputeAnnotationPatch_SkipsTalosOwnedKeys(t *testing.T) {
+	t.Parallel()
+
+	current := map[string]string{
+		vitistackv1alpha1.EnvironmentAnnotation:  "prod",     // Talos owns; do not touch
+		vitistackv1alpha1.ClusterIdAnnotation:    "old-id",   // Talos owns; do not touch
+		vitistackv1alpha1.MachineClassAnnotation: "medium",   // not Talos-owned
+		vitistackv1alpha1.NodePoolAnnotation:     "leftover", // not Talos-owned, not desired → remove
+	}
+
+	desired := map[string]string{
+		vitistackv1alpha1.EnvironmentAnnotation:  "production", // diverges, but Talos-owned
+		vitistackv1alpha1.ClusterIdAnnotation:    "new-id",     // diverges, but Talos-owned
+		vitistackv1alpha1.MachineClassAnnotation: "large",      // diverges → patch
+	}
+
+	talosOwned := map[string]bool{
+		vitistackv1alpha1.EnvironmentAnnotation: true,
+		vitistackv1alpha1.ClusterIdAnnotation:   true,
+	}
+
+	patch := computeAnnotationPatch(current, desired, talosOwned)
+
+	if _, ok := patch[vitistackv1alpha1.EnvironmentAnnotation]; ok {
+		t.Error("Talos-owned EnvironmentAnnotation must not appear in patch")
+	}
+	if _, ok := patch[vitistackv1alpha1.ClusterIdAnnotation]; ok {
+		t.Error("Talos-owned ClusterIdAnnotation must not appear in patch")
+	}
+	if v, ok := patch[vitistackv1alpha1.MachineClassAnnotation]; !ok || v != "large" {
+		t.Errorf("expected MachineClassAnnotation = 'large', got ok=%v v=%v", ok, v)
+	}
+	if v, ok := patch[vitistackv1alpha1.NodePoolAnnotation]; !ok || v != nil {
+		t.Errorf("expected NodePoolAnnotation = nil (delete), got ok=%v v=%v", ok, v)
+	}
+}
+
+func TestParseTalosOwnedAnnotations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"empty", "", nil},
+		{"malformed", "not-json", nil},
+		{"single", `["vitistack.io/environment"]`, []string{"vitistack.io/environment"}},
+		{"multiple", `["a","b","c"]`, []string{"a", "b", "c"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseTalosOwnedAnnotations(tc.raw)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len mismatch: got %d, want %d", len(got), len(tc.want))
+			}
+			for _, k := range tc.want {
+				if !got[k] {
+					t.Errorf("missing key %q", k)
+				}
+			}
+		})
 	}
 }
 

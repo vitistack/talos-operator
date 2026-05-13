@@ -69,7 +69,12 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 		for k := range skipKeys {
 			delete(desired, k)
 		}
-		patch := computeAnnotationPatch(node.Annotations, desired)
+		// Skip annotations Talos owns via machine-config nodeAnnotations:
+		// Talos's KubernetesNode controller will overwrite them on each
+		// pass, causing an infinite update loop here. The durable path to
+		// change a Talos-owned annotation is to update the machine config.
+		talosOwned := parseTalosOwnedAnnotations(node.Annotations[talosOwnedAnnotationsKey])
+		patch := computeAnnotationPatch(node.Annotations, desired, talosOwned)
 		if len(patch) == 0 {
 			continue
 		}
@@ -127,15 +132,43 @@ func buildDesiredNodeAnnotations(
 	return annotations
 }
 
+// talosOwnedAnnotationsKey is the annotation Talos writes on each Node listing
+// the annotations it owns via machine-config nodeAnnotations. Talos's
+// KubernetesNode controller reasserts any key in this list on every pass.
+const talosOwnedAnnotationsKey = "talos.dev/owned-annotations"
+
+// parseTalosOwnedAnnotations parses the JSON-encoded list of annotation keys
+// Talos publishes on the Node. Returns an empty set if the value is missing
+// or malformed — in that case the reconciler simply doesn't skip anything.
+func parseTalosOwnedAnnotations(raw string) map[string]bool {
+	owned := make(map[string]bool)
+	if raw == "" {
+		return owned
+	}
+	var keys []string
+	if err := json.Unmarshal([]byte(raw), &keys); err != nil {
+		return owned
+	}
+	for _, k := range keys {
+		owned[k] = true
+	}
+	return owned
+}
+
 // computeAnnotationPatch computes a JSON merge-patch for annotations.
 // It sets desired values that differ from current, and sets keys this
 // reconciler owns to nil when they are present on the node but absent
-// from the desired set — causing MergePatch to delete them.
-func computeAnnotationPatch(current, desired map[string]string) map[string]interface{} {
+// from the desired set — causing MergePatch to delete them. Keys in
+// talosOwned are skipped entirely: Talos reasserts those from its
+// machine config, so patching them causes a fight loop.
+func computeAnnotationPatch(current, desired map[string]string, talosOwned map[string]bool) map[string]interface{} {
 	patch := make(map[string]interface{})
 
 	// Set or update desired annotations
 	for k, v := range desired {
+		if talosOwned[k] {
+			continue
+		}
 		if current[k] != v {
 			patch[k] = v
 		}
@@ -143,6 +176,9 @@ func computeAnnotationPatch(current, desired map[string]string) map[string]inter
 
 	// Remove reconciler-owned annotations that are no longer desired
 	for _, k := range reconcilerManagedAnnotations() {
+		if talosOwned[k] {
+			continue
+		}
 		if _, isDesired := desired[k]; !isDesired {
 			if _, exists := current[k]; exists {
 				patch[k] = nil
