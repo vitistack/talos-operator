@@ -13,7 +13,7 @@ func NewV1_12Adapter() *V1_12Adapter {
 			baseAdapter: baseAdapter{
 				config: adapterConfig{
 					version:           versionV1_12,
-					kubernetesVersion: "1.35.3",
+					kubernetesVersion: "1.35.4",
 					etcdVersion:       defaultEtcdVersion,
 					etcdRegistry:      defaultEtcdRegistry,
 					multiDoc:          true,

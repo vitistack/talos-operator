@@ -225,7 +225,7 @@ func TestDefaultKubernetesVersion(t *testing.T) {
 		want    string
 	}{
 		{versionTagV1_11, NewV1_11Adapter(), "1.34.1"},
-		{versionTagV1_12, NewV1_12Adapter(), "1.35.3"},
+		{versionTagV1_12, NewV1_12Adapter(), "1.35.4"},
 		{versionTagV1_13, NewV1_13Adapter(), "1.36.0"},
 	}
 
