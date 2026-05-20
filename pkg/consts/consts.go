@@ -87,6 +87,14 @@ var (
 	BOOT_IMAGE_SOURCE = "BOOT_IMAGE_SOURCE"
 
 	BOOT_IMAGE = "BOOT_IMAGE"
+
+	// PROVISION_FAILURE_TIMEOUT_MINUTES is how long a KubernetesCluster may stay
+	// non-Ready with no Machine ever reaching Running before its Phase is set
+	// to Failed. Catches the case where the underlying infra cannot create the
+	// VMs (e.g. kubevirt without a storage class) and the cluster would
+	// otherwise sit in Pending forever with no signal. Default: 15. Set 0 to
+	// disable the auto-fail behaviour.
+	PROVISION_FAILURE_TIMEOUT_MINUTES = "PROVISION_FAILURE_TIMEOUT_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
 )
 
 // EndpointMode represents the mode for determining control plane endpoints

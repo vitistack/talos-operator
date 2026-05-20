@@ -25,9 +25,11 @@ const (
 	phaseConfigGen       = "ConfigGenerated"
 	phaseConfigApplied   = "ConfigApplied"
 	phaseBootstrapped    = "Bootstrapped"
+	phaseWaitingForNodes = "WaitingForNodes" // configs/bootstrap done, waiting for K8s nodes to become Ready
 	phaseReady           = "Ready"
 	phaseRunning         = "Running"
 	PhaseValidationError = "ValidationError"
+	PhaseFailed          = "Failed" // terminal failure surfaced when machines can't provision and the timeout elapses
 
 	// Upgrade-related phases
 	PhaseUpgradingTalos      = "UpgradingTalos"
@@ -85,12 +87,14 @@ func (m *StatusManager) UpdateKubernetesClusterStatus(ctx context.Context, kuber
 		_ = m.SetCondition(ctx, kubernetesCluster, c.Type, c.Status, c.Reason, c.Message)
 	}
 
-	// If kubeconfig is present, attempt to set status.state.created from kube-system Namespace creation time.
+	// If kubeconfig is present, record kube-system creation time but do NOT
+	// flip the cluster Phase to Ready here. Reaching kube-system means the
+	// API server is up; it does not mean every expected node has joined and
+	// reached Ready. The authoritative Ready transition happens in the
+	// Talos init flow's final stage, gated by the node-health check.
 	if len(kubeconfig) > 0 {
 		if ts, err := getKubeSystemCreated(ctx, kubeconfig); err == nil && !ts.IsZero() {
 			_ = m.SetStateCreated(ctx, kubernetesCluster, ts)
-			// If we can reach the target cluster via kubeconfig, mark Ready
-			_ = m.SetPhase(ctx, kubernetesCluster, phaseReady)
 		} else if err != nil {
 			vlog.Debug("Failed to get kube-system creation time from target cluster: " + err.Error())
 		}
@@ -132,8 +136,9 @@ func deriveStatusFromSecret(secret *corev1.Secret) (string, []condSpec, []byte) 
 	applied := getSecretFlag(secret, "controlplane_applied") && getSecretFlag(secret, "worker_applied")
 	bootstrapped := getSecretFlag(secret, "bootstrapped")
 	clusterAccess := getSecretFlag(secret, "cluster_access") || len(secret.Data["kube.config"]) > 0
+	nodesHealthReady := getSecretFlag(secret, "nodes_health_ready")
 
-	phase := phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess)
+	phase := phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess, nodesHealthReady)
 	conds := condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess)
 	return phase, conds, secret.Data["kube.config"]
 }
@@ -148,9 +153,17 @@ func getSecretFlag(secret *corev1.Secret, key string) bool {
 	return false
 }
 
-func phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) string {
-	if cfgPresent && applied && bootstrapped && clusterAccess {
+func phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess, nodesHealthReady bool) string {
+	// Ready means everything is in place AND we have confirmed every expected
+	// K8s node has joined and reached Ready (nodes_health_ready). Without that
+	// last gate the cluster can flip Ready while workers are still missing.
+	if cfgPresent && applied && bootstrapped && clusterAccess && nodesHealthReady {
 		return phaseReady
+	}
+	// All the per-stage work is done but the workload cluster still has
+	// nodes that haven't joined or aren't Ready yet.
+	if cfgPresent && applied && bootstrapped && clusterAccess {
+		return phaseWaitingForNodes
 	}
 	if bootstrapped {
 		return phaseBootstrapped
@@ -659,8 +672,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 		return err
 	}
 
-	// Update control plane status (modifies u in-place, no API call)
-	cpReady := m.updateControlPlaneStatus(u, cpCount, cpRunning, cpNodes)
+	m.updateControlPlaneStatus(u, cpCount, cpRunning, cpNodes)
 
 	// Update worker count
 	_ = unstructured.SetNestedField(u.Object, workerCount, stateFieldStatus, "workers")
@@ -671,18 +683,7 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 	// Touch timestamps
 	updateStatusTimestamps(u)
 
-	// Write all aggregated changes to the API in a single update
-	if err := m.updateStatus(ctx, u); err != nil {
-		return err
-	}
-
-	// Mark cluster Ready if all control plane machines are running
-	// Done after the aggregate update to avoid resourceVersion conflicts
-	if cpReady {
-		_ = m.SetPhase(ctx, kc, phaseReady)
-	}
-
-	return nil
+	return m.updateStatus(ctx, u)
 }
 
 // aggregateMachineResources aggregates resource usage from all machines in the list
@@ -717,12 +718,13 @@ func isControlPlaneMachine(m *vitistackv1alpha1.Machine) bool {
 	return ok && role == "control-plane"
 }
 
-// updateControlPlaneStatus updates the control plane status in the unstructured object.
-// Returns true if all control plane machines are running (caller should set phase to Ready).
-func (m *StatusManager) updateControlPlaneStatus(u *unstructured.Unstructured, cpCount, cpRunning int64, cpNodes []string) bool {
+// updateControlPlaneStatus writes control-plane scale, node names, and a
+// derived status string ("Running" / "Partial" / "Pending") into the
+// unstructured cluster status. This is informational only — it does not
+// drive the cluster Phase.
+func (m *StatusManager) updateControlPlaneStatus(u *unstructured.Unstructured, cpCount, cpRunning int64, cpNodes []string) {
 	_ = unstructured.SetNestedField(u.Object, cpCount, stateFieldStatus, stateFieldState, stateFieldCluster, "controlplane", "scale")
 
-	// Set control plane node names
 	nodesAny := make([]any, len(cpNodes))
 	for i, node := range cpNodes {
 		nodesAny[i] = node
@@ -731,8 +733,6 @@ func (m *StatusManager) updateControlPlaneStatus(u *unstructured.Unstructured, c
 
 	cpStatus := determineControlPlaneStatus(cpCount, cpRunning)
 	_ = unstructured.SetNestedField(u.Object, cpStatus, stateFieldStatus, stateFieldState, stateFieldCluster, "controlplane", stateFieldStatus)
-
-	return cpStatus == phaseRunning
 }
 
 // determineControlPlaneStatus determines the control plane status based on machine counts

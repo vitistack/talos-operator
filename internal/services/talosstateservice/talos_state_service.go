@@ -35,6 +35,7 @@ type TalosSecretFlags struct {
 	KubernetesAPIReady       bool // tracks when Kubernetes API server is reachable
 	FirstControlPlaneApplied bool // tracks if the first control plane has config applied
 	FirstControlPlaneReady   bool // tracks if the first control plane is ready (API reachable)
+	NodesHealthReady         bool // tracks when all expected K8s nodes have joined and reached Ready
 }
 
 // TalosStateService manages Talos cluster state in Kubernetes secrets
@@ -72,6 +73,7 @@ func (s *TalosStateService) EnsureSecretExists(ctx context.Context, cluster *vit
 		"cluster_access":             []byte(falseStr),
 		"first_controlplane_applied": []byte(falseStr),
 		"first_controlplane_ready":   []byte(falseStr),
+		"nodes_health_ready":         []byte(falseStr),
 		"configured_nodes":           []byte(""), // comma-separated list of node names that have been configured
 		"created_at":                 []byte(now),
 		// Version tracking - persisted for recovery and verification
@@ -142,6 +144,7 @@ func parseSecretFlags(data map[string][]byte) TalosSecretFlags {
 	flags.KubernetesAPIReady = isFlagTrue(data, "kubernetes_api_ready")
 	flags.FirstControlPlaneApplied = isFlagTrue(data, "first_controlplane_applied")
 	flags.FirstControlPlaneReady = isFlagTrue(data, "first_controlplane_ready")
+	flags.NodesHealthReady = isFlagTrue(data, "nodes_health_ready")
 
 	return flags
 }

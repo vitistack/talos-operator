@@ -87,6 +87,12 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 				vlog.Warn(fmt.Sprintf("Error during extension reconciliation %s: %v", clusterLogTag(cluster), err))
 			}
 
+			// Best-effort: re-evaluate workload-cluster node health so the
+			// nodes_health_ready flag (and therefore the cluster Phase) tracks
+			// reality. Flips Ready->ConfigApplied if a node goes NotReady, and
+			// catches up legacy clusters that pre-date the flag.
+			t.refreshNodesHealthFlag(ctx, cluster)
+
 			return nil
 		}
 	}
@@ -163,6 +169,17 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 
 	// Stage 4: Apply config to workers
 	if err := t.stageApplyWorkers(ctx, cluster, clientConfig, prepResult.workers, prepResult); err != nil {
+		return err
+	}
+
+	// Stage 4.5: Wait until every expected K8s Node has joined and reached Ready.
+	// Holds the cluster Phase below Ready until the workload-cluster API confirms
+	// every Machine has a corresponding Node in Ready=True. Without this, the VM
+	// being up was enough to flip the cluster Ready before workers had joined.
+	allExpected := make([]*vitistackv1alpha1.Machine, 0, len(prepResult.controlPlanes)+len(prepResult.workers))
+	allExpected = append(allExpected, prepResult.controlPlanes...)
+	allExpected = append(allExpected, prepResult.workers...)
+	if err := t.stageWaitNodesHealthy(ctx, cluster, allExpected); err != nil {
 		return err
 	}
 
@@ -600,19 +617,20 @@ func (t *TalosManager) stageApplyWorkers(
 	return nil
 }
 
-// stageFinalizeCluster handles Stage 5: Mark cluster as ready
+// stageFinalizeCluster handles Stage 5: Mark cluster as ready.
+// Precondition: stageWaitNodesHealthy has already confirmed every expected
+// Node is joined and Ready and persisted nodes_health_ready=true.
 func (t *TalosManager) stageFinalizeCluster(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	prep *clusterInitPrep,
 ) error {
-	_ = t.statusManager.SetPhase(ctx, cluster, "ConfigApplied")
 	_ = t.statusManager.SetCondition(ctx, cluster, "ConfigApplied", "True", "Applied", "Talos configs applied to all nodes")
 
 	allMachines := make([]*vitistackv1alpha1.Machine, 0, len(prep.controlPlanes)+len(prep.workers))
 	allMachines = append(allMachines, prep.controlPlanes...)
 	allMachines = append(allMachines, prep.workers...)
-	vlog.Info(fmt.Sprintf("Stage 5: All %d nodes configured, marking cluster as ready: %s", len(allMachines), clusterLogTag(cluster)))
+	vlog.Info(fmt.Sprintf("Stage 5: All %d nodes configured and Ready, marking cluster as ready: %s", len(allMachines), clusterLogTag(cluster)))
 	_ = t.statusManager.SetMessage(ctx, cluster, "Finalizing cluster")
 
 	if err := t.setSecretTimestamp(ctx, cluster, "ready_at"); err != nil {
@@ -622,7 +640,7 @@ func (t *TalosManager) stageFinalizeCluster(
 	}
 
 	_ = t.statusManager.SetPhase(ctx, cluster, "Ready")
-	_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "True", "Ready", fmt.Sprintf("All %d nodes are configured and ready", len(allMachines)))
+	_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "True", "Ready", fmt.Sprintf("All %d nodes are configured and Ready", len(allMachines)))
 	vlog.Info("Stage 5 complete: Cluster is ready: " + clusterLogTag(cluster))
 
 	return nil

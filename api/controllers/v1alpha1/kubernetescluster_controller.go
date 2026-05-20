@@ -143,6 +143,15 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
+	// Surface child Machine failures onto the parent cluster status. When the
+	// underlying infra can't provision VMs (kubevirt missing a storage class
+	// is the canonical case) the cluster otherwise sits silently in Pending.
+	// Returns (result, true) to short-circuit when we've decided the cluster
+	// has failed terminally.
+	if result, handled := r.evaluateMachineHealth(ctx, kubernetesCluster); handled {
+		return result, nil
+	}
+
 	// Reconcile Talos cluster after machines are created
 	if err := r.TalosManager.ReconcileTalosCluster(ctx, kubernetesCluster); err != nil {
 		// Check if this is a RequeueError (non-blocking wait signal)
@@ -191,10 +200,21 @@ func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluste
 		return ctrl.Result{}, false
 	}
 
+	// Belt-and-suspenders: do not touch the cluster API path if the Talos
+	// config secret hasn't been fully initialized yet. The phase guard above
+	// is the primary defence; this catches edge cases (status drift, manual
+	// secret edits) so we never warn-log "config not found" while trying to
+	// upgrade a cluster that doesn't yet exist.
+	if !r.clusterFullyInitialized(ctx, cluster) {
+		return ctrl.Result{}, false
+	}
+
 	// Get Talos client config
 	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to get Talos client config for upgrade %s: %v", clusterlog.Tag(cluster), err))
+		// Secret flags said the cluster is up but we still can't load the
+		// Talos client config. Skip this pass silently rather than warn-log;
+		// the next reconcile will retry once the state settles.
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, false
 	}
 
@@ -248,6 +268,77 @@ func (r *KubernetesClusterReconciler) ensureFinalizerOrRequeue(ctx context.Conte
 		return ctrl.Result{Requeue: true}, true, nil
 	}
 	return ctrl.Result{}, false, nil
+}
+
+// evaluateMachineHealth surfaces child Machine errors onto the cluster status
+// and transitions the cluster Phase to Failed if no Machine has reached the
+// Running phase before PROVISION_FAILURE_TIMEOUT_MINUTES elapses. This is the
+// signal that the underlying infrastructure cannot provision the requested
+// VMs (e.g. kubevirt without a storage class). Returns (result, true) when
+// the cluster has been marked Failed and the reconcile should stop.
+func (r *KubernetesClusterReconciler) evaluateMachineHealth(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, bool) {
+	machinesList, err := r.MachineManager.ListClusterMachines(ctx, cluster)
+	if err != nil {
+		// Listing failed — don't make any new judgement, just continue.
+		return ctrl.Result{}, false
+	}
+
+	machines := make([]*vitistackv1alpha1.Machine, len(machinesList))
+	for i := range machinesList {
+		machines[i] = &machinesList[i]
+	}
+
+	h := machineservice.SummariseHealth(machines)
+	if h.Message != "" {
+		_ = r.StatusManager.SetMessage(ctx, cluster, h.Message)
+		_ = r.StatusManager.SetCondition(ctx, cluster, "MachinesHealthy", "False", h.FailureReason, h.Message)
+	} else {
+		_ = r.StatusManager.SetCondition(ctx, cluster, "MachinesHealthy", "True", "Healthy", "All machines are progressing")
+	}
+
+	timeout := provisionFailureTimeout()
+	if machineservice.IsStuckProvisioning(cluster.CreationTimestamp.Time, cluster.Status.Phase, h, timeout) {
+		failMsg := h.Message
+		if failMsg == "" {
+			failMsg = fmt.Sprintf("no machine reached Running within %s — check underlying infrastructure (provider, storage, network)", timeout)
+		}
+		vlog.Warnf("Cluster failed to provision %s: %s", clusterlog.Tag(cluster), failMsg)
+		_ = r.StatusManager.SetMessage(ctx, cluster, failMsg)
+		_ = r.StatusManager.SetCondition(ctx, cluster, "MachinesHealthy", "False", "ProvisioningTimeout", failMsg)
+		_ = r.StatusManager.SetPhase(ctx, cluster, status.PhaseFailed)
+		// Stay in Failed: requeue on the normal cadence so the operator can
+		// recover automatically if the infra is fixed (next pass will see a
+		// Running machine and skip the IsStuckProvisioning branch).
+		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+	}
+	return ctrl.Result{}, false
+}
+
+// clusterFullyInitialized reports whether the cluster's Talos secret records
+// all four end-of-init flags. It's the precondition both handleUpgrades and
+// initializeUpgradeAnnotations need before they can safely call the workload
+// cluster — without it the operator was warn-logging against clusters that
+// are still being created.
+func (r *KubernetesClusterReconciler) clusterFullyInitialized(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) bool {
+	flags, err := r.TalosManager.GetStateService().GetFlags(ctx, cluster)
+	if err != nil {
+		return false
+	}
+	return flags.ControlPlaneApplied && flags.WorkerApplied && flags.Bootstrapped && flags.ClusterAccess
+}
+
+// provisionFailureTimeout reads PROVISION_FAILURE_TIMEOUT_MINUTES with a 15
+// minute default. 0 (or invalid) disables the auto-fail behaviour.
+func provisionFailureTimeout() time.Duration {
+	v := viper.GetString(consts.PROVISION_FAILURE_TIMEOUT_MINUTES)
+	if v == "" {
+		return 15 * time.Minute
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 15 * time.Minute
+	}
+	return time.Duration(n) * time.Minute
 }
 
 // gateOnNetworkNamespaceReady blocks Machine reconciliation until the referenced
@@ -540,10 +631,19 @@ func (r *KubernetesClusterReconciler) initializeUpgradeAnnotations(ctx context.C
 		return
 	}
 
+	// Same guard as handleUpgrades — don't attempt cluster-side calls until
+	// the Talos config secret says the cluster is fully initialized. Without
+	// this, the version-detection path warn-logs against clusters that are
+	// still being created.
+	if !r.clusterFullyInitialized(ctx, cluster) {
+		return
+	}
+
 	// Get Talos client config
 	clientConfig, err := r.TalosManager.GetTalosClientConfig(ctx, cluster)
 	if err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to get Talos config for version detection %s: %v", clusterlog.Tag(cluster), err))
+		// Silently skip — flags said the cluster is up but the config is not
+		// loadable yet. Next reconcile will retry.
 		return
 	}
 

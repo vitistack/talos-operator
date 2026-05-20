@@ -53,7 +53,7 @@ When each node is upgraded, it goes through these stages:
 ┌─────────────────────────────────────────────────────────────────┐
 │  1. DOWNLOAD NEW IMAGE                                          │
 │     Node downloads the new Talos installer image                │
-│     (e.g., ghcr.io/siderolabs/installer:v1.12.x)               │
+│     (e.g., ghcr.io/siderolabs/installer:v1.13.x)               │
 │     Duration: ~30-60 seconds (depends on network)               │
 └─────────────────────────────────────────────────────────────────┘
                               │
