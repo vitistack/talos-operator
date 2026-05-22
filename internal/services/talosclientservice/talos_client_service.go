@@ -5,11 +5,14 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/cosi-project/runtime/pkg/safe"
+	common "github.com/siderolabs/talos/pkg/machinery/api/common"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -632,7 +635,54 @@ func (s *TalosClientService) IsKubernetesNodeReady(
 // UpgradeNode initiates a Talos OS upgrade on a single node.
 // The node will download the new image and reboot to apply the upgrade.
 // This is equivalent to `talosctl upgrade --image <installerImage>`.
+//
+// Talos v1.13 introduced the LifecycleService, which supersedes the deprecated
+// MachineService.Upgrade API. The LifecycleService is implemented by the node
+// itself, so the choice of API is governed by the version *currently running*
+// on the node — not the target version. A node still running v1.12.x does not
+// implement LifecycleService, so upgrading it (even to v1.13) must go through
+// the legacy API; only nodes already on v1.13+ use the LifecycleClient.
 func (s *TalosClientService) UpgradeNode(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+	installerImage string,
+) error {
+	vlog.Info(fmt.Sprintf("Initiating Talos upgrade: node=%s image=%s", nodeIP, installerImage))
+
+	if s.nodeSupportsLifecycleUpgrade(ctx, tClient, nodeIP) {
+		return s.upgradeNodeViaLifecycle(ctx, tClient, nodeIP, installerImage)
+	}
+	return s.upgradeNodeLegacy(ctx, tClient, nodeIP, installerImage)
+}
+
+// nodeSupportsLifecycleUpgrade reports whether the node's currently-running Talos
+// version implements the LifecycleService (v1.13+). On any error determining the
+// version it returns false, falling back to the legacy upgrade API.
+func (s *TalosClientService) nodeSupportsLifecycleUpgrade(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+) bool {
+	running, err := s.GetTalosVersion(ctx, tClient, nodeIP)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Could not determine running Talos version, using legacy upgrade API: node=%s error=%s", nodeIP, err.Error()))
+		return false
+	}
+
+	v, err := semver.NewVersion(strings.TrimPrefix(running, "v"))
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Could not parse running Talos version %q, using legacy upgrade API: node=%s", running, nodeIP))
+		return false
+	}
+
+	// LifecycleService is available from v1.13 onward.
+	return v.Major() > 1 || (v.Major() == 1 && v.Minor() >= 13)
+}
+
+// upgradeNodeLegacy performs the upgrade via the deprecated MachineService.Upgrade
+// API. Used for nodes running Talos < v1.13 which do not implement LifecycleService.
+func (s *TalosClientService) upgradeNodeLegacy(
 	ctx context.Context,
 	tClient *talosclient.Client,
 	nodeIP string,
@@ -640,18 +690,74 @@ func (s *TalosClientService) UpgradeNode(
 ) error {
 	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
 
-	vlog.Info(fmt.Sprintf("Initiating Talos upgrade: node=%s image=%s", nodeIP, installerImage))
-
-	// Call the Upgrade API
-	// Parameters: image, stage (false = immediate), force (false = normal), preserveData (false)
+	// Parameters: image, stage (false = immediate), force (false = normal).
+	//nolint:staticcheck // SA1019: legacy API retained for nodes running Talos < v1.13
 	resp, err := tClient.Upgrade(nodeCtx, installerImage, false, false)
 	if err != nil {
 		return fmt.Errorf("upgrade API call failed for node %s: %w", nodeIP, err)
 	}
 
-	// Log response
 	for _, msg := range resp.Messages {
 		vlog.Info(fmt.Sprintf("Talos upgrade response: node=%s ack=%s", nodeIP, msg.Ack))
+	}
+
+	return nil
+}
+
+// upgradeNodeViaLifecycle performs the upgrade via the v1.13+ LifecycleService.
+// Unlike the legacy unary API, Upgrade is a server-streaming RPC that emits
+// progress messages until completion; a non-zero exit code in the stream
+// signals failure (the server does not return a gRPC error for it).
+func (s *TalosClientService) upgradeNodeViaLifecycle(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+	installerImage string,
+) error {
+	// Use WithNode (singular): streaming RPCs are not multiplexed across nodes.
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
+
+	req := &machineapi.LifecycleServiceUpgradeRequest{
+		Containerd: &common.ContainerdInstance{
+			Driver:    common.ContainerDriver_CONTAINERD,
+			Namespace: common.ContainerdNamespace_NS_SYSTEM,
+		},
+		Source: &machineapi.InstallArtifactsSource{
+			ImageName: installerImage,
+		},
+	}
+
+	stream, err := tClient.LifecycleClient.Upgrade(nodeCtx, req)
+	if err != nil {
+		return fmt.Errorf("lifecycle upgrade API call failed for node %s: %w", nodeIP, err)
+	}
+
+	for {
+		resp, rerr := stream.Recv()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return fmt.Errorf("lifecycle upgrade stream error for node %s: %w", nodeIP, rerr)
+		}
+
+		progress := resp.GetProgress()
+		if progress == nil {
+			continue
+		}
+
+		if msg := progress.GetMessage(); msg != "" {
+			vlog.Info(fmt.Sprintf("Talos lifecycle upgrade: node=%s %s", nodeIP, msg))
+		}
+
+		// ExitCode is delivered through a oneof, so GetExitCode() returning 0
+		// is ambiguous with "unset" — check the concrete type to know it was sent.
+		if _, ok := progress.Response.(*machineapi.LifecycleServiceInstallProgress_ExitCode); ok {
+			if code := progress.GetExitCode(); code != 0 {
+				return fmt.Errorf("lifecycle upgrade failed on node %s with exit code %d", nodeIP, code)
+			}
+			vlog.Info(fmt.Sprintf("Talos lifecycle upgrade completed: node=%s exitCode=0", nodeIP))
+		}
 	}
 
 	return nil

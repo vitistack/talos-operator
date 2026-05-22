@@ -68,23 +68,36 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 				vlog.Warn(fmt.Sprintf("Error during node annotation reconciliation %s: %v", clusterLogTag(cluster), err))
 			}
 
-			// Enforce the configured Talos OS version: probes each node's
-			// running Talos version via the Talos API and reinstalls any
-			// node that doesn't match TALOS_VERSION (CPs first, then
-			// workers, one per pass). Never downgrades; surfaces a
-			// TalosVersionEnforcement condition for any newer-than-desired
-			// node. Bug recovery for the case where annotation/secret
-			// state has diverged from what's actually running on a node.
-			if err := t.reconcileTalosVersion(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during Talos version enforcement %s: %v", clusterLogTag(cluster), err))
-			}
-
-			// Reconcile required Talos system extensions: detects nodes that
-			// are missing entries from TALOS_REQUIRED_EXTENSIONS and triggers
-			// a Talos upgrade with the per-provider TALOS_VM_INSTALL_IMAGE_*
-			// image (one node per pass; rolling).
-			if err := t.reconcileExtensions(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during extension reconciliation %s: %v", clusterLogTag(cluster), err))
+			// Talos-version enforcement and extension reconciliation are
+			// drift-recovery passes: each probes every node's *running* state
+			// over the Talos API and reconciles it back toward intent
+			// (reinstall on version mismatch / missing extensions, one node per
+			// pass, never downgrading). They only make sense on a settled
+			// cluster, so they are gated on nodes_health_ready and throttled to
+			// driftRecoveryInterval rather than running on every 5s tick:
+			//   - The gate excludes the entire bring-up window. Once the four
+			//     init flags flip, this branch runs while nodes are still
+			//     booting; probing not-yet-serving nodes there only stalls the
+			//     reconcile and adds nothing (creation owns versions/extensions
+			//     via the install image already).
+			//   - The throttle keeps steady-state node API traffic low. If
+			//     health later degrades the gate pauses recovery until nodes
+			//     rejoin, which is acceptable — the rolling-upgrade flow owns
+			//     any active upgrade, and these checks are intended for a
+			//     running cluster, not a half-built one.
+			if flags.NodesHealthReady && t.driftRecoveryDue(ctx, cluster) {
+				// Keep talos-current aligned with the running version
+				// regardless of whether enforcement is enabled — enforced or
+				// manual upgrades bypass the orchestrated flow that normally
+				// maintains it.
+				t.refreshTalosCurrentVersion(ctx, cluster)
+				if err := t.reconcileTalosVersion(ctx, cluster); err != nil {
+					vlog.Warn(fmt.Sprintf("Error during Talos version enforcement %s: %v", clusterLogTag(cluster), err))
+				}
+				if err := t.reconcileExtensions(ctx, cluster); err != nil {
+					vlog.Warn(fmt.Sprintf("Error during extension reconciliation %s: %v", clusterLogTag(cluster), err))
+				}
+				t.markDriftRecoveryRan(ctx, cluster)
 			}
 
 			// Best-effort: re-evaluate workload-cluster node health so the
@@ -160,6 +173,21 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 	// Check if all control planes Talos APIs are ready before configuring workers
 	if err := t.stageWaitAllControlPlanesReady(ctx, cluster, prepResult.controlPlanes); err != nil {
 		return err
+	}
+
+	// Sync the VIP pool members before gating on the Kubernetes API.
+	// Stage 3 only updates the pool the first time it runs; once its
+	// controlplane_applied flag is set it is skipped, so a pool that ended up
+	// incomplete during bring-up (e.g. only the first control plane had an IP
+	// when Stage 3 ran) would never be repaired here. The API-readiness gate
+	// below depends on the VIP routing to the control planes, so leaving the
+	// pool short deadlocks the cluster: the API never comes up, and the
+	// post-bootstrap node reconciliation that would otherwise fix the pool
+	// never runs. All control plane Talos APIs are confirmed ready at this
+	// point, so their IPs are populated and updateVIPPoolMembers can publish
+	// the full set.
+	if err := t.updateVIPPoolMembers(ctx, cluster); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to sync VIP pool members before Kubernetes API check %s: %v", clusterLogTag(cluster), err))
 	}
 
 	// Check if Kubernetes API server is ready before configuring workers

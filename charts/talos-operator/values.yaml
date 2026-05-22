@@ -81,19 +81,26 @@ talos:
     - siderolabs/qemu-guest-agent
     - siderolabs/trident-iscsi-tools
     - siderolabs/util-linux-tools
+  # Extension reconciliation reinstalls a node from vmInstallImage.<provider>,
+  # which ALSO moves it to that image's Talos version — so it can upgrade
+  # clusters fleet-wide whenever the image tag differs from the running version.
+  # Disabled by default so it never auto-upgrades datacenters that have not
+  # opted in; while false no node is touched even if requiredExtensions are
+  # listed/missing. Enable per environment to enforce extensions, ideally with
+  # vmInstallImage tagged at the cluster's current Talos version.
+  extensionEnforceEnabled: false
   # Minutes between Talos upgrade triggers on the same node + image. Must be
   # long enough to cover a Talos reboot + extension unpack + API recovery; once
   # the window elapses with extensions still missing, the operator re-triggers.
   extensionCooldownMinutes: 5
   # Talos version enforcement reconciler: probes each node's running Talos
-  # version via the Talos API on every reconcile, and if a node disagrees
-  # with talos.version above triggers `talosctl upgrade` against it (CPs
-  # first, then workers, one per pass). Never downgrades — a node running a
-  # newer Talos than configured surfaces a
-  # TalosVersionEnforcement=True/Downgrade condition and the pass is
-  # aborted. Enabled by default; set to false to disable and rely solely on
-  # the annotation-driven upgrade flow.
-  versionEnforceEnabled: true
+  # version via the Talos API and, if a node disagrees with the cluster's
+  # per-cluster upgrade.vitistack.io/talos-target annotation, triggers
+  # `talosctl upgrade` (CPs first, then workers, one per pass). Never
+  # downgrades. The desired version comes from the per-cluster annotation,
+  # never a global default. Disabled by default — upgrades are driven by the
+  # annotation-driven flow; enable only as an opt-in drift-recovery backstop.
+  versionEnforceEnabled: false
   # Minutes between version-enforcement Talos upgrade triggers on the same
   # node + target version + image. Without this throttle the 5s reconcile
   # loop would re-issue the upgrade RPC every pass while the node is still

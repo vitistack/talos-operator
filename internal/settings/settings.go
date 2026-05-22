@@ -32,16 +32,24 @@ func Init() {
 	// TALOS_VM_INSTALL_IMAGE_* default above (factory schematic
 	// b0f2a8b5…d49365). Override to "" to disable the check.
 	viper.SetDefault(consts.TALOS_REQUIRED_EXTENSIONS, "siderolabs/iscsi-tools,siderolabs/qemu-guest-agent,siderolabs/trident-iscsi-tools,siderolabs/util-linux-tools")
+	// Extension reconciliation reinstalls nodes from TALOS_VM_INSTALL_IMAGE_*,
+	// which also moves them to that image's Talos version — so it can upgrade
+	// clusters fleet-wide. Disabled by default; enable explicitly per
+	// environment. While false, no node is touched even if required extensions
+	// are listed/missing.
+	viper.SetDefault(consts.TALOS_EXTENSION_ENFORCE_ENABLED, false)
 	// Cooldown between Talos upgrade triggers on the same node + image. 10
 	// minutes covers the typical reboot + extension unpack window with margin.
 	viper.SetDefault(consts.TALOS_EXTENSION_COOLDOWN_MINUTES, 5)
 	viper.SetDefault(consts.TALOS_PREDICTABLE_NETWORK_NAMES, true)
 	// Talos version enforcement reconciler: probes node Talos version on
 	// every reconcile and triggers `talosctl upgrade` for nodes that
-	// disagree with TALOS_VERSION. Never downgrades. Enabled by default;
-	// set to false to disable and revert to annotation-driven upgrades
-	// only.
-	viper.SetDefault(consts.TALOS_VERSION_ENFORCE_ENABLED, true)
+	// disagree with the cluster's desired version (the per-cluster
+	// upgrade.vitistack.io/talos-target annotation). Never downgrades.
+	// Disabled by default: upgrades are driven by the orchestrated
+	// annotation flow (UpgradeController), and this enforcement pass is an
+	// opt-in drift-recovery backstop. Set to true to enable.
+	viper.SetDefault(consts.TALOS_VERSION_ENFORCE_ENABLED, false)
 	// Cooldown between version-enforcement Talos upgrade triggers on the same
 	// node + target version + image. Covers Talos reboot + cordon/drain +
 	// API recovery so the 5s reconcile loop doesn't hammer a node that's

@@ -240,6 +240,24 @@ func (s *TalosStateService) SetTimestamp(ctx context.Context, cluster *vitistack
 	return fmt.Errorf("failed to update secret timestamp after %d retries", maxRetries)
 }
 
+// GetTimestamp reads an RFC3339 timestamp field from the consolidated Secret.
+// Returns ok=false when the key is absent, empty, or unparseable.
+func (s *TalosStateService) GetTimestamp(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, key string) (time.Time, bool) {
+	secret, err := s.secretService.GetTalosSecret(ctx, cluster)
+	if err != nil || secret.Data == nil {
+		return time.Time{}, false
+	}
+	raw, ok := secret.Data[key]
+	if !ok || len(raw) == 0 {
+		return time.Time{}, false
+	}
+	ts, err := time.Parse(time.RFC3339, string(raw))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
+}
+
 // GetState returns persisted state flags from the cluster's consolidated Secret.
 func (s *TalosStateService) GetState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (bootstrapped bool, hasKubeconfig bool, err error) {
 	secret, e := s.secretService.GetTalosSecret(ctx, cluster)

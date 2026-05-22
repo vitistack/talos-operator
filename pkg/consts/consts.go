@@ -35,6 +35,15 @@ var (
 	// Empty value disables the feature.
 	TALOS_REQUIRED_EXTENSIONS = "TALOS_REQUIRED_EXTENSIONS" //nolint:revive,stylecheck // consistent with other env var constants
 
+	// TALOS_EXTENSION_ENFORCE_ENABLED toggles the extension-reconciliation
+	// pass. Because reinstalling a node from TALOS_VM_INSTALL_IMAGE_* also
+	// moves it to that image's Talos version, this pass can effectively
+	// upgrade clusters fleet-wide whenever the image tag differs from the
+	// running version. It is therefore OFF by default and must be explicitly
+	// enabled per environment; even with TALOS_REQUIRED_EXTENSIONS set, no
+	// node is touched while this is false. Default: false.
+	TALOS_EXTENSION_ENFORCE_ENABLED = "TALOS_EXTENSION_ENFORCE_ENABLED" //nolint:revive,stylecheck // consistent with other env var constants
+
 	// TALOS_EXTENSION_COOLDOWN_MINUTES is how long the operator waits after
 	// triggering a Talos upgrade on a node before considering another trigger
 	// for the same node + image. The window has to cover Talos reboot +
@@ -50,7 +59,8 @@ var (
 	// annotation-driven rolling upgrade is in progress, and never downgrades
 	// (any node above the desired version surfaces a
 	// TalosVersionEnforcement=True/Downgrade condition and the pass is
-	// aborted). Default: true.
+	// aborted). The desired version comes from the per-cluster talos-target
+	// annotation, not a global default. Default: false.
 	TALOS_VERSION_ENFORCE_ENABLED = "TALOS_VERSION_ENFORCE_ENABLED" //nolint:revive,stylecheck // consistent with other env var constants
 
 	// TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES is how long the operator waits

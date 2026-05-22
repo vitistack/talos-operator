@@ -577,6 +577,9 @@ func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *Ku
 	talosManager := talos.NewTalosManager(c, statusManager)
 	configService := talosconfigservice.NewTalosConfigService()
 	upgradeService := upgradeservice.NewUpgradeService(c, statusManager, clientService, machineSvc, talosManager.GetStateService(), configService)
+	// Inject the upgrade service so the drift-recovery pass can refresh the
+	// talos-current annotation from the actually-running version.
+	talosManager.SetUpgradeService(upgradeService)
 	upgradeController := upgradeservice.NewUpgradeController(c, secretService, statusManager, clientService, upgradeService)
 	return &KubernetesClusterReconciler{
 		Client:              c,
