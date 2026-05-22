@@ -88,6 +88,23 @@ func (t *TalosManager) updateVIPPoolMembers(ctx context.Context, cluster *vitist
 	controlPlanes := t.machineService.FilterMachinesByRole(machines, controlPlaneRole)
 	controlPlaneIPs := extractIPv4Addresses(controlPlanes)
 
+	// Don't publish a partial pool. extractIPv4Addresses silently drops any
+	// control-plane Machine that has no resolvable IPv4 yet (common mid
+	// bring-up or rollout), so writing here would shrink the VIP backend set to
+	// however many happen to have an IP at this instant — the flapping that
+	// leaves the VIP with too few realservers and stalls the API endpoint.
+	// Wait until every control-plane Machine has an IP before syncing. Genuine
+	// scale-down is handled by removeControlPlaneNode/removeNodeFromVIPPool,
+	// which call this only after the Machine is gone, so the counts match again.
+	if len(controlPlanes) == 0 {
+		vlog.Info(fmt.Sprintf("Skipping VIP pool member update %s: no control plane machines found", clusterLogTag(cluster)))
+		return nil
+	}
+	if len(controlPlaneIPs) < len(controlPlanes) {
+		vlog.Info(fmt.Sprintf("Skipping VIP pool member update %s: only %d/%d control planes have an IPv4 address yet", clusterLogTag(cluster), len(controlPlaneIPs), len(controlPlanes)))
+		return nil
+	}
+
 	vipName := cluster.Spec.Cluster.ClusterId
 	vip := &vitistackv1alpha1.ControlPlaneVirtualSharedIP{}
 	if err := t.Get(ctx, types.NamespacedName{Name: vipName, Namespace: cluster.Namespace}, vip); err != nil {
@@ -309,12 +326,30 @@ func (t *TalosManager) mirrorVIPReadyToKC(ctx context.Context, cluster *vitistac
 	_ = t.statusManager.SetCondition(ctx, cluster, "ControlPlaneVirtualSharedIPReady", string(cond.Status), reason, msg)
 }
 
+// desiredKubernetesVersion resolves the cluster's intended Kubernetes version,
+// preferring the actually-running version (persisted secret, then the
+// upgrade.vitistack.io/kubernetes-current annotation) over
+// spec.topology.version. Annotation-driven Kubernetes upgrades intentionally do
+// not write the spec, so using the spec here makes already-upgraded nodes look
+// "newer than desired" and spams downgrade-skip warnings every reconcile.
+func (t *TalosManager) desiredKubernetesVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) string {
+	if t.upgradeService != nil {
+		if v, err := t.upgradeService.GetPersistedVersions(ctx, cluster); err == nil && v != nil && v.KubernetesVersion != "" {
+			return v.KubernetesVersion
+		}
+		if current := t.upgradeService.GetUpgradeState(cluster).KubernetesCurrent; current != "" {
+			return current
+		}
+	}
+	return cluster.Spec.Topology.Version
+}
+
 // reconcileNodeVersions checks all nodes in the workload cluster and upgrades any
-// that are running a different Kubernetes version than what the cluster spec requires.
+// that are running a Kubernetes version older than the cluster's desired version.
 // This handles the case where a node joins with a stale config template that has an
 // older Kubernetes version baked in (e.g., after a cluster-wide upgrade).
 func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	desiredVersion := cluster.Spec.Topology.Version
+	desiredVersion := t.desiredKubernetesVersion(ctx, cluster)
 	if desiredVersion == "" {
 		return nil // No explicit version set, nothing to enforce
 	}

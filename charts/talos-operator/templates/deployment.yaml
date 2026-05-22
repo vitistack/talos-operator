@@ -98,6 +98,10 @@ spec:
             - name: TALOS_EXTENSION_COOLDOWN_MINUTES
               value: {{ . | quote }}
             {{- end }}
+            {{- if hasKey .Values.talos "extensionEnforceEnabled" }}
+            - name: TALOS_EXTENSION_ENFORCE_ENABLED
+              value: {{ .Values.talos.extensionEnforceEnabled | quote }}
+            {{- end }}
             {{- if hasKey .Values.talos "versionEnforceEnabled" }}
             - name: TALOS_VERSION_ENFORCE_ENABLED
               value: {{ .Values.talos.versionEnforceEnabled | quote }}

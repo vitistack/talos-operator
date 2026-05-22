@@ -23,25 +23,33 @@ func Init() {
 	viper.SetDefault(consts.TENANT_CONFIGMAP_NAME, "talos-tenant-config")
 	viper.SetDefault(consts.TENANT_CONFIGMAP_NAMESPACE, "default")
 	viper.SetDefault(consts.TENANT_CONFIGMAP_DATA_KEY, "config.yaml")
-	viper.SetDefault(consts.TALOS_VERSION, "v1.12.7")
-	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.35.4")
-	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.12.7")
-	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.12.7")
+	viper.SetDefault(consts.TALOS_VERSION, "v1.13.2")
+	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.36.1")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.2")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.2")
 	// TALOS_REQUIRED_EXTENSIONS lists Talos system extensions every node must
 	// have installed. Must stay in sync with the schematic baked into the
 	// TALOS_VM_INSTALL_IMAGE_* default above (factory schematic
 	// b0f2a8b5…d49365). Override to "" to disable the check.
 	viper.SetDefault(consts.TALOS_REQUIRED_EXTENSIONS, "siderolabs/iscsi-tools,siderolabs/qemu-guest-agent,siderolabs/trident-iscsi-tools,siderolabs/util-linux-tools")
+	// Extension reconciliation reinstalls nodes from TALOS_VM_INSTALL_IMAGE_*,
+	// which also moves them to that image's Talos version — so it can upgrade
+	// clusters fleet-wide. Disabled by default; enable explicitly per
+	// environment. While false, no node is touched even if required extensions
+	// are listed/missing.
+	viper.SetDefault(consts.TALOS_EXTENSION_ENFORCE_ENABLED, false)
 	// Cooldown between Talos upgrade triggers on the same node + image. 10
 	// minutes covers the typical reboot + extension unpack window with margin.
 	viper.SetDefault(consts.TALOS_EXTENSION_COOLDOWN_MINUTES, 5)
 	viper.SetDefault(consts.TALOS_PREDICTABLE_NETWORK_NAMES, true)
 	// Talos version enforcement reconciler: probes node Talos version on
 	// every reconcile and triggers `talosctl upgrade` for nodes that
-	// disagree with TALOS_VERSION. Never downgrades. Enabled by default;
-	// set to false to disable and revert to annotation-driven upgrades
-	// only.
-	viper.SetDefault(consts.TALOS_VERSION_ENFORCE_ENABLED, true)
+	// disagree with the cluster's desired version (the per-cluster
+	// upgrade.vitistack.io/talos-target annotation). Never downgrades.
+	// Disabled by default: upgrades are driven by the orchestrated
+	// annotation flow (UpgradeController), and this enforcement pass is an
+	// opt-in drift-recovery backstop. Set to true to enable.
+	viper.SetDefault(consts.TALOS_VERSION_ENFORCE_ENABLED, false)
 	// Cooldown between version-enforcement Talos upgrade triggers on the same
 	// node + target version + image. Covers Talos reboot + cordon/drain +
 	// API recovery so the 5s reconcile loop doesn't hammer a node that's
@@ -59,7 +67,7 @@ func Init() {
 	// Default: "bootimage" (uses the BOOT_IMAGE URL below as the Talos ISO).
 	// Set to "pxe" to provision via netboot instead.
 	viper.SetDefault(consts.BOOT_IMAGE_SOURCE, string(consts.DefaultBootImageSource))
-	viper.SetDefault(consts.BOOT_IMAGE, "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.12.7/nocloud-amd64.iso")
+	viper.SetDefault(consts.BOOT_IMAGE, "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.13.2/nocloud-amd64.iso")
 
 	dotenv.LoadDotEnv()
 	viper.AutomaticEnv()

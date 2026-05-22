@@ -90,7 +90,8 @@ func GetTalosVersionAdapter(version string) TalosVersionAdapter {
 
 	switch {
 	case minor <= 11:
-		vlog.Infof("Using Talos v1.11.x adapter for version %s", cleanVersion)
+		vlog.Warnf("Talos v1.11.x is deprecated and support will be removed in a future release; "+
+			"please migrate to v1.12.x or later (version %s)", cleanVersion)
 		return NewV1_11Adapter()
 	case minor == 12:
 		vlog.Infof("Using Talos v1.12.x adapter for version %s", cleanVersion)

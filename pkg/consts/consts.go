@@ -35,6 +35,15 @@ var (
 	// Empty value disables the feature.
 	TALOS_REQUIRED_EXTENSIONS = "TALOS_REQUIRED_EXTENSIONS" //nolint:revive,stylecheck // consistent with other env var constants
 
+	// TALOS_EXTENSION_ENFORCE_ENABLED toggles the extension-reconciliation
+	// pass. Because reinstalling a node from TALOS_VM_INSTALL_IMAGE_* also
+	// moves it to that image's Talos version, this pass can effectively
+	// upgrade clusters fleet-wide whenever the image tag differs from the
+	// running version. It is therefore OFF by default and must be explicitly
+	// enabled per environment; even with TALOS_REQUIRED_EXTENSIONS set, no
+	// node is touched while this is false. Default: false.
+	TALOS_EXTENSION_ENFORCE_ENABLED = "TALOS_EXTENSION_ENFORCE_ENABLED" //nolint:revive,stylecheck // consistent with other env var constants
+
 	// TALOS_EXTENSION_COOLDOWN_MINUTES is how long the operator waits after
 	// triggering a Talos upgrade on a node before considering another trigger
 	// for the same node + image. The window has to cover Talos reboot +
@@ -50,7 +59,8 @@ var (
 	// annotation-driven rolling upgrade is in progress, and never downgrades
 	// (any node above the desired version surfaces a
 	// TalosVersionEnforcement=True/Downgrade condition and the pass is
-	// aborted). Default: true.
+	// aborted). The desired version comes from the per-cluster talos-target
+	// annotation, not a global default. Default: false.
 	TALOS_VERSION_ENFORCE_ENABLED = "TALOS_VERSION_ENFORCE_ENABLED" //nolint:revive,stylecheck // consistent with other env var constants
 
 	// TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES is how long the operator waits
@@ -87,6 +97,14 @@ var (
 	BOOT_IMAGE_SOURCE = "BOOT_IMAGE_SOURCE"
 
 	BOOT_IMAGE = "BOOT_IMAGE"
+
+	// PROVISION_FAILURE_TIMEOUT_MINUTES is how long a KubernetesCluster may stay
+	// non-Ready with no Machine ever reaching Running before its Phase is set
+	// to Failed. Catches the case where the underlying infra cannot create the
+	// VMs (e.g. kubevirt without a storage class) and the cluster would
+	// otherwise sit in Pending forever with no signal. Default: 15. Set 0 to
+	// disable the auto-fail behaviour.
+	PROVISION_FAILURE_TIMEOUT_MINUTES = "PROVISION_FAILURE_TIMEOUT_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
 )
 
 // EndpointMode represents the mode for determining control plane endpoints

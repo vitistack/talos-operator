@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	corev1 "k8s.io/api/core/v1"
@@ -25,6 +26,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/services/talosconfigservice"
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 	"github.com/vitistack/talos-operator/internal/services/talosversion"
+	"github.com/vitistack/talos-operator/internal/services/upgradeservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -42,6 +44,18 @@ type TalosManager struct {
 	endpointService *endpointservice.EndpointService
 	stateService    *talosstateservice.TalosStateService
 	etcdService     *etcdservice.EtcdService
+	// upgradeService is injected after construction (see SetUpgradeService):
+	// the UpgradeService depends on this manager's state service, so it cannot
+	// be supplied at NewTalosManager time. Used by the drift-recovery pass to
+	// keep the talos-current annotation aligned with the running version.
+	upgradeService *upgradeservice.UpgradeService
+}
+
+// SetUpgradeService injects the UpgradeService used to refresh Talos version
+// bookkeeping annotations from the actually-running version. Called by the
+// controller once both have been constructed.
+func (t *TalosManager) SetUpgradeService(s *upgradeservice.UpgradeService) {
+	t.upgradeService = s
 }
 
 // NewTalosManager creates a new instance of TalosManager
@@ -185,6 +199,27 @@ func (t *TalosManager) getTalosSecretFlags(ctx context.Context, cluster *vitista
 // setSecretTimestamp sets a timestamp field in the consolidated Secret
 func (t *TalosManager) setSecretTimestamp(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, key string) error {
 	return t.stateService.SetTimestamp(ctx, cluster, key)
+}
+
+// driftRecoveryDue reports whether enough time has elapsed since the last
+// Talos-version/extension drift-recovery pass to run another. A missing or
+// unparseable timestamp means "due", so a fresh operator process (or the very
+// first eligible pass) runs immediately.
+func (t *TalosManager) driftRecoveryDue(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) bool {
+	last, ok := t.stateService.GetTimestamp(ctx, cluster, "drift_recovery_at")
+	if !ok {
+		return true
+	}
+	return time.Since(last) >= driftRecoveryInterval
+}
+
+// markDriftRecoveryRan records that the drift-recovery passes ran so the next
+// one is throttled by driftRecoveryInterval. Best-effort: a failed write just
+// means the next pass runs sooner.
+func (t *TalosManager) markDriftRecoveryRan(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) {
+	if err := t.setSecretTimestamp(ctx, cluster, "drift_recovery_at"); err != nil {
+		vlog.Debug(fmt.Sprintf("failed to record drift_recovery_at for %s: %v", clusterLogTag(cluster), err))
+	}
 }
 
 // setTalosSecretFlags sets provided boolean flags in the consolidated Secret

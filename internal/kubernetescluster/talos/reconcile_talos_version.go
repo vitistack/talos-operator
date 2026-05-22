@@ -22,6 +22,22 @@ import (
 // re-triggers (assumed prior upgrade failed).
 const defaultVersionEnforceCooldown = 5 * time.Minute
 
+// talosNodeProbeTimeout bounds a single per-node Talos API round trip (version
+// probe, extension query). During bring-up a node's API port is often
+// TCP-reachable before the gRPC/mTLS server is actually serving; without a
+// deadline the call inherits the reconcile context (which has none) and
+// blocks, stalling the whole reconcile. 8s sits comfortably above a healthy
+// handshake + round trip while still failing fast on a stuck node.
+const talosNodeProbeTimeout = 8 * time.Second
+
+// driftRecoveryInterval throttles the Talos-version and extension drift
+// recovery passes. They reconcile a node's running state back toward intent
+// and only matter on a settled cluster, so re-probing every node on the 5s
+// control loop is wasteful. Running them at most this often keeps steady-state
+// node API traffic low without meaningfully delaying recovery — any resulting
+// upgrade is paced by the minutes-long per-node cooldowns regardless.
+const driftRecoveryInterval = 90 * time.Second
+
 // versionEnforceCooldown returns the configured per-node cooldown duration.
 // Reads TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES via viper; values < 1 fall
 // back to the default.
@@ -34,9 +50,11 @@ func versionEnforceCooldown() time.Duration {
 }
 
 // reconcileTalosVersion brings every node's running Talos version into
-// agreement with the operator's desired version (TALOS_VERSION env var).
-// One node is upgraded per pass so the cluster rolls under the
-// rolling-upgrade pacing rather than restarting everything at once.
+// agreement with the cluster's desired version, read from the per-cluster
+// upgrade.vitistack.io/talos-target annotation (the future spec field) —
+// never from a global default. One node is upgraded per pass so the
+// cluster rolls under the rolling-upgrade pacing rather than restarting
+// everything at once.
 //
 // # Source-of-truth model
 //
@@ -52,8 +70,8 @@ func versionEnforceCooldown() time.Duration {
 // are preserved).
 //
 // Skip rules:
-//   - feature flag TALOS_VERSION_ENFORCE_ENABLED=false disables the pass entirely;
-//   - desired version (TALOS_VERSION) unset → no intent, no action;
+//   - feature flag TALOS_VERSION_ENFORCE_ENABLED=false disables the pass entirely (default);
+//   - talos-target annotation unset → no intent for this cluster, no action;
 //   - upgrade_in_progress=true → the rolling-upgrade flow owns the cluster;
 //   - any node runs a version newer than desired → never downgrade. We
 //     warn and surface a TalosVersionEnforcement=True/Downgrade condition
@@ -71,18 +89,24 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 		return nil
 	}
 
-	desired := viper.GetString(consts.TALOS_VERSION)
+	clusterTag := clusterLogTag(cluster)
+
+	// Desired version is the per-cluster intent expressed via the
+	// upgrade.vitistack.io/talos-target annotation (the future spec field).
+	// An absent annotation means no intent for THIS cluster, so we never
+	// act: the operator must not auto-upgrade clusters from a global
+	// default. We never downgrade — a target below a node's running
+	// version is rejected by the GreaterThan guard below.
+	desired := strings.TrimSpace(cluster.GetAnnotations()[consts.TalosTargetAnnotation])
 	if desired == "" {
-		return nil // no intent
+		return nil // no intent for this cluster
 	}
 	desired = consts.NormalizeTalosVersion(desired) // "v1.12.7"
 
 	desiredSemver, err := semver.NewVersion(consts.StripVersionPrefix(desired))
 	if err != nil {
-		return fmt.Errorf("invalid TALOS_VERSION %q: %w", desired, err)
+		return fmt.Errorf("invalid %s=%q on %s: %w", consts.TalosTargetAnnotation, desired, clusterTag, err)
 	}
-
-	clusterTag := clusterLogTag(cluster)
 
 	// Don't fight the rolling-upgrade flow.
 	if upState, err := t.stateService.GetUpgradeState(ctx, cluster); err == nil && upState != nil && upState.InProgress {
@@ -232,6 +256,60 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 	return nil
 }
 
+// refreshTalosCurrentVersion keeps the upgrade.vitistack.io/talos-current
+// annotation aligned with the version actually running on the cluster's nodes,
+// independent of the version-enforcement feature flag. The orchestrated upgrade
+// flow maintains this annotation for user-driven upgrades, but an enforced (or
+// otherwise out-of-band) upgrade changes the running version without going
+// through it; this closes that gap so upgrade-availability reporting stays
+// truthful. Best-effort and runs on the throttled drift-recovery cadence.
+func (t *TalosManager) refreshTalosCurrentVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) {
+	if t.upgradeService == nil {
+		return
+	}
+	running := t.runningTalosVersion(ctx, cluster)
+	if running == "" {
+		return
+	}
+	if err := t.upgradeService.ReconcileTalosCurrentVersion(ctx, cluster, running); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to refresh talos-current for %s: %v", clusterLogTag(cluster), err))
+	}
+}
+
+// runningTalosVersion returns the lowest Talos version observed across the
+// cluster's reachable nodes (normalized, e.g. "v1.13.2"), or "" if none are
+// reachable. The minimum is used so talos-current only advances once every
+// node has reached the new version (mid-rolling-upgrade it reflects the
+// least-upgraded node).
+func (t *TalosManager) runningTalosVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) string {
+	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
+	if err != nil || len(machines) == 0 {
+		return ""
+	}
+	clientConfig, err := t.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		return ""
+	}
+	actual := t.probeTalosVersions(ctx, cluster, machines, clientConfig)
+
+	var minSem *semver.Version
+	var minStr string
+	for _, v := range actual {
+		sv, perr := semver.NewVersion(consts.StripVersionPrefix(v))
+		if perr != nil {
+			continue
+		}
+		if minSem == nil || sv.LessThan(minSem) {
+			minSem = sv
+			minStr = v
+		}
+	}
+	if minStr == "" {
+		return ""
+	}
+	return consts.NormalizeTalosVersion(minStr)
+}
+
 // ensureInstallImagePinned writes machine.install.image into the cluster
 // secret when nothing is pinned yet, using the same resolution chain as
 // the bootstrap path. Idempotent and best-effort: failures are logged
@@ -278,7 +356,9 @@ func (t *TalosManager) probeTalosVersions(
 			vlog.Debug(fmt.Sprintf("Talos version probe skipped %s/%s: %v", clusterTag, m.Name, err))
 			continue
 		}
-		ver, verr := t.clientService.GetTalosVersion(ctx, client, ip)
+		probeCtx, cancel := context.WithTimeout(ctx, talosNodeProbeTimeout)
+		ver, verr := t.clientService.GetTalosVersion(probeCtx, client, ip)
+		cancel()
 		_ = client.Close()
 		if verr != nil {
 			vlog.Debug(fmt.Sprintf("Talos version probe failed %s/%s: %v", clusterTag, m.Name, verr))

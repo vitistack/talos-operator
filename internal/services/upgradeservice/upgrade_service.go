@@ -264,6 +264,67 @@ func (s *UpgradeService) InitializeCurrentVersions(ctx context.Context, cluster 
 	return nil
 }
 
+// ReconcileTalosCurrentVersion brings the talos-current annotation in line with
+// the version actually running on the cluster's nodes, and clears a now-stale
+// talos-available once the running version has caught up. This is needed
+// because out-of-band version changes — notably the version enforcer running
+// `talosctl upgrade` directly — bypass the orchestrated upgrade flow that
+// normally maintains these annotations, leaving talos-current frozen at its
+// initial value (which then makes upgrade-availability reporting wrong).
+//
+// running must be a concrete version (e.g. "v1.13.2"); empty is a no-op, and an
+// in-progress orchestrated upgrade is left untouched since that flow owns the
+// annotations.
+func (s *UpgradeService) ReconcileTalosCurrentVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, running string) error {
+	if running == "" {
+		return nil
+	}
+	running = consts.NormalizeTalosVersion(running)
+
+	state := s.GetUpgradeState(cluster)
+	if state.TalosStatus == consts.UpgradeStatusInProgress {
+		return nil
+	}
+
+	updates := make(map[string]string)
+	if consts.NormalizeTalosVersion(state.TalosCurrent) != running {
+		updates[consts.TalosCurrentAnnotation] = running
+	}
+
+	// Clear "available" once the running version has reached or passed it
+	// (e.g. an enforced upgrade completed). Leave it when a genuinely newer
+	// version is still available.
+	clearAvailable := false
+	if state.TalosAvailable != "" {
+		if rv, err := semver.NewVersion(consts.StripVersionPrefix(running)); err == nil {
+			if av, err := semver.NewVersion(consts.StripVersionPrefix(state.TalosAvailable)); err == nil && !rv.LessThan(av) {
+				clearAvailable = true
+			}
+		}
+	}
+
+	if len(updates) == 0 && !clearAvailable {
+		return nil
+	}
+
+	if clearAvailable {
+		updates[consts.TalosMessageAnnotation] = fmt.Sprintf("Talos up to date (%s)", running)
+		updates[consts.TalosStatusAnnotation] = string(consts.UpgradeStatusIdle)
+	}
+
+	if err := s.SetUpgradeAnnotations(ctx, cluster, updates); err != nil {
+		return err
+	}
+	if clearAvailable {
+		if err := s.RemoveAnnotation(ctx, cluster, consts.TalosAvailableAnnotation); err != nil {
+			return err
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("Refreshed Talos current version: %s current=%s clearedStaleAvailable=%t", clusterlog.Tag(cluster), running, clearAvailable))
+	return nil
+}
+
 // GetPersistedUpgradeState retrieves the upgrade state from the secret for recovery purposes.
 // This can be used to resume an interrupted upgrade.
 func (s *UpgradeService) GetPersistedUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*talosstateservice.UpgradeStateInfo, error) {

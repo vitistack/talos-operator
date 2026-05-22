@@ -61,6 +61,13 @@ func extensionUpgradeCooldown() time.Duration {
 // before control planes so the API server stays available longest. A cluster
 // with TALOS_REQUIRED_EXTENSIONS unset (the default) is a no-op.
 func (t *TalosManager) reconcileExtensions(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	// Reinstalling a node for extensions also moves it to the install image's
+	// Talos version, so this pass can upgrade clusters fleet-wide. Gate it
+	// behind an explicit opt-in (default false) so it never auto-upgrades
+	// datacenters that haven't enabled it.
+	if !viper.GetBool(consts.TALOS_EXTENSION_ENFORCE_ENABLED) {
+		return nil
+	}
 	required := parseRequiredExtensions(viper.GetString(consts.TALOS_REQUIRED_EXTENSIONS))
 	if len(required) == 0 {
 		return nil // feature disabled
@@ -241,7 +248,9 @@ func (t *TalosManager) processMachineExtensions(
 	}
 	defer func() { _ = tClient.Close() }()
 
-	installed, err := t.clientService.GetInstalledExtensions(ctx, tClient, nodeIP)
+	probeCtx, cancel := context.WithTimeout(ctx, talosNodeProbeTimeout)
+	installed, err := t.clientService.GetInstalledExtensions(probeCtx, tClient, nodeIP)
+	cancel()
 	if err != nil {
 		// Cooldown expired but the node is still unreachable — surface a
 		// warning so the operator can investigate (the VM may be stuck and
