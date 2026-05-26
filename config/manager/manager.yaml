@@ -55,6 +55,7 @@ spec:
         # This ensures that deployments meet the highest security requirements for Kubernetes.
         # For more details, see: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
         runAsNonRoot: true
+        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -68,6 +69,7 @@ spec:
           ports: []
           securityContext:
             allowPrivilegeEscalation: false
+            runAsGroup: 1000
             capabilities:
               drop:
                 - "ALL"
