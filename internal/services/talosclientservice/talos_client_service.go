@@ -205,12 +205,18 @@ func (s *TalosClientService) IsTalosAPIReachable(nodeIP string) bool {
 }
 
 // IsNodeInMaintenanceMode checks if a node is still in Talos maintenance mode by
-// making an insecure gRPC call (no client certificate). The behavior differs:
-//   - Maintenance node: gRPC connects but returns Unimplemented ("API is not implemented in maintenance mode")
-//   - Configured node: gRPC connection fails with "tls: certificate required" (mTLS enforced)
-//   - Unreachable node: connection times out
+// making an insecure gRPC call (no client certificate). Talos serves the Version
+// API over the insecure maintenance endpoint, so the call distinguishes the two
+// states:
+//   - Maintenance node: accepts the insecure call, Version succeeds (no mTLS).
+//   - Configured node: enforces mTLS and rejects the no-cert call with a TLS
+//     "certificate required" error.
+//   - Unreachable node: connection times out (also returns false).
 //
-// Returns true only if the node is confirmed to be in maintenance mode.
+// IMPORTANT: do not invert this to expect an "API not implemented in maintenance
+// mode" error — Version *is* implemented in maintenance mode. Treating Version
+// success as "not maintenance" makes every new node look already-configured, so
+// configuration is skipped and the node never joins the cluster.
 func (s *TalosClientService) IsNodeInMaintenanceMode(nodeIP string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -223,13 +229,9 @@ func (s *TalosClientService) IsNodeInMaintenanceMode(nodeIP string) bool {
 
 	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
 	_, err = tClient.Version(nodeCtx)
-	if err == nil {
-		// Version succeeded — unexpected in maintenance, but treat as not-maintenance
-		return false
-	}
-
-	// In maintenance mode, the error contains "not implemented in maintenance mode"
-	return strings.Contains(err.Error(), "maintenance mode")
+	// A successful insecure (no-cert) call means the node is still in maintenance
+	// mode; a secured node would have rejected it with a TLS certificate error.
+	return err == nil
 }
 
 func (s *TalosClientService) WaitForTalosAPIs(
