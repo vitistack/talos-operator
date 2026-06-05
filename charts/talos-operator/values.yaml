@@ -29,7 +29,9 @@ fullnameOverride: ""
 endpointMode: "networkconfiguration"
 
 # Maximum number of KubernetesCluster reconciliations running in parallel
-maxConcurrentReconciles: 3
+# (env var MAX_CONCURRENT_RECONCILES). The workqueue serializes by object key,
+# so this only parallelizes across distinct objects. Defaults to 5.
+maxConcurrentReconciles: 5
 
 # Custom endpoint addresses (only used when endpointMode is "custom")
 # Can be a single IP/hostname or comma-separated list
@@ -171,10 +173,10 @@ ingress:
 
 resources:
   limits:
-    cpu: 1000m
+    cpu: 2000m
     memory: 512Mi
   requests:
-    cpu: 350m
+    cpu: 500m
     memory: 256Mi
 
 # This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/

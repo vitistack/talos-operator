@@ -596,7 +596,7 @@ func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *Ku
 }
 
 func (r *KubernetesClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	maxConcurrent := 3
+	maxConcurrent := 5
 	if v := viper.GetString(consts.MAX_CONCURRENT_RECONCILES); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			maxConcurrent = n

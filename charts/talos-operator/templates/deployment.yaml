@@ -43,7 +43,7 @@ spec:
           env:
             # Controller concurrency
             - name: MAX_CONCURRENT_RECONCILES
-              value: {{ .Values.maxConcurrentReconciles | default 3 | quote }}
+              value: {{ .Values.maxConcurrentReconciles | default 5 | quote }}
             # Endpoint mode configuration
             - name: ENDPOINT_MODE
               value: {{ .Values.endpointMode | quote }}
