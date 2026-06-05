@@ -719,11 +719,22 @@ func (s *TalosClientService) upgradeNodeViaLifecycle(
 	// Use WithNode (singular): streaming RPCs are not multiplexed across nodes.
 	nodeCtx := talosclient.WithNode(ctx, nodeIP)
 
+	containerdInstance := &common.ContainerdInstance{
+		Driver:    common.ContainerDriver_CONTAINERD,
+		Namespace: common.ContainerdNamespace_NS_SYSTEM,
+	}
+
+	// Talos v1.13 split upgrade into pull-then-upgrade: LifecycleService.Upgrade
+	// does NOT pull the installer image, it requires the image to already exist in
+	// the node's containerd store (unlike the legacy MachineService.Upgrade, which
+	// pulled it itself). Pre-pull it first, mirroring talosctl's lifecycle flow,
+	// otherwise the upgrade fails with "not found in containerd store".
+	if err := s.pullInstallerImage(nodeCtx, tClient, nodeIP, installerImage, containerdInstance); err != nil {
+		return err
+	}
+
 	req := &machineapi.LifecycleServiceUpgradeRequest{
-		Containerd: &common.ContainerdInstance{
-			Driver:    common.ContainerDriver_CONTAINERD,
-			Namespace: common.ContainerdNamespace_NS_SYSTEM,
-		},
+		Containerd: containerdInstance,
 		Source: &machineapi.InstallArtifactsSource{
 			ImageName: installerImage,
 		},
@@ -759,6 +770,45 @@ func (s *TalosClientService) upgradeNodeViaLifecycle(
 				return fmt.Errorf("lifecycle upgrade failed on node %s with exit code %d", nodeIP, code)
 			}
 			vlog.Info(fmt.Sprintf("Talos lifecycle upgrade completed: node=%s exitCode=0", nodeIP))
+		}
+	}
+
+	return nil
+}
+
+// pullInstallerImage pre-pulls the installer image into the node's containerd
+// store via the v1.13+ ImageService.Pull streaming RPC. This is a prerequisite
+// for upgradeNodeViaLifecycle: LifecycleService.Upgrade reads the image from the
+// store and does not pull it. The lifecycle path is only taken for v1.13+ nodes,
+// which always implement ImageService, so no legacy fallback is needed here.
+func (s *TalosClientService) pullInstallerImage(
+	nodeCtx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+	installerImage string,
+	containerdInstance *common.ContainerdInstance,
+) error {
+	vlog.Info(fmt.Sprintf("Pulling Talos installer image: node=%s image=%s", nodeIP, installerImage))
+
+	stream, err := tClient.ImageClient.Pull(nodeCtx, &machineapi.ImageServicePullRequest{
+		Containerd: containerdInstance,
+		ImageRef:   installerImage,
+	})
+	if err != nil {
+		return fmt.Errorf("image pull API call failed for node %s: %w", nodeIP, err)
+	}
+
+	for {
+		resp, rerr := stream.Recv()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return fmt.Errorf("image pull stream error for node %s: %w", nodeIP, rerr)
+		}
+
+		if name := resp.GetName(); name != "" {
+			vlog.Info(fmt.Sprintf("Talos installer image pulled: node=%s image=%s", nodeIP, name))
 		}
 	}
 
