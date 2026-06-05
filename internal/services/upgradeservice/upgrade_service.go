@@ -272,7 +272,7 @@ func (s *UpgradeService) InitializeCurrentVersions(ctx context.Context, cluster 
 // normally maintains these annotations, leaving talos-current frozen at its
 // initial value (which then makes upgrade-availability reporting wrong).
 //
-// running must be a concrete version (e.g. "v1.13.2"); empty is a no-op, and an
+// running must be a concrete version (e.g. "v1.13.3"); empty is a no-op, and an
 // in-progress orchestrated upgrade is left untouched since that flow owns the
 // annotations.
 func (s *UpgradeService) ReconcileTalosCurrentVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, running string) error {
