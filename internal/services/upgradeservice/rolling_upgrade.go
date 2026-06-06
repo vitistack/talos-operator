@@ -24,6 +24,20 @@ const (
 
 	// NodeReadyTimeout is how long to wait for a node to become ready
 	NodeReadyTimeout = 10 * time.Minute
+
+	// NodeUpgradeRedriveInterval bounds how long a node may sit reachable on the
+	// pre-upgrade version before the operator re-drives the upgrade. The Talos
+	// v1.13 LifecycleService upgrade installs to disk and then reboots as two
+	// distinct steps; if a node stays reachable on the old version well past a
+	// normal install+reboot window, the reboot never took effect (e.g. it was
+	// upgraded by an operator build that didn't issue the reboot, or the reboot
+	// was lost). Re-driving UpgradeNode is idempotent and safe: it streams the
+	// install to completion before rebooting, so it never interrupts an install
+	// still in flight, and reinstalling an already-installed target is a fast
+	// no-op followed by the reboot into the target version. InitiatedAt is
+	// stamped after the install completes, so a healthy node (which reboots into
+	// the target within a couple of minutes) never reaches this threshold.
+	NodeUpgradeRedriveInterval = 5 * time.Minute
 )
 
 // RollingUpgradeResult contains the result of a rolling upgrade step
@@ -434,6 +448,20 @@ func (e *RollingUpgradeExecutor) checkNodeUpgradeCompletion(
 			RequeueAfter: 5 * time.Second,
 			Message:      fmt.Sprintf("Node %s upgrade verified, checking readiness", node.NodeName),
 		}
+	}
+
+	// Node is reachable but still reports the old version. In the normal flow a
+	// node is only briefly visible on the old version before it reboots into the
+	// target. If it has been sitting on the old version past the re-drive
+	// interval, the upgrade did not take — most commonly the install completed
+	// but the node never rebooted. Re-drive the upgrade so the operator
+	// converges from observed state without manual intervention.
+	if !node.InitiatedAt.IsZero() && time.Since(node.InitiatedAt) > NodeUpgradeRedriveInterval {
+		vlog.Info(fmt.Sprintf(
+			"Node %s still on %s (target=%s) %s after upgrade was initiated; re-driving upgrade",
+			node.NodeName, currentVersion, state.TargetVersion,
+			time.Since(node.InitiatedAt).Round(time.Second)))
+		return e.initiateNodeUpgrade(ctx, cluster, clientConfig, state, node)
 	}
 
 	return &RollingUpgradeResult{

@@ -773,6 +773,19 @@ func (s *TalosClientService) upgradeNodeViaLifecycle(
 		}
 	}
 
+	// Talos v1.13 LifecycleService.Upgrade installs the new version to disk but
+	// does NOT reboot (unlike the legacy MachineService.Upgrade, which rebooted
+	// as part of its sequence). The node keeps running the old version until it
+	// reboots into the freshly-installed one, so issue the reboot explicitly —
+	// mirroring talosctl's pull→upgrade→reboot flow. A dropped connection here
+	// means the node is already going down to reboot, which the caller treats as
+	// a successful initiation (see isConnectionError handling in the rolling
+	// upgrade executor).
+	vlog.Info(fmt.Sprintf("Rebooting node to boot into upgraded Talos: node=%s", nodeIP))
+	if rerr := tClient.Reboot(nodeCtx); rerr != nil {
+		return fmt.Errorf("reboot after lifecycle upgrade failed for node %s: %w", nodeIP, rerr)
+	}
+
 	return nil
 }
 
