@@ -43,7 +43,7 @@ customEndpoint: ""
 bootImageSource: "bootimage"
 
 # Boot image URL (only used when bootImageSource is "bootimage")
-bootImage: "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.13.3/nocloud-amd64.iso"
+bootImage: "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.13.4/nocloud-amd64.iso"
 
 # Log configuration
 logLevel: "info"
@@ -66,12 +66,12 @@ tenant:
 
 # Talos configuration
 talos:
-  version: "v1.13.3"
+  version: "v1.13.4"
   defaultKubernetesVersion: "1.36.1"
   predictableNetworkNames: true
   vmInstallImage:
-    kubevirt: "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.3"
-    default: "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.3"
+    kubevirt: "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.4"
+    default: "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.4"
   # Talos system extensions every node must have. The operator queries each
   # reachable node and triggers a Talos upgrade with vmInstallImage.<provider>
   # (or vmInstallImage.default as fallback) when one of these is missing — the

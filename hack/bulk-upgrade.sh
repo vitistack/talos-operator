@@ -15,7 +15,7 @@
 #   - upgrade.vitistack.io/talos-target is not already set
 #
 # When all checks pass, it sets upgrade.vitistack.io/talos-target on the
-# KubernetesCluster (always with a leading "v", e.g. "v1.13.3"), which the
+# KubernetesCluster (always with a leading "v", e.g. "v1.13.4"), which the
 # talos-operator picks up to perform the upgrade.
 #
 # Requirements: kubectl, jq
