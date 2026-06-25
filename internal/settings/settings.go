@@ -23,10 +23,10 @@ func Init() {
 	viper.SetDefault(consts.TENANT_CONFIGMAP_NAME, "talos-tenant-config")
 	viper.SetDefault(consts.TENANT_CONFIGMAP_NAMESPACE, "default")
 	viper.SetDefault(consts.TENANT_CONFIGMAP_DATA_KEY, "config.yaml")
-	viper.SetDefault(consts.TALOS_VERSION, "v1.13.4")
-	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.36.1")
-	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.4")
-	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.4")
+	viper.SetDefault(consts.TALOS_VERSION, "v1.13.5")
+	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.36.2")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.5")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.5")
 	// TALOS_REQUIRED_EXTENSIONS lists Talos system extensions every node must
 	// have installed. Must stay in sync with the schematic baked into the
 	// TALOS_VM_INSTALL_IMAGE_* default above (factory schematic
@@ -67,7 +67,7 @@ func Init() {
 	// Default: "bootimage" (uses the BOOT_IMAGE URL below as the Talos ISO).
 	// Set to "pxe" to provision via netboot instead.
 	viper.SetDefault(consts.BOOT_IMAGE_SOURCE, string(consts.DefaultBootImageSource))
-	viper.SetDefault(consts.BOOT_IMAGE, "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.13.4/nocloud-amd64.iso")
+	viper.SetDefault(consts.BOOT_IMAGE, "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.13.5/nocloud-amd64.iso")
 
 	dotenv.LoadDotEnv()
 	viper.AutomaticEnv()
