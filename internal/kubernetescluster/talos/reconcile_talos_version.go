@@ -277,7 +277,7 @@ func (t *TalosManager) refreshTalosCurrentVersion(ctx context.Context, cluster *
 }
 
 // runningTalosVersion returns the lowest Talos version observed across the
-// cluster's reachable nodes (normalized, e.g. "v1.13.4"), or "" if none are
+// cluster's reachable nodes (normalized, e.g. "v1.13.5"), or "" if none are
 // reachable. The minimum is used so talos-current only advances once every
 // node has reached the new version (mid-rolling-upgrade it reflects the
 // least-upgraded node).
