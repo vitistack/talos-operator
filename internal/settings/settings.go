@@ -62,6 +62,10 @@ func Init() {
 	viper.SetDefault(consts.ENDPOINT_MODE, string(consts.DefaultEndpointMode))
 	viper.SetDefault(consts.CUSTOM_ENDPOINT, "")
 
+	// LoadBalancer provider stamped onto ControlPlaneVirtualSharedIP.spec.provider,
+	// which selects the reconciler (static-ip-operator vs nms-operator). Default: "nam".
+	viper.SetDefault(consts.LOADBALANCER_PROVIDER, consts.DefaultLoadBalancerProvider)
+
 	// Boot image source configuration
 	// Valid values: "pxe", "bootimage"
 	// Default: "bootimage" (uses the BOOT_IMAGE URL below as the Talos ISO).
