@@ -14,7 +14,7 @@ spec:
     workorder: "simple-workorder"
     zone: "az1"
     workspace: "simple-workspace"
-    networkNamespaceName: team-viti2
+    networkNamespaceName: t-test004
   topology:
     version: "1.36.2"
     controlplane:
@@ -38,7 +38,7 @@ spec:
         - name: wp
           taint: []
           version: "1.36.2"
-          replicas: 1
+          replicas: 2
           machineClass: medium
           autoscaling:
             enabled: false
