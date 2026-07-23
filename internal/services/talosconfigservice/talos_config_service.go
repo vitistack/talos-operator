@@ -429,7 +429,11 @@ type StaticIPConfig struct {
 }
 
 // BuildStaticNetworkPatch generates a Talos machine config patch that configures
-// a static IP address, default route, and DNS nameservers on the given interface.
+// a static IP address and default route on the given interface. It deliberately
+// does NOT set machine.network.nameservers: DNS is owned by the modern
+// ResolverConfig document (e.g. from talos-tenant-config), and setting both makes
+// Talos 1.13 reject the config with ".machine.network.nameservers is already set
+// in v1alpha1 config".
 func BuildStaticNetworkPatch(cfg *StaticIPConfig) string {
 	prefixLen := extractPrefixLength(cfg.CIDR)
 	addressCIDR := fmt.Sprintf("%s/%s", cfg.IP, prefixLen)
@@ -444,12 +448,6 @@ func BuildStaticNetworkPatch(cfg *StaticIPConfig) string {
 	patch.WriteString("        routes:\n")
 	patch.WriteString("          - network: 0.0.0.0/0\n")
 	fmt.Fprintf(&patch, "            gateway: %s\n", cfg.Gateway)
-	if len(cfg.DNS) > 0 {
-		patch.WriteString("    nameservers:\n")
-		for _, ns := range cfg.DNS {
-			fmt.Fprintf(&patch, "      - %s\n", ns)
-		}
-	}
 
 	return patch.String()
 }

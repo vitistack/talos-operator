@@ -105,6 +105,15 @@ var (
 	// otherwise sit in Pending forever with no signal. Default: 15. Set 0 to
 	// disable the auto-fail behaviour.
 	PROVISION_FAILURE_TIMEOUT_MINUTES = "PROVISION_FAILURE_TIMEOUT_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
+
+	// LOADBALANCER_PROVIDER is stamped onto ControlPlaneVirtualSharedIP objects
+	// created by this operator (CPVSharedIP.spec.provider). It selects which
+	// operator reconciles the CPVSharedIP: "static-ip-operator" -> static-ip-operator,
+	// anything else (e.g. "nam") -> nms-operator, which is the default.
+	LOADBALANCER_PROVIDER = "LOADBALANCER_PROVIDER" //nolint:revive,stylecheck // consistent with other env var constants
+
+	// DefaultLoadBalancerProvider is the default value for LOADBALANCER_PROVIDER.
+	DefaultLoadBalancerProvider = "nam"
 )
 
 // EndpointMode represents the mode for determining control plane endpoints

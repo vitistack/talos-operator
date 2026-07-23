@@ -47,6 +47,9 @@ spec:
             # Endpoint mode configuration
             - name: ENDPOINT_MODE
               value: {{ .Values.endpointMode | quote }}
+            # Load balancer provider stamped on ControlPlaneVirtualSharedIP.spec.provider
+            - name: LOADBALANCER_PROVIDER
+              value: {{ .Values.loadBalancerProvider | default "nam" | quote }}
             {{- if .Values.customEndpoint }}
             - name: CUSTOM_ENDPOINT
               value: {{ .Values.customEndpoint | quote }}
