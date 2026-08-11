@@ -615,7 +615,7 @@ func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackv1a
 		// Machine exists, check if update is needed
 		// Compare spec and labels to determine if patch is necessary
 		specChanged := !machineSpecEqual(&existingMachine.Spec, &machine.Spec)
-		labelsChanged := !mapsEqual(existingMachine.Labels, machine.Labels)
+		labelsChanged := !maps.Equal(existingMachine.Labels, machine.Labels)
 		annotationsChanged := !annotationsContainAll(existingMachine.Annotations, machine.Annotations)
 
 		if !specChanged && !labelsChanged && !annotationsChanged {
@@ -665,7 +665,7 @@ func machineSpecEqual(a, b *vitistackv1alpha1.MachineSpec) bool {
 	if !cloudInitEqual(a.CloudInit, b.CloudInit) {
 		return false
 	}
-	return mapsEqual(a.Tags, b.Tags)
+	return maps.Equal(a.Tags, b.Tags)
 }
 
 func cloudInitEqual(a, b *vitistackv1alpha1.CloudInitConfig) bool {
@@ -673,19 +673,6 @@ func cloudInitEqual(a, b *vitistackv1alpha1.CloudInitConfig) bool {
 		return a == b
 	}
 	return a.Type == b.Type
-}
-
-// mapsEqual compares two string maps for equality
-func mapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || bv != v {
-			return false
-		}
-	}
-	return true
 }
 
 // annotationsContainAll checks if existing annotations contain all desired annotations with matching values
