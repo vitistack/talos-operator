@@ -37,66 +37,6 @@ type MachineManager struct {
 	Scheme *runtime.Scheme
 }
 
-// getMachineOS returns the MachineOS configuration based on BOOT_IMAGE_SOURCE setting.
-// When BOOT_IMAGE_SOURCE is set to "bootimage", it populates the OS with the Talos image URL.
-// When BOOT_IMAGE_SOURCE is "pxe" (default), returns an empty MachineOS (PXE boot is used).
-func getMachineOS() vitistackv1alpha1.MachineOS {
-	bootImageSource := viper.GetString(consts.BOOT_IMAGE_SOURCE)
-
-	// If boot image source is "bootimage", set the imageID from BOOT_IMAGE
-	if consts.BootImageSource(bootImageSource) == consts.BootImageSourceBootImage {
-		bootImage := viper.GetString(consts.BOOT_IMAGE)
-		return vitistackv1alpha1.MachineOS{
-			Family:       "linux",
-			Distribution: "talos",
-			Architecture: "amd64",
-			ImageID:      bootImage,
-		}
-	}
-
-	// Default: PXE boot, no OS configuration needed
-	return vitistackv1alpha1.MachineOS{}
-}
-
-// cloudInitOrNil returns a CloudInitConfig only when the cluster's
-// NetworkNamespace uses static IP allocation. DHCP and unset clusters get nil
-// so their Machine specs remain byte-identical to the pre-feature output.
-//
-// The returned config carries only Type=noCloud — no user-data source. That
-// is intentional: kubevirt-operator synthesizes network-config (the static IP)
-// from NetworkConfiguration.status, while user-data stays empty so Talos boots
-// into maintenance mode. The existing talosctl apply-config flow then delivers
-// the machine config over the Talos API once the VM is reachable on its
-// now-predictable static IP. This avoids a chicken-and-egg between
-// "role templates generated after VM boots" and "VM needs templates to boot".
-func cloudInitOrNil(enabled bool) *vitistackv1alpha1.CloudInitConfig {
-	if !enabled {
-		return nil
-	}
-	return &vitistackv1alpha1.CloudInitConfig{
-		Type: vitistackv1alpha1.CloudInitTypeNoCloud,
-	}
-}
-
-// getBootImageAnnotations returns the annotations required for boot image source.
-// When BOOT_IMAGE_SOURCE is set to "bootimage", it returns annotations to indicate
-// the use of a DataVolume for the boot source with HTTP type.
-// When BOOT_IMAGE_SOURCE is "pxe" (default), returns nil (no annotations needed).
-func getBootImageAnnotations() map[string]string {
-	bootImageSource := viper.GetString(consts.BOOT_IMAGE_SOURCE)
-
-	// If boot image source is "bootimage", return the required annotations
-	if consts.BootImageSource(bootImageSource) == consts.BootImageSourceBootImage {
-		return map[string]string{
-			"kubevirt.io/boot-source":      "datavolume",
-			"kubevirt.io/boot-source-type": "http",
-		}
-	}
-
-	// Default: PXE boot, no annotations needed
-	return nil
-}
-
 // NewMachineManager creates a new instance of MachineManager
 func NewMachineManager(c client.Client, scheme *runtime.Scheme) *MachineManager {
 	return &MachineManager{
@@ -349,6 +289,268 @@ func (m *MachineManager) generateControlPlaneMachines(cluster *vitistackv1alpha1
 	return machines
 }
 
+// generateWorkerMachinesWithContext creates worker Machine objects from cluster spec
+// Uses existing machines to determine nodepool membership and find available indices
+func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string, existingMachines []vitistackv1alpha1.Machine, useCloudInit bool) []*vitistackv1alpha1.Machine {
+	var machines []*vitistackv1alpha1.Machine
+
+	networkNamespaceName := cluster.Spec.Cluster.NetworkNamespaceName
+
+	// Create worker nodes based on node pools if available
+	if len(cluster.Spec.Topology.Workers.NodePools) == 0 {
+		// Create default worker node if no node pools are specified
+		return []*vitistackv1alpha1.Machine{
+			createWorkerMachine(fmt.Sprintf("%s-wrk0", clusterId), namespace, clusterId, "", "medium", "", nil, networkNamespaceName, useCloudInit),
+		}
+	}
+
+	// Build context from existing machines
+	indexCtx := buildWorkerIndexContext(existingMachines, clusterId)
+
+	// Process each nodepool
+	for idx := range cluster.Spec.Topology.Workers.NodePools {
+		nodePool := &cluster.Spec.Topology.Workers.NodePools[idx]
+		poolMachines := m.generateMachinesForNodePool(nodePool, clusterId, namespace, indexCtx, networkNamespaceName, useCloudInit)
+		machines = append(machines, poolMachines...)
+	}
+
+	return machines
+}
+
+// generateMachinesForNodePool generates machines for a single nodepool
+func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1.KubernetesClusterNodePool, clusterId, namespace string, indexCtx *workerIndexContext, networkNamespaceName string, useCloudInit bool) []*vitistackv1alpha1.Machine {
+	workerDisks := convertStorageToDisks(nodePool.Storage)
+	machineClass := nodePool.MachineClass
+	if machineClass == "" {
+		machineClass = "medium"
+	}
+	provider := vitistackv1alpha1.MachineProviderType(nodePool.Provider.String())
+
+	// Get existing machines for this nodepool
+	existingForPool := indexCtx.existingByNodePool[nodePool.Name]
+	existingCount := len(existingForPool)
+	desiredCount := nodePool.Replicas
+
+	// Keep existing machines that belong to this nodepool (up to desired count)
+	keepCount := min(existingCount, desiredCount)
+
+	// Pre-allocate machines slice
+	machines := make([]*vitistackv1alpha1.Machine, 0, desiredCount)
+
+	// Sort existing machines by index to keep lower indices first
+	sort.Slice(existingForPool, func(i, j int) bool {
+		return existingForPool[i].Name < existingForPool[j].Name
+	})
+
+	// Add existing machines that we want to keep
+	for i := range keepCount {
+		existing := existingForPool[i]
+		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName, useCloudInit)
+		machines = append(machines, machine)
+	}
+
+	// Create new machines if we need more
+	newMachinesNeeded := desiredCount - keepCount
+	for range newMachinesNeeded {
+		// Find next available index
+		newIndex := findNextAvailableIndex(indexCtx.usedIndices)
+		indexCtx.usedIndices[newIndex] = true
+
+		machineName := fmt.Sprintf("%s-wrk%d", clusterId, newIndex)
+		machine := createWorkerMachine(machineName, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName, useCloudInit)
+		machines = append(machines, machine)
+	}
+
+	return machines
+}
+
+// applyMachine creates or updates a Machine resource in Kubernetes
+func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackv1alpha1.Machine, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	// Set owner reference
+	if err := controllerutil.SetControllerReference(cluster, machine, m.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference: %w", err)
+	}
+
+	// Check if machine already exists
+	existingMachine := &vitistackv1alpha1.Machine{}
+	err := m.Get(ctx, types.NamespacedName{Name: machine.Name, Namespace: machine.Namespace}, existingMachine)
+
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Machine doesn't exist, create it
+			vlog.Info(fmt.Sprintf("Creating machine: %s %s", machine.Name, clusterlog.Tag(cluster)))
+			if err := m.Create(ctx, machine); err != nil {
+				return fmt.Errorf("failed to create machine: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to get machine: %w", err)
+		}
+	} else {
+		// Preserve the existing Machine's CloudInit as-is. The cloud-init feature
+		// must be a no-op for Machines that predate it — even for clusters that
+		// now resolve to useCloudInit=true, the already-running VMs must not see
+		// their spec mutated (which could trigger a kubevirt-operator patch path).
+		// New Machines (scale-up / fresh clusters) go through the Create branch
+		// above and keep the desired CloudInit.
+		machine.Spec.CloudInit = existingMachine.Spec.CloudInit
+
+		// Machine exists, check if update is needed
+		// Compare spec and labels to determine if patch is necessary
+		specChanged := !machineSpecEqual(&existingMachine.Spec, &machine.Spec)
+		labelsChanged := !maps.Equal(existingMachine.Labels, machine.Labels)
+		annotationsChanged := !annotationsContainAll(existingMachine.Annotations, machine.Annotations)
+
+		if !specChanged && !labelsChanged && !annotationsChanged {
+			// No changes needed, skip update
+			return nil
+		}
+
+		// Machine exists, update it if needed using strategic merge patch to avoid conflicts
+		patch := client.MergeFrom(existingMachine.DeepCopy())
+		existingMachine.Spec = machine.Spec
+		existingMachine.Labels = machine.Labels
+		// Merge annotations: preserve existing annotations, add/update operator-managed ones
+		existingMachine.Annotations = mergeAnnotations(existingMachine.Annotations, machine.Annotations)
+		if err := m.Patch(ctx, existingMachine, patch); err != nil {
+			// If patch fails due to conflict, it's likely because status was updated
+			// Log as debug and skip - the spec should be reconciled on next iteration
+			if errors.IsConflict(err) {
+				vlog.Debug(fmt.Sprintf("Machine update conflict (object modified) %s, will retry on next reconcile: machine=%s", clusterlog.Tag(cluster), machine.Name))
+				return nil
+			}
+			return fmt.Errorf("failed to patch machine: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// CleanupMachines deletes all machines associated with a cluster
+func (m *MachineManager) CleanupMachines(ctx context.Context, clusterId, namespace string) error {
+	// List all machines with the cluster label
+	machineList := &vitistackv1alpha1.MachineList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(namespace),
+		client.MatchingLabels{vitistackv1alpha1.ClusterIdAnnotation: clusterId},
+	}
+
+	if err := m.List(ctx, machineList, listOpts...); err != nil {
+		return fmt.Errorf("failed to list machines: %w", err)
+	}
+
+	// Delete each machine
+	for i := range machineList.Items {
+		machine := &machineList.Items[i]
+		vlog.Info(fmt.Sprintf("Deleting machine: %s cluster=%s/%s", machine.Name, namespace, clusterId))
+		if err := m.Delete(ctx, machine); err != nil {
+			if !errors.IsNotFound(err) {
+				return fmt.Errorf("failed to delete machine %s: %w", machine.Name, err)
+			}
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s/%s machineCount=%d", namespace, clusterId, len(machineList.Items)))
+	return nil
+}
+
+// validateMachineClasses validates that all machine classes referenced in the cluster spec exist and are enabled
+func (m *MachineManager) validateMachineClasses(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+	// Collect all unique machine classes from the cluster spec
+	machineClasses := make(map[string]bool)
+
+	// Control plane machine class
+	cpMachineClass := cluster.Spec.Topology.ControlPlane.MachineClass
+	if cpMachineClass == "" {
+		cpMachineClass = "large" // default
+	}
+	machineClasses[cpMachineClass] = true
+
+	// Worker node pool machine classes
+	if len(cluster.Spec.Topology.Workers.NodePools) > 0 {
+		for i := range cluster.Spec.Topology.Workers.NodePools {
+			nodePool := cluster.Spec.Topology.Workers.NodePools[i]
+			mc := nodePool.MachineClass
+			if mc == "" {
+				mc = "medium" // default
+			}
+			machineClasses[mc] = true
+		}
+	} else {
+		// Default worker machine class
+		machineClasses["medium"] = true
+	}
+
+	// Validate each unique machine class
+	for machineClassName := range machineClasses {
+		if err := machineclassservice.ValidateMachineClass(ctx, machineClassName); err != nil {
+			return fmt.Errorf("invalid machineClass %q: %w", machineClassName, err)
+		}
+		vlog.Debug(fmt.Sprintf("Validated machineClass: %s", machineClassName))
+	}
+
+	return nil
+}
+
+// getMachineOS returns the MachineOS configuration based on BOOT_IMAGE_SOURCE setting.
+// When BOOT_IMAGE_SOURCE is set to "bootimage", it populates the OS with the Talos image URL.
+// When BOOT_IMAGE_SOURCE is "pxe" (default), returns an empty MachineOS (PXE boot is used).
+func getMachineOS() vitistackv1alpha1.MachineOS {
+	bootImageSource := viper.GetString(consts.BOOT_IMAGE_SOURCE)
+
+	// If boot image source is "bootimage", set the imageID from BOOT_IMAGE
+	if consts.BootImageSource(bootImageSource) == consts.BootImageSourceBootImage {
+		bootImage := viper.GetString(consts.BOOT_IMAGE)
+		return vitistackv1alpha1.MachineOS{
+			Family:       "linux",
+			Distribution: "talos",
+			Architecture: "amd64",
+			ImageID:      bootImage,
+		}
+	}
+
+	// Default: PXE boot, no OS configuration needed
+	return vitistackv1alpha1.MachineOS{}
+}
+
+// cloudInitOrNil returns a CloudInitConfig only when the cluster's
+// NetworkNamespace uses static IP allocation. DHCP and unset clusters get nil
+// so their Machine specs remain byte-identical to the pre-feature output.
+//
+// The returned config carries only Type=noCloud — no user-data source. That
+// is intentional: kubevirt-operator synthesizes network-config (the static IP)
+// from NetworkConfiguration.status, while user-data stays empty so Talos boots
+// into maintenance mode. The existing talosctl apply-config flow then delivers
+// the machine config over the Talos API once the VM is reachable on its
+// now-predictable static IP. This avoids a chicken-and-egg between
+// "role templates generated after VM boots" and "VM needs templates to boot".
+func cloudInitOrNil(enabled bool) *vitistackv1alpha1.CloudInitConfig {
+	if !enabled {
+		return nil
+	}
+	return &vitistackv1alpha1.CloudInitConfig{
+		Type: vitistackv1alpha1.CloudInitTypeNoCloud,
+	}
+}
+
+// getBootImageAnnotations returns the annotations required for boot image source.
+// When BOOT_IMAGE_SOURCE is set to "bootimage", it returns annotations to indicate
+// the use of a DataVolume for the boot source with HTTP type.
+// When BOOT_IMAGE_SOURCE is "pxe" (default), returns nil (no annotations needed).
+func getBootImageAnnotations() map[string]string {
+	bootImageSource := viper.GetString(consts.BOOT_IMAGE_SOURCE)
+
+	// If boot image source is "bootimage", return the required annotations
+	if consts.BootImageSource(bootImageSource) == consts.BootImageSourceBootImage {
+		return map[string]string{
+			"kubevirt.io/boot-source":      "datavolume",
+			"kubevirt.io/boot-source-type": "http",
+		}
+	}
+
+	// Default: PXE boot, no annotations needed
+	return nil
+}
+
 // workerIndexContext holds context for worker index allocation across nodepools
 type workerIndexContext struct {
 	existingByNodePool map[string][]*vitistackv1alpha1.Machine
@@ -433,81 +635,6 @@ func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass 
 	}
 }
 
-// generateWorkerMachinesWithContext creates worker Machine objects from cluster spec
-// Uses existing machines to determine nodepool membership and find available indices
-func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1alpha1.KubernetesCluster, clusterId, namespace string, existingMachines []vitistackv1alpha1.Machine, useCloudInit bool) []*vitistackv1alpha1.Machine {
-	var machines []*vitistackv1alpha1.Machine
-
-	networkNamespaceName := cluster.Spec.Cluster.NetworkNamespaceName
-
-	// Create worker nodes based on node pools if available
-	if len(cluster.Spec.Topology.Workers.NodePools) == 0 {
-		// Create default worker node if no node pools are specified
-		return []*vitistackv1alpha1.Machine{
-			createWorkerMachine(fmt.Sprintf("%s-wrk0", clusterId), namespace, clusterId, "", "medium", "", nil, networkNamespaceName, useCloudInit),
-		}
-	}
-
-	// Build context from existing machines
-	indexCtx := buildWorkerIndexContext(existingMachines, clusterId)
-
-	// Process each nodepool
-	for idx := range cluster.Spec.Topology.Workers.NodePools {
-		nodePool := &cluster.Spec.Topology.Workers.NodePools[idx]
-		poolMachines := m.generateMachinesForNodePool(nodePool, clusterId, namespace, indexCtx, networkNamespaceName, useCloudInit)
-		machines = append(machines, poolMachines...)
-	}
-
-	return machines
-}
-
-// generateMachinesForNodePool generates machines for a single nodepool
-func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1.KubernetesClusterNodePool, clusterId, namespace string, indexCtx *workerIndexContext, networkNamespaceName string, useCloudInit bool) []*vitistackv1alpha1.Machine {
-	workerDisks := convertStorageToDisks(nodePool.Storage)
-	machineClass := nodePool.MachineClass
-	if machineClass == "" {
-		machineClass = "medium"
-	}
-	provider := vitistackv1alpha1.MachineProviderType(nodePool.Provider.String())
-
-	// Get existing machines for this nodepool
-	existingForPool := indexCtx.existingByNodePool[nodePool.Name]
-	existingCount := len(existingForPool)
-	desiredCount := nodePool.Replicas
-
-	// Keep existing machines that belong to this nodepool (up to desired count)
-	keepCount := min(existingCount, desiredCount)
-
-	// Pre-allocate machines slice
-	machines := make([]*vitistackv1alpha1.Machine, 0, desiredCount)
-
-	// Sort existing machines by index to keep lower indices first
-	sort.Slice(existingForPool, func(i, j int) bool {
-		return existingForPool[i].Name < existingForPool[j].Name
-	})
-
-	// Add existing machines that we want to keep
-	for i := range keepCount {
-		existing := existingForPool[i]
-		machine := createWorkerMachine(existing.Name, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName, useCloudInit)
-		machines = append(machines, machine)
-	}
-
-	// Create new machines if we need more
-	newMachinesNeeded := desiredCount - keepCount
-	for range newMachinesNeeded {
-		// Find next available index
-		newIndex := findNextAvailableIndex(indexCtx.usedIndices)
-		indexCtx.usedIndices[newIndex] = true
-
-		machineName := fmt.Sprintf("%s-wrk%d", clusterId, newIndex)
-		machine := createWorkerMachine(machineName, namespace, clusterId, nodePool.Name, machineClass, provider, workerDisks, networkNamespaceName, useCloudInit)
-		machines = append(machines, machine)
-	}
-
-	return machines
-}
-
 // findNextAvailableIndex finds the lowest unused index starting from 0
 func findNextAvailableIndex(usedIndices map[int]bool) int {
 	for i := 0; ; i++ {
@@ -582,67 +709,6 @@ func parseSizeToGB(size string) int64 {
 	return 0
 }
 
-// applyMachine creates or updates a Machine resource in Kubernetes
-func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackv1alpha1.Machine, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	// Set owner reference
-	if err := controllerutil.SetControllerReference(cluster, machine, m.Scheme); err != nil {
-		return fmt.Errorf("failed to set controller reference: %w", err)
-	}
-
-	// Check if machine already exists
-	existingMachine := &vitistackv1alpha1.Machine{}
-	err := m.Get(ctx, types.NamespacedName{Name: machine.Name, Namespace: machine.Namespace}, existingMachine)
-
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Machine doesn't exist, create it
-			vlog.Info(fmt.Sprintf("Creating machine: %s %s", machine.Name, clusterlog.Tag(cluster)))
-			if err := m.Create(ctx, machine); err != nil {
-				return fmt.Errorf("failed to create machine: %w", err)
-			}
-		} else {
-			return fmt.Errorf("failed to get machine: %w", err)
-		}
-	} else {
-		// Preserve the existing Machine's CloudInit as-is. The cloud-init feature
-		// must be a no-op for Machines that predate it — even for clusters that
-		// now resolve to useCloudInit=true, the already-running VMs must not see
-		// their spec mutated (which could trigger a kubevirt-operator patch path).
-		// New Machines (scale-up / fresh clusters) go through the Create branch
-		// above and keep the desired CloudInit.
-		machine.Spec.CloudInit = existingMachine.Spec.CloudInit
-
-		// Machine exists, check if update is needed
-		// Compare spec and labels to determine if patch is necessary
-		specChanged := !machineSpecEqual(&existingMachine.Spec, &machine.Spec)
-		labelsChanged := !maps.Equal(existingMachine.Labels, machine.Labels)
-		annotationsChanged := !annotationsContainAll(existingMachine.Annotations, machine.Annotations)
-
-		if !specChanged && !labelsChanged && !annotationsChanged {
-			// No changes needed, skip update
-			return nil
-		}
-
-		// Machine exists, update it if needed using strategic merge patch to avoid conflicts
-		patch := client.MergeFrom(existingMachine.DeepCopy())
-		existingMachine.Spec = machine.Spec
-		existingMachine.Labels = machine.Labels
-		// Merge annotations: preserve existing annotations, add/update operator-managed ones
-		existingMachine.Annotations = mergeAnnotations(existingMachine.Annotations, machine.Annotations)
-		if err := m.Patch(ctx, existingMachine, patch); err != nil {
-			// If patch fails due to conflict, it's likely because status was updated
-			// Log as debug and skip - the spec should be reconciled on next iteration
-			if errors.IsConflict(err) {
-				vlog.Debug(fmt.Sprintf("Machine update conflict (object modified) %s, will retry on next reconcile: machine=%s", clusterlog.Tag(cluster), machine.Name))
-				return nil
-			}
-			return fmt.Errorf("failed to patch machine: %w", err)
-		}
-	}
-
-	return nil
-}
-
 // machineSpecEqual compares two MachineSpec structs for equality
 func machineSpecEqual(a, b *vitistackv1alpha1.MachineSpec) bool {
 	// Compare key fields that the operator manages
@@ -693,70 +759,4 @@ func mergeAnnotations(existing, desired map[string]string) map[string]string {
 	}
 	maps.Copy(existing, desired)
 	return existing
-}
-
-// CleanupMachines deletes all machines associated with a cluster
-func (m *MachineManager) CleanupMachines(ctx context.Context, clusterId, namespace string) error {
-	// List all machines with the cluster label
-	machineList := &vitistackv1alpha1.MachineList{}
-	listOpts := []client.ListOption{
-		client.InNamespace(namespace),
-		client.MatchingLabels{vitistackv1alpha1.ClusterIdAnnotation: clusterId},
-	}
-
-	if err := m.List(ctx, machineList, listOpts...); err != nil {
-		return fmt.Errorf("failed to list machines: %w", err)
-	}
-
-	// Delete each machine
-	for i := range machineList.Items {
-		machine := &machineList.Items[i]
-		vlog.Info(fmt.Sprintf("Deleting machine: %s cluster=%s/%s", machine.Name, namespace, clusterId))
-		if err := m.Delete(ctx, machine); err != nil {
-			if !errors.IsNotFound(err) {
-				return fmt.Errorf("failed to delete machine %s: %w", machine.Name, err)
-			}
-		}
-	}
-
-	vlog.Info(fmt.Sprintf("Successfully cleaned up machines: cluster=%s/%s machineCount=%d", namespace, clusterId, len(machineList.Items)))
-	return nil
-}
-
-// validateMachineClasses validates that all machine classes referenced in the cluster spec exist and are enabled
-func (m *MachineManager) validateMachineClasses(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	// Collect all unique machine classes from the cluster spec
-	machineClasses := make(map[string]bool)
-
-	// Control plane machine class
-	cpMachineClass := cluster.Spec.Topology.ControlPlane.MachineClass
-	if cpMachineClass == "" {
-		cpMachineClass = "large" // default
-	}
-	machineClasses[cpMachineClass] = true
-
-	// Worker node pool machine classes
-	if len(cluster.Spec.Topology.Workers.NodePools) > 0 {
-		for i := range cluster.Spec.Topology.Workers.NodePools {
-			nodePool := cluster.Spec.Topology.Workers.NodePools[i]
-			mc := nodePool.MachineClass
-			if mc == "" {
-				mc = "medium" // default
-			}
-			machineClasses[mc] = true
-		}
-	} else {
-		// Default worker machine class
-		machineClasses["medium"] = true
-	}
-
-	// Validate each unique machine class
-	for machineClassName := range machineClasses {
-		if err := machineclassservice.ValidateMachineClass(ctx, machineClassName); err != nil {
-			return fmt.Errorf("invalid machineClass %q: %w", machineClassName, err)
-		}
-		vlog.Debug(fmt.Sprintf("Validated machineClass: %s", machineClassName))
-	}
-
-	return nil
 }
