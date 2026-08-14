@@ -310,15 +310,15 @@ func (m *MachineManager) generateWorkerMachinesWithContext(cluster *vitistackv1a
 	// Process each nodepool
 	for idx := range cluster.Spec.Topology.Workers.NodePools {
 		nodePool := &cluster.Spec.Topology.Workers.NodePools[idx]
-		poolMachines := m.generateMachinesForNodePool(nodePool, clusterId, namespace, indexCtx, networkNamespaceName, useCloudInit)
+		poolMachines := m.generateWorkerMachinesForNodePool(nodePool, clusterId, namespace, indexCtx, networkNamespaceName, useCloudInit)
 		machines = append(machines, poolMachines...)
 	}
 
 	return machines
 }
 
-// generateMachinesForNodePool generates machines for a single nodepool
-func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1.KubernetesClusterNodePool, clusterId, namespace string, indexCtx *workerIndexContext, networkNamespaceName string, useCloudInit bool) []*vitistackv1alpha1.Machine {
+// generateWorkerMachinesForNodePool generates machines for a single nodepool
+func (m *MachineManager) generateWorkerMachinesForNodePool(nodePool *vitistackv1alpha1.KubernetesClusterNodePool, clusterId, namespace string, indexCtx *workerIndexContext, networkNamespaceName string, useCloudInit bool) []*vitistackv1alpha1.Machine {
 	workerDisks := convertStorageToDisks(nodePool.Storage)
 	machineClass := nodePool.MachineClass
 	if machineClass == "" {
