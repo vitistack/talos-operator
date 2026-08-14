@@ -364,6 +364,15 @@ func (m *MachineManager) generateMachinesForNodePool(nodePool *vitistackv1alpha1
 	return machines
 }
 
+// findNextAvailableIndex finds the lowest unused index starting from 0
+func findNextAvailableIndex(usedIndices map[int]bool) int {
+	for i := 0; ; i++ {
+		if !usedIndices[i] {
+			return i
+		}
+	}
+}
+
 // applyMachine creates or updates a Machine resource in Kubernetes
 func (m *MachineManager) applyMachine(ctx context.Context, machine *vitistackv1alpha1.Machine, cluster *vitistackv1alpha1.KubernetesCluster) error {
 	// Set owner reference
@@ -632,15 +641,6 @@ func createWorkerMachine(name, namespace, clusterId, nodePoolName, machineClass 
 				"nodepool": nodePoolName,
 			},
 		},
-	}
-}
-
-// findNextAvailableIndex finds the lowest unused index starting from 0
-func findNextAvailableIndex(usedIndices map[int]bool) int {
-	for i := 0; ; i++ {
-		if !usedIndices[i] {
-			return i
-		}
 	}
 }
 
