@@ -709,6 +709,7 @@ func parseSizeToGB(size string) int64 {
 	return 0
 }
 
+// TODO: create equality checks as receiver funcs on type definition (in vitistack/common)
 // machineSpecEqual compares two MachineSpec structs for equality
 func machineSpecEqual(a, b *vitistackv1alpha1.MachineSpec) bool {
 	// Compare key fields that the operator manages
@@ -734,6 +735,7 @@ func machineSpecEqual(a, b *vitistackv1alpha1.MachineSpec) bool {
 	return maps.Equal(a.Tags, b.Tags)
 }
 
+// TODO: create equality checks as receiver funcs on type definition (in vitistack/common)
 func cloudInitEqual(a, b *vitistackv1alpha1.CloudInitConfig) bool {
 	if a == nil || b == nil {
 		return a == b
