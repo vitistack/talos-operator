@@ -52,6 +52,10 @@ const (
 	KubernetesClusterFinalizer               = "kubernetescluster.vitistack.io/finalizer"
 	ControllerRequeueDelay     time.Duration = 5 * time.Second
 	controlPlaneRole                         = "control-plane"
+
+	// ImmediateRequeueDelay is used where the reconciler must re-run promptly to
+	// observe state it just wrote, rather than waiting a full poll interval.
+	ImmediateRequeueDelay time.Duration = 100 * time.Millisecond
 )
 
 // +kubebuilder:rbac:groups=vitistack.io,resources=kubernetesclusters,verbs=get;list;watch;create;update;patch;delete
@@ -119,7 +123,7 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 		}
 		// Requeue immediately so the next pass sees the cleared state.
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: ImmediateRequeueDelay}, nil
 	}
 
 	// Handle scale-down before machine reconciliation
@@ -265,7 +269,7 @@ func (r *KubernetesClusterReconciler) ensureFinalizerOrRequeue(ctx context.Conte
 		return ctrl.Result{}, true, err
 	}
 	if requeue {
-		return ctrl.Result{Requeue: true}, true, nil
+		return ctrl.Result{RequeueAfter: ImmediateRequeueDelay}, true, nil
 	}
 	return ctrl.Result{}, false, nil
 }
