@@ -325,6 +325,89 @@ func (s *UpgradeService) ReconcileTalosCurrentVersion(ctx context.Context, clust
 	return nil
 }
 
+// ReconcileKubernetesCurrentVersion brings the recorded Kubernetes version in
+// line with what the cluster's nodes actually run. It is the Kubernetes twin of
+// ReconcileTalosCurrentVersion, with two deliberate differences.
+//
+// It tracks the HIGHEST version observed, not the lowest. The Talos reconcile
+// uses the minimum because talos-current only feeds availability reporting;
+// kubernetes-current is additionally the desired version reconcileNodeVersions
+// pulls stragglers up to, so tracking the minimum would make desired equal the
+// least-upgraded node and nothing would ever be upgraded again. The maximum is
+// also what every consumer means by it: the version this cluster has been moved
+// to.
+//
+// And it writes the secret as well as the annotation. The secret outranks the
+// annotation for every reader, and nothing but InitializeCurrentVersions has
+// ever written it — not even CompleteKubernetesUpgrade, which
+// resolveCurrentKubernetesVersion documents as writing it. So a cluster
+// upgraded by any means kept reporting the version it was first seen at, and
+// reconcileNodeVersions warned about every node on every pass, forever.
+func (s *UpgradeService) ReconcileKubernetesCurrentVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, running string) error {
+	if running == "" {
+		return nil
+	}
+	running = consts.NormalizeKubernetesVersion(running)
+	runningVer, err := semver.NewVersion(running)
+	if err != nil {
+		return nil
+	}
+
+	state := s.GetUpgradeState(cluster)
+	// An orchestrated upgrade owns these annotations while it is running.
+	if state.KubernetesStatus == consts.UpgradeStatusInProgress {
+		return nil
+	}
+
+	// The two records are checked independently rather than through the reader's
+	// precedence: an upgrade that updated the annotation and not the secret
+	// leaves them disagreeing, and comparing only the annotation would then see
+	// nothing to do while the secret — the one that is actually read — stays
+	// stale.
+	persisted := ""
+	if s.stateService != nil {
+		if v, verr := s.stateService.GetClusterVersions(ctx, cluster); verr == nil && v != nil {
+			persisted = consts.NormalizeKubernetesVersion(v.KubernetesVersion)
+		}
+	}
+	updateAnnotation := recordIsBehind(consts.NormalizeKubernetesVersion(state.KubernetesCurrent), runningVer)
+	updateSecret := s.stateService != nil && recordIsBehind(persisted, runningVer)
+	if !updateAnnotation && !updateSecret {
+		return nil
+	}
+
+	if updateAnnotation {
+		if err := s.SetUpgradeAnnotations(ctx, cluster, map[string]string{
+			consts.KubernetesCurrentAnnotation: running,
+		}); err != nil {
+			return err
+		}
+	}
+	if updateSecret {
+		if err := s.stateService.SetClusterVersions(ctx, cluster, "", running); err != nil {
+			return err
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("Refreshed Kubernetes current version: %s current=%s annotation=%t secret=%t",
+		clusterlog.Tag(cluster), running, updateAnnotation, updateSecret))
+	return nil
+}
+
+// recordIsBehind reports whether a recorded version names something older than
+// running. An empty or unparseable record counts as behind: a value no reader
+// can use is not a reason to keep reporting a stale one.
+func recordIsBehind(recorded string, running *semver.Version) bool {
+	if recorded == "" {
+		return true
+	}
+	v, err := semver.NewVersion(recorded)
+	if err != nil {
+		return true
+	}
+	return running.GreaterThan(v)
+}
+
 // GetPersistedUpgradeState retrieves the upgrade state from the secret for recovery purposes.
 // This can be used to resume an interrupted upgrade.
 func (s *UpgradeService) GetPersistedUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*talosstateservice.UpgradeStateInfo, error) {

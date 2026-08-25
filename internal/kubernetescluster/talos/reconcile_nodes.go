@@ -367,6 +367,13 @@ func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitis
 		return fmt.Errorf("failed to list workload cluster nodes: %w", err)
 	}
 
+	// Re-resolve after the refresh so this pass acts on the corrected version
+	// rather than warning once more and fixing it next time round.
+	t.refreshKubernetesCurrentVersion(ctx, cluster, nodeList.Items)
+	if refreshed := t.desiredKubernetesVersion(ctx, cluster); refreshed != "" {
+		desiredVersion = consts.EnsureVersionPrefix(refreshed)
+	}
+
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
 	if err != nil {
 		return fmt.Errorf("failed to get cluster machines: %w", err)
@@ -474,6 +481,53 @@ func collectNodeUpgradeCandidates(
 
 // filterNodesNeedingUpgrade drops candidates whose Talos machine config already
 // carries the desired kubelet image — those just need the kubelet to restart.
+// refreshKubernetesCurrentVersion keeps the recorded Kubernetes version aligned
+// with what the cluster's nodes actually run.
+//
+// The orchestrated upgrade flow maintains this for user-driven upgrades, but an
+// upgrade performed outside it — by the version enforcer, by viti talos, by
+// hand — changes the running version without going through it. Left
+// unreconciled, every node then reads as "newer than desired" and
+// reconcileNodeVersions warns about all of them on every pass, forever.
+//
+// Best-effort: the nodes are already in hand here, so it costs no API call, and
+// a failure to record must not stop the enforcement it precedes.
+func (t *TalosManager) refreshKubernetesCurrentVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodes []corev1.Node) {
+	if t.upgradeService == nil {
+		return
+	}
+	running := highestKubeletVersion(nodes)
+	if running == "" {
+		return
+	}
+	if err := t.upgradeService.ReconcileKubernetesCurrentVersion(ctx, cluster, running); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to refresh kubernetes-current for %s: %v", clusterLogTag(cluster), err))
+	}
+}
+
+// highestKubeletVersion returns the newest kubelet version across the cluster's
+// nodes, or "" when none parses.
+//
+// The highest rather than the lowest: a node lagging behind the rest is the
+// case reconcileNodeVersions exists to fix, so letting it define the cluster's
+// recorded version would make the straggler the target and strand it there.
+func highestKubeletVersion(nodes []corev1.Node) string {
+	var best *semver.Version
+	for i := range nodes {
+		v, err := semver.NewVersion(nodes[i].Status.NodeInfo.KubeletVersion)
+		if err != nil {
+			continue
+		}
+		if best == nil || v.GreaterThan(best) {
+			best = v
+		}
+	}
+	if best == nil {
+		return ""
+	}
+	return best.String()
+}
+
 func (t *TalosManager) filterNodesNeedingUpgrade(
 	ctx context.Context,
 	tClient *talosclient.Client,
