@@ -32,6 +32,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+const (
+	KubernetesClusterFinalizer               = "kubernetescluster.vitistack.io/finalizer"
+	ControllerRequeueDelay     time.Duration = 5 * time.Second
+	controlPlaneRole                         = "control-plane"
+)
+
 // MachineReconciler reconciles a Machine object
 type KubernetesClusterReconciler struct {
 	client.Client
@@ -48,11 +54,33 @@ type KubernetesClusterReconciler struct {
 	SecretService *secretservice.SecretService
 }
 
-const (
-	KubernetesClusterFinalizer               = "kubernetescluster.vitistack.io/finalizer"
-	ControllerRequeueDelay     time.Duration = 5 * time.Second
-	controlPlaneRole                         = "control-plane"
-)
+// NewKubernetesClusterReconciler creates a new KubernetesClusterReconciler with initialized managers
+func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *KubernetesClusterReconciler {
+	secretService := secretservice.NewSecretService(c)
+	stateService := talosstateservice.NewTalosStateService(secretService)
+	statusManager := status.NewManager(c, secretService, stateService)
+	clientService := talosclientservice.NewTalosClientService()
+	machineSvc := machineservice.NewMachineService(c)
+	talosManager := talos.NewTalosManager(c, statusManager)
+	configService := talosconfigservice.NewTalosConfigService()
+	upgradeService := upgradeservice.NewUpgradeService(c, statusManager, clientService, machineSvc, talosManager.GetStateService(), configService)
+	// Inject the upgrade service so the drift-recovery pass can refresh the
+	// talos-current annotation from the actually-running version.
+	talosManager.SetUpgradeService(upgradeService)
+	upgradeController := upgradeservice.NewUpgradeController(c, secretService, statusManager, clientService, upgradeService)
+	return &KubernetesClusterReconciler{
+		Client:              c,
+		Scheme:              scheme,
+		SecretService:       secretService,
+		TalosManager:        talosManager,
+		MachineManager:      machine.NewMachineManager(c, scheme),
+		StatusManager:       statusManager,
+		ValidatorService:    validationservice.NewValidationService(),
+		UpgradeService:      upgradeService,
+		UpgradeOrchestrator: upgradeservice.NewUpgradeOrchestrator(upgradeService, clientService, talosManager),
+		UpgradeController:   upgradeController,
+	}
+}
 
 // +kubebuilder:rbac:groups=vitistack.io,resources=kubernetesclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=vitistack.io,resources=kubernetesclusters/status,verbs=get;update;patch
@@ -270,6 +298,42 @@ func (r *KubernetesClusterReconciler) ensureFinalizerOrRequeue(ctx context.Conte
 	return ctrl.Result{}, false, nil
 }
 
+// ensureFinalizer adds the finalizer if not present. Returns requeue=true when an update was made.
+func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (bool, error) {
+	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
+		return false, nil
+	}
+
+	// Retry logic to handle concurrent modifications
+	maxRetries := 3
+	for attempt := range maxRetries {
+		// Get fresh copy if retrying
+		if attempt > 0 {
+			freshKC := &vitistackv1alpha1.KubernetesCluster{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(kc), freshKC); err != nil {
+				return false, err
+			}
+			kc = freshKC
+			if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
+				return false, nil // Another reconcile added it
+			}
+		}
+
+		controllerutil.AddFinalizer(kc, KubernetesClusterFinalizer)
+		err := r.Update(ctx, kc)
+		if err == nil {
+			return true, nil
+		}
+
+		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
+			vlog.Warn("Conflict adding finalizer, retrying... " + clusterlog.Tag(kc))
+			continue
+		}
+		return false, err
+	}
+	return false, fmt.Errorf("failed to add finalizer after %d retries", maxRetries)
+}
+
 // evaluateMachineHealth surfaces child Machine errors onto the cluster status
 // and transitions the cluster Phase to Failed if no Machine has reached the
 // Running phase before PROVISION_FAILURE_TIMEOUT_MINUTES elapses. This is the
@@ -411,42 +475,6 @@ func (r *KubernetesClusterReconciler) isTalosProvider(kc *vitistackv1alpha1.Kube
 	return kc.Spec.Cluster.Provider == vitistackv1alpha1.KubernetesProviderTypeTalos
 }
 
-// ensureFinalizer adds the finalizer if not present. Returns requeue=true when an update was made.
-func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (bool, error) {
-	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
-		return false, nil
-	}
-
-	// Retry logic to handle concurrent modifications
-	maxRetries := 3
-	for attempt := range maxRetries {
-		// Get fresh copy if retrying
-		if attempt > 0 {
-			freshKC := &vitistackv1alpha1.KubernetesCluster{}
-			if err := r.Get(ctx, client.ObjectKeyFromObject(kc), freshKC); err != nil {
-				return false, err
-			}
-			kc = freshKC
-			if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
-				return false, nil // Another reconcile added it
-			}
-		}
-
-		controllerutil.AddFinalizer(kc, KubernetesClusterFinalizer)
-		err := r.Update(ctx, kc)
-		if err == nil {
-			return true, nil
-		}
-
-		if apierrors.IsConflict(err) && attempt < maxRetries-1 {
-			vlog.Warn("Conflict adding finalizer, retrying... " + clusterlog.Tag(kc))
-			continue
-		}
-		return false, err
-	}
-	return false, fmt.Errorf("failed to add finalizer after %d retries", maxRetries)
-}
-
 // handleDeletion performs cleanup and removes the finalizer when present
 func (r *KubernetesClusterReconciler) handleDeletion(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
@@ -565,34 +593,6 @@ func (r *KubernetesClusterReconciler) getFreshCluster(ctx context.Context, kc *v
 		return nil, nil
 	}
 	return freshKC, nil
-}
-
-// NewKubernetesClusterReconciler creates a new KubernetesClusterReconciler with initialized managers
-func NewKubernetesClusterReconciler(c client.Client, scheme *runtime.Scheme) *KubernetesClusterReconciler {
-	secretService := secretservice.NewSecretService(c)
-	stateService := talosstateservice.NewTalosStateService(secretService)
-	statusManager := status.NewManager(c, secretService, stateService)
-	clientService := talosclientservice.NewTalosClientService()
-	machineSvc := machineservice.NewMachineService(c)
-	talosManager := talos.NewTalosManager(c, statusManager)
-	configService := talosconfigservice.NewTalosConfigService()
-	upgradeService := upgradeservice.NewUpgradeService(c, statusManager, clientService, machineSvc, talosManager.GetStateService(), configService)
-	// Inject the upgrade service so the drift-recovery pass can refresh the
-	// talos-current annotation from the actually-running version.
-	talosManager.SetUpgradeService(upgradeService)
-	upgradeController := upgradeservice.NewUpgradeController(c, secretService, statusManager, clientService, upgradeService)
-	return &KubernetesClusterReconciler{
-		Client:              c,
-		Scheme:              scheme,
-		SecretService:       secretService,
-		TalosManager:        talosManager,
-		MachineManager:      machine.NewMachineManager(c, scheme),
-		StatusManager:       statusManager,
-		ValidatorService:    validationservice.NewValidationService(),
-		UpgradeService:      upgradeService,
-		UpgradeOrchestrator: upgradeservice.NewUpgradeOrchestrator(upgradeService, clientService, talosManager),
-		UpgradeController:   upgradeController,
-	}
 }
 
 func (r *KubernetesClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
