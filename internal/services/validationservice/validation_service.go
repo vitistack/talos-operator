@@ -12,6 +12,10 @@ import (
 // >= 1, must be odd for etcd quorum, etc).
 const fieldControlPlaneReplicas = "spec.topology.controlPlane.replicas"
 
+// fieldWorkersNodePools is the spec field path reported in
+// ValidationError when a worker node pool fule fails.
+const fieldWorkersNodePools = "spec.topology.workers.nodePools"
+
 // ValidationService provides validation operations for Kubernetes resources
 type ValidationService struct{}
 
@@ -138,7 +142,7 @@ func validateNodePools(cluster *vitistackv1alpha1.KubernetesCluster) *Validation
 	// Check if there are no node pools defined
 	if len(nodePools) == 0 {
 		return &ValidationError{
-			Field:   "spec.topology.workers.nodePools",
+			Field:   fieldWorkersNodePools,
 			Message: "at least one node pool is required; removing all node pools would destroy all worker nodes and orphan running pods. To scale down, reduce replicas in existing node pools instead",
 		}
 	}
@@ -153,7 +157,7 @@ func validateNodePools(cluster *vitistackv1alpha1.KubernetesCluster) *Validation
 	// Warn if total replicas is zero (all pools have 0 replicas)
 	if totalReplicas == 0 {
 		return &ValidationError{
-			Field:   "spec.topology.workers.nodePools",
+			Field:   fieldWorkersNodePools,
 			Message: "total worker replicas across all node pools is 0; this will remove all worker nodes and orphan running pods",
 		}
 	}
