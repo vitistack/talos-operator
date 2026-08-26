@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// TODO: replace with a parseBoolAnnotation func that uses strconv.ParseBool instead of relying on raw string comparison
 const trueStr = "true"
 
 // UpgradeService manages upgrade detection, annotation handling, and orchestration
