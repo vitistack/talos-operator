@@ -97,7 +97,7 @@ func (r *KubernetesClusterReconciler) Reconcile(ctx context.Context, req ctrl.Re
 // reconcileTalosCluster performs the main reconciliation logic for a Talos-managed cluster.
 func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context, kubernetesCluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, error) {
 	// Validate the cluster spec (especially control plane replicas for etcd quorum)
-	if r.validateClusterSpec(ctx, kubernetesCluster) {
+	if !r.clusterSpecIsValid(ctx, kubernetesCluster) {
 		_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Validation error")
 		// Don't requeue — user needs to fix the spec.
 		return ctrl.Result{}, nil
@@ -239,19 +239,19 @@ func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluste
 	return ctrl.Result{}, false
 }
 
-// validateClusterSpec runs spec validation and sets the Valid condition. Returns
-// true when validation failed — Reconcile should stop without requeue (the user
-// must fix the spec). Returns false when validation passed.
-func (r *KubernetesClusterReconciler) validateClusterSpec(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) bool {
+// clusterSpecIsValid runs spec validation and sets the Valid condition. Returns
+// flase when validation failed — Reconcile should stop without requeue (the user
+// must fix the spec). Returns true when validation passed.
+func (r *KubernetesClusterReconciler) clusterSpecIsValid(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) bool {
 	if err := r.ValidatorService.ValidateKubernetesCluster(cluster); err != nil {
 		vlog.Error("KubernetesCluster validation failed "+clusterlog.Tag(cluster), err)
 		_ = r.StatusManager.SetPhase(ctx, cluster, status.PhaseValidationError)
 		_ = r.StatusManager.SetCondition(ctx, cluster, "Valid", "False", "ValidationFailed", err.Error())
-		return true
+		return false
 	}
 	_ = r.StatusManager.ClearValidationError(ctx, cluster)
 	_ = r.StatusManager.SetCondition(ctx, cluster, "Valid", "True", "ValidationPassed", "Cluster spec is valid")
-	return false
+	return true
 }
 
 // ensureFinalizerOrRequeue adds the finalizer if missing. Returns (result, true, err)
