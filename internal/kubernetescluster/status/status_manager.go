@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -67,7 +68,7 @@ func NewManager(c client.Client, secretService *secretservice.SecretService, sta
 	}
 }
 
-// UpdateMachineStatus updates the machine status with the given state
+// UpdateKubernetesClusterStatus updates the machine status with the given state
 func (m *StatusManager) UpdateKubernetesClusterStatus(ctx context.Context, kubernetesCluster *vitistackv1alpha1.KubernetesCluster) error {
 	// Load cluster Secret and derive phase/conditions
 	secret, err := m.SecretService.GetTalosSecret(ctx, kubernetesCluster)
@@ -432,14 +433,14 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster, message string) error {
 	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
 	if err != nil {
-		return err
+		return fmt.Errorf("transform kubernetescluster to unstructured: %w", err)
 	}
 
 	if err := m.Get(ctx, client.ObjectKeyFromObject(kc), u); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("get object by key: %w", err)
 	}
 
 	currentMessage, _, _ := unstructured.NestedString(u.Object, stateFieldStatus, "message")
@@ -448,10 +449,10 @@ func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.Ku
 	}
 
 	if err := ensureStatusMap(u); err != nil {
-		return err
+		return fmt.Errorf("ensure status map: %w", err)
 	}
 	if err := unstructured.SetNestedField(u.Object, message, stateFieldStatus, "message"); err != nil {
-		return err
+		return fmt.Errorf("set nested field: %w", err)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -462,7 +463,7 @@ func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.Ku
 		if apierrors.IsConflict(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("update status: %w", err)
 	}
 	return nil
 }
