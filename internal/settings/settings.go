@@ -23,15 +23,15 @@ func Init() {
 	viper.SetDefault(consts.TENANT_CONFIGMAP_NAME, "talos-tenant-config")
 	viper.SetDefault(consts.TENANT_CONFIGMAP_NAMESPACE, "default")
 	viper.SetDefault(consts.TENANT_CONFIGMAP_DATA_KEY, "config.yaml")
-	viper.SetDefault(consts.TALOS_VERSION, "v1.13.9")
+	viper.SetDefault(consts.TALOS_VERSION, "v1.13.10")
 	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.36.3")
-	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.9")
-	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365:v1.13.9")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.10")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.10")
 	// TALOS_REQUIRED_EXTENSIONS lists Talos system extensions every node must
 	// have installed. Must stay in sync with the schematic baked into the
 	// TALOS_VM_INSTALL_IMAGE_* default above (factory schematic
 	// b0f2a8b5…d49365). Override to "" to disable the check.
-	viper.SetDefault(consts.TALOS_REQUIRED_EXTENSIONS, "siderolabs/iscsi-tools,siderolabs/qemu-guest-agent,siderolabs/trident-iscsi-tools,siderolabs/util-linux-tools")
+	viper.SetDefault(consts.TALOS_REQUIRED_EXTENSIONS, "siderolabs/iscsi-tools,siderolabs/qemu-guest-agent,siderolabs/trident-iscsi-tools,siderolabs/util-linux-tools,siderolabs/nfs-utils")
 	// Extension reconciliation reinstalls nodes from TALOS_VM_INSTALL_IMAGE_*,
 	// which also moves them to that image's Talos version — so it can upgrade
 	// clusters fleet-wide. Disabled by default; enable explicitly per
@@ -71,7 +71,7 @@ func Init() {
 	// Default: "bootimage" (uses the BOOT_IMAGE URL below as the Talos ISO).
 	// Set to "pxe" to provision via netboot instead.
 	viper.SetDefault(consts.BOOT_IMAGE_SOURCE, string(consts.DefaultBootImageSource))
-	viper.SetDefault(consts.BOOT_IMAGE, "https://factory.talos.dev/image/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365/v1.13.9/nocloud-amd64.iso")
+	viper.SetDefault(consts.BOOT_IMAGE, "https://factory.talos.dev/image/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e/v1.13.10/nocloud-amd64.iso")
 
 	dotenv.LoadDotEnv()
 	viper.AutomaticEnv()
