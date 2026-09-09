@@ -1,0 +1,14 @@
+apiVersion: vitistack.io/v1alpha2
+kind: NetworkNamespace
+metadata:
+  name: test-static-networknamespace
+  labels:
+    app: vitistack
+    network-type: static
+spec:
+  networkProvisioning:
+    provider: nam
+  ipAllocation:
+    type: static
+    provider: static-ip-operator
+    

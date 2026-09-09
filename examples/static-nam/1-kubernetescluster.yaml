@@ -1,0 +1,83 @@
+apiVersion: vitistack.io/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: t-test-001
+spec:
+  data:
+    clusterUid: "a30fbc8d-596f-48d0-8541-dbc23bca28a1"
+    clusterId: "t-test-001-jnxc"
+    provider: talos
+    environment: dev
+    datacenter: test-south-az1
+    project: simple-project
+    region: south
+    workorder: "simple-workorder"
+    zone: "az1"
+    workspace: "simple-workspace"
+    networkNamespaceName: test-static-networknamespace
+  topology:
+    version: "1.36.2"
+    controlplane:
+      replicas: 1
+      version: "1.36.2"
+      machineClass: small
+      provider: kubevirt
+      storage:
+        - class: "standard"
+          path: "/var/lib/vitistack/kubevirt"
+          size: "20Gi"
+      metadata:
+        annotations:
+          environment: development
+          region: south
+        labels:
+          environment: development
+          region: south
+    workers:
+      nodePools:
+        - name: wp
+          taint: []
+          version: "1.36.2"
+          replicas: 2
+          machineClass: medium
+          autoscaling:
+            enabled: false
+            minReplicas: 1
+            maxReplicas: 5
+            scalingRules:
+              - "cpu"
+          metadata:
+            annotations:
+              environment: development
+              region: south
+            labels:
+              environment: development
+              region: south
+          provider: kubevirt
+          storage:
+            - class: "standard"
+              path: "/var/lib/vitistack/kubevirt"
+              size: "20Gi"
+        # - name: wp2
+        #   taint: []
+        #   version: "1.36.2"
+        #   replicas: 1
+        #   machineClass: medium
+        #   autoscaling:
+        #     enabled: false
+        #     minReplicas: 1
+        #     maxReplicas: 5
+        #     scalingRules:
+        #       - "cpu"
+        #   metadata:
+        #     annotations:
+        #       environment: development
+        #       region: south
+        #     labels:
+        #       environment: development
+        #       region: south
+        #   provider: kubevirt
+        #   storage:
+        #     - class: "standard"
+        #       path: "/var/lib/vitistack/kubevirt"
+        #       size: "20Gi"

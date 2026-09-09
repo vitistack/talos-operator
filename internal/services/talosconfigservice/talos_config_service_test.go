@@ -88,6 +88,35 @@ func TestApplyTenantOverridesNoOverrides(t *testing.T) {
 	}
 }
 
+// TestBuildStaticNetworkPatchOmitsNameservers verifies the static-IP patch does
+// NOT set legacy machine.network.nameservers. DNS is owned by the modern
+// ResolverConfig document (e.g. from talos-tenant-config); setting both makes
+// Talos 1.13 reject the config with ".machine.network.nameservers is already
+// set in v1alpha1 config". The patch must still configure IP, gateway and route.
+func TestBuildStaticNetworkPatchOmitsNameservers(t *testing.T) {
+	patch := BuildStaticNetworkPatch(&StaticIPConfig{
+		IP:        "100.64.8.6",
+		CIDR:      "100.64.8.0/24",
+		Gateway:   "100.64.8.1",
+		DNS:       []string{"100.64.8.1"}, // even when DNS is provided, must not be emitted
+		Interface: "enp1s0",
+	})
+
+	if strings.Contains(patch, "nameservers") {
+		t.Errorf("static network patch must not set machine.network.nameservers (conflicts with ResolverConfig); got:\n%s", patch)
+	}
+	for _, want := range []string{
+		"interface: enp1s0",
+		"100.64.8.6/24",
+		"network: 0.0.0.0/0",
+		"gateway: 100.64.8.1",
+	} {
+		if !strings.Contains(patch, want) {
+			t.Errorf("static network patch missing %q; got:\n%s", want, patch)
+		}
+	}
+}
+
 func TestMergeRoleTemplateWithOverridesCreatesCopy(t *testing.T) {
 	service := NewTalosConfigService()
 	role := []byte("machine:\n  install:\n    disk: /dev/vda\n")

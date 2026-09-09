@@ -1,0 +1,30 @@
+apiVersion: vitistack.io/v1alpha2
+kind: NetworkNamespace
+metadata:
+  name: test-static-networknamespace
+  labels:
+    app: vitistack
+    network-type: static
+spec:
+  datacenterIdentifier: dc1
+  supervisorIdentifier: svr1
+  networkProvisioning:
+    provider: manual
+    manual:
+      ipv4CIDR: "10.0.1.0/24"
+      ipv4Gateway: "10.0.1.1"
+      ipv6CIDR: "fd12:3456:789a::/64"
+      vlanId: 100
+  ipAllocation:
+    type: static
+    provider: static-ip-operator
+    static:
+      ipv4CIDR: "10.0.1.0/24"
+      ipv4Gateway: "10.0.1.1"
+      ipv4RangeStart: "10.0.1.10"
+      ipv4RangeEnd: "10.0.1.250"
+      vlanId: 100
+      dns:
+        - "10.0.1.1"
+        - "8.8.8.8"
+      ttlSeconds: 3600

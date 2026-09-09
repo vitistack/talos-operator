@@ -28,6 +28,12 @@ fullnameOverride: ""
 # - "custom": Use user-provided endpoint addresses
 endpointMode: "networkconfiguration"
 
+# Provider stamped on ControlPlaneVirtualSharedIP.spec.provider, selecting which
+# operator reconciles the control-plane VIP:
+# - "nam" (default): nms-operator
+# - "static-ip-operator": static-ip-operator
+loadBalancerProvider: "nam"
+
 # Maximum number of KubernetesCluster reconciliations running in parallel
 # (env var MAX_CONCURRENT_RECONCILES). The workqueue serializes by object key,
 # so this only parallelizes across distinct objects. Defaults to 5.
