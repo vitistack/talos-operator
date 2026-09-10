@@ -9,6 +9,8 @@ import (
 type adapterConfig struct {
 	version           string
 	kubernetesVersion string
+	maxK8sMajor       uint64
+	maxK8sMinor       uint64
 	etcdVersion       string
 	etcdRegistry      string
 	multiDoc          bool
@@ -34,6 +36,14 @@ func (a *baseAdapter) SupportsHostnameConfigDocument() bool {
 
 func (a *baseAdapter) DefaultKubernetesVersion() string {
 	return a.config.kubernetesVersion
+}
+
+// MaxKubernetesMinor returns the highest Kubernetes minor this Talos release
+// supports. Distinct from DefaultKubernetesVersion, which is only the version
+// used when none is specified: a cluster may legitimately run any patch of the
+// ceiling minor, above or below that default.
+func (a *baseAdapter) MaxKubernetesMinor() (major, minor uint64) {
+	return a.config.maxK8sMajor, a.config.maxK8sMinor
 }
 
 func (a *baseAdapter) DefaultEtcdVersion() string {

@@ -13,6 +13,7 @@ import (
 	"github.com/vitistack/common/pkg/operator/conditions"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
+	"github.com/vitistack/talos-operator/internal/services/talosversion"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -344,6 +345,16 @@ func (t *TalosManager) desiredKubernetesVersion(ctx context.Context, cluster *vi
 	return cluster.Spec.Topology.Version
 }
 
+// currentTalosVersion returns the Talos version the cluster's nodes are
+// running, or "" when it is not recorded yet. Callers treat "" as "unknown"
+// and skip any check that depends on it rather than blocking.
+func (t *TalosManager) currentTalosVersion(cluster *vitistackv1alpha1.KubernetesCluster) string {
+	if t.upgradeService == nil {
+		return ""
+	}
+	return t.upgradeService.GetUpgradeState(cluster).TalosCurrent
+}
+
 // reconcileNodeVersions checks all nodes in the workload cluster and upgrades any
 // that are running a Kubernetes version older than the cluster's desired version.
 // This handles the case where a node joins with a stale config template that has an
@@ -417,6 +428,17 @@ func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitis
 
 	// Strip the "v" prefix for the upgrade API (it adds it back internally)
 	targetVersion := consts.NormalizeKubernetesVersion(desiredVersion)
+
+	// This path bypasses ValidateKubernetesUpgradeTarget, and its target is the
+	// highest kubelet already running in the cluster. Without this check, one
+	// node that somehow reached a version the running Talos cannot support
+	// would be propagated to every other node.
+	if talosCurrent := t.currentTalosVersion(cluster); talosCurrent != "" {
+		if supported, reason := talosversion.SupportsKubernetesVersion(talosCurrent, targetVersion); !supported {
+			return fmt.Errorf("refusing to reconcile %d node(s) to Kubernetes %s: %s",
+				len(nodesToUpgrade), targetVersion, reason)
+		}
+	}
 
 	if err := t.clientService.UpgradeKubernetes(ctx, tClient, nodesToUpgrade, targetVersion); err != nil {
 		return fmt.Errorf("failed to upgrade node Kubernetes versions: %w", err)

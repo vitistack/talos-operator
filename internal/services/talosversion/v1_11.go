@@ -18,6 +18,8 @@ func NewV1_11Adapter() *V1_11Adapter {
 			config: adapterConfig{
 				version:           versionV1_11,
 				kubernetesVersion: "1.34.1",
+				maxK8sMajor:       1,
+				maxK8sMinor:       34,
 				etcdVersion:       "3.5.17",
 				etcdRegistry:      "gcr.io/etcd-development/etcd",
 				multiDoc:          false,
