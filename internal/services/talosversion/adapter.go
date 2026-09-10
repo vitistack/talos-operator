@@ -127,8 +127,11 @@ func GetTalosVersionAdapterFor(version string) (adapter TalosVersionAdapter, exa
 		vlog.Infof("Using Talos v1.13.x adapter for version %s", cleanVersion)
 		return NewV1_13Adapter(), true
 	default:
-		// For v1.14+ use the latest known adapter
-		vlog.Infof("Using Talos v1.13.x adapter for version %s (future version)", cleanVersion)
+		// For v1.14+ use the latest known adapter. Talos 1.14 is released and
+		// supports Kubernetes up to 1.37, so this branch is currently reached
+		// in practice and a v1_14 adapter is the correct fix. Until then
+		// exact=false keeps callers from judging it against v1.13's ceiling.
+		vlog.Infof("Using Talos v1.13.x adapter for version %s (newer than the newest adapter)", cleanVersion)
 		return NewV1_13Adapter(), false
 	}
 }
