@@ -1242,19 +1242,23 @@ func (s *UpgradeService) FailKubernetesUpgrade(ctx context.Context, cluster *vit
 // cluster.
 func (s *UpgradeService) WithdrawKubernetesUpgradeAvailable(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, reason string) error {
 	state := s.GetUpgradeState(cluster)
-	if state.KubernetesAvailable == "" {
-		return nil
-	}
 
-	// Message first: removal is what makes this a no-op on the next pass, so if
-	// it succeeded and the message write then failed, the reason would be lost
-	// with no way back to it.
+	// Record the reason first, and whether or not anything was advertised: a
+	// cluster that never had an offer still has to explain why none appears,
+	// and removal is what makes this a no-op on later passes, so a message
+	// written after it could be lost with no way back to it.
+	// SetUpgradeAnnotations patches only on change, so repeating this is free.
 	updates := map[string]string{consts.KubernetesMessageAnnotation: reason}
 	if state.KubernetesStatus == "" || state.KubernetesStatus == consts.UpgradeStatusCompleted {
 		updates[consts.KubernetesStatusAnnotation] = string(consts.UpgradeStatusIdle)
 	}
 	if err := s.SetUpgradeAnnotations(ctx, cluster, updates); err != nil {
 		return err
+	}
+
+	// Nothing was advertised, so there is nothing to retract.
+	if state.KubernetesAvailable == "" {
+		return nil
 	}
 
 	if err := s.RemoveAnnotation(ctx, cluster, consts.KubernetesAvailableAnnotation); err != nil {

@@ -81,6 +81,11 @@ func TestGetTalosVersionAdapterFor_Fallback(t *testing.T) {
 		{"below oldest adapter", "1.10.5"},
 		{"unparseable", "not-a-version"},
 		{"empty", ""},
+		// A 2.12 is not a 1.12. Matching on the minor alone would claim the
+		// v1.12 adapter describes it and enforce that release's ceiling.
+		{"unknown major, known minor", "2.12.0"},
+		{"unknown major, newest minor", "v2.13.4"},
+		{"major zero", "0.12.0"},
 	}
 
 	for _, tt := range tests {
@@ -148,6 +153,11 @@ func TestSupportsKubernetesVersion(t *testing.T) {
 		{"empty target fails open", "1.12.7", "", true},
 
 		{"v-prefixed both sides", "v1.12.7", "v1.36.3", false},
+
+		// An unrecognised major must fail open, not inherit the ceiling of
+		// the same-numbered minor.
+		{"unknown major fails open", "2.12.0", "1.36.3", true},
+		{"major zero fails open", "0.12.0", "1.36.3", true},
 	}
 
 	for _, tt := range tests {

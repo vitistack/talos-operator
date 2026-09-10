@@ -111,6 +111,15 @@ func GetTalosVersionAdapterFor(version string) (adapter TalosVersionAdapter, exa
 	// Check major.minor version and return appropriate adapter
 	minor := v.Minor()
 
+	// Every adapter describes a 1.x release, so a different major is one none
+	// of them can speak for — a 2.12 is not a 1.12. Adapter selection stays
+	// exactly as it was; only the claim that the adapter describes the version
+	// is withheld, which is what makes callers fail open.
+	knownMajor := v.Major() == 1
+	if !knownMajor {
+		vlog.Warnf("Talos version %s has an unrecognised major; adapter values may not apply", cleanVersion)
+	}
+
 	switch {
 	case minor < 11:
 		vlog.Warnf("Talos version %s predates the oldest known adapter (v1.11.x); "+
@@ -119,13 +128,13 @@ func GetTalosVersionAdapterFor(version string) (adapter TalosVersionAdapter, exa
 	case minor == 11:
 		vlog.Warnf("Talos v1.11.x is deprecated and support will be removed in a future release; "+
 			"please migrate to v1.12.x or later (version %s)", cleanVersion)
-		return NewV1_11Adapter(), true
+		return NewV1_11Adapter(), knownMajor
 	case minor == 12:
 		vlog.Infof("Using Talos v1.12.x adapter for version %s", cleanVersion)
-		return NewV1_12Adapter(), true
+		return NewV1_12Adapter(), knownMajor
 	case minor == 13:
 		vlog.Infof("Using Talos v1.13.x adapter for version %s", cleanVersion)
-		return NewV1_13Adapter(), true
+		return NewV1_13Adapter(), knownMajor
 	default:
 		// For v1.14+ use the latest known adapter. Talos 1.14 is released and
 		// supports Kubernetes up to 1.37, so this branch is currently reached
