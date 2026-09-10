@@ -2,6 +2,7 @@ package talos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -355,6 +356,46 @@ func (t *TalosManager) currentTalosVersion(cluster *vitistackv1alpha1.Kubernetes
 	return t.upgradeService.GetUpgradeState(cluster).TalosCurrent
 }
 
+// kubernetesTargetSupported returns an error when the cluster's running Talos
+// version cannot support targetVersion. An unknown Talos version is not an
+// error — see talosversion.SupportsKubernetesVersion for the fail-open rules.
+func (t *TalosManager) kubernetesTargetSupported(cluster *vitistackv1alpha1.KubernetesCluster, targetVersion string) error {
+	talosCurrent := t.currentTalosVersion(cluster)
+	if talosCurrent == "" {
+		return nil
+	}
+	if supported, reason := talosversion.SupportsKubernetesVersion(talosCurrent, targetVersion); !supported {
+		return errors.New(reason)
+	}
+	return nil
+}
+
+// talosClientForControlPlanes builds a Talos client aimed at the cluster's
+// control-plane nodes. Extracted from reconcileNodeVersions to keep that
+// function under the cyclomatic complexity limit; behaviour is unchanged.
+func (t *TalosManager) talosClientForControlPlanes(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	machines []*vitistackv1alpha1.Machine,
+) (*talosclient.Client, error) {
+	clientConfig, err := t.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load talos client config: %w", err)
+	}
+
+	controlPlanes := t.machineService.FilterMachinesByRole(machines, controlPlaneRole)
+	controlPlaneIPs := extractIPv4Addresses(controlPlanes)
+	if len(controlPlaneIPs) == 0 {
+		return nil, errors.New("no control plane IPs found for version reconciliation")
+	}
+
+	tClient, err := t.clientService.CreateTalosClient(ctx, false, clientConfig, controlPlaneIPs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Talos client for version reconciliation: %w", err)
+	}
+	return tClient, nil
+}
+
 // reconcileNodeVersions checks all nodes in the workload cluster and upgrades any
 // that are running a Kubernetes version older than the cluster's desired version.
 // This handles the case where a node joins with a stale config template that has an
@@ -404,20 +445,9 @@ func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitis
 		return nil
 	}
 
-	clientConfig, err := t.GetTalosClientConfig(ctx, cluster)
+	tClient, err := t.talosClientForControlPlanes(ctx, cluster, machines)
 	if err != nil {
-		return fmt.Errorf("failed to load talos client config: %w", err)
-	}
-
-	controlPlanes := t.machineService.FilterMachinesByRole(machines, controlPlaneRole)
-	controlPlaneIPs := extractIPv4Addresses(controlPlanes)
-	if len(controlPlaneIPs) == 0 {
-		return fmt.Errorf("no control plane IPs found for version reconciliation")
-	}
-
-	tClient, err := t.clientService.CreateTalosClient(ctx, false, clientConfig, controlPlaneIPs)
-	if err != nil {
-		return fmt.Errorf("failed to create Talos client for version reconciliation: %w", err)
+		return err
 	}
 	defer func() { _ = tClient.Close() }()
 
@@ -433,11 +463,9 @@ func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitis
 	// highest kubelet already running in the cluster. Without this check, one
 	// node that somehow reached a version the running Talos cannot support
 	// would be propagated to every other node.
-	if talosCurrent := t.currentTalosVersion(cluster); talosCurrent != "" {
-		if supported, reason := talosversion.SupportsKubernetesVersion(talosCurrent, targetVersion); !supported {
-			return fmt.Errorf("refusing to reconcile %d node(s) to Kubernetes %s: %s",
-				len(nodesToUpgrade), targetVersion, reason)
-		}
+	if err := t.kubernetesTargetSupported(cluster, targetVersion); err != nil {
+		return fmt.Errorf("refusing to reconcile %d node(s) to Kubernetes %s: %w",
+			len(nodesToUpgrade), targetVersion, err)
 	}
 
 	if err := t.clientService.UpgradeKubernetes(ctx, tClient, nodesToUpgrade, targetVersion); err != nil {
