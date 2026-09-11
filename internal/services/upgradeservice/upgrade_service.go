@@ -25,6 +25,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	"github.com/vitistack/talos-operator/internal/services/talosconfigservice"
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
+	"github.com/vitistack/talos-operator/internal/services/talosversion"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -579,10 +580,23 @@ func (s *UpgradeService) CheckForAvailableUpgrades(ctx context.Context, cluster 
 		// Show K8s upgrade available if:
 		// 1. Operator K8s version is newer than cluster's
 		// 2. Talos is not actively being upgraded (in-progress)
-		// Note: Kubernetes can be upgraded independently - no requirement to upgrade Talos first
-		if operatorK8sVer.GreaterThan(clusterK8sVer) && state.TalosStatus != consts.UpgradeStatusInProgress {
-			if err := s.SetKubernetesUpgradeAvailable(ctx, cluster, operatorK8sVersion); err != nil {
-				return err
+		// 3. The running Talos version actually supports that Kubernetes version
+		//
+		// Kubernetes upgrades do not require upgrading Talos first, but they are
+		// still bounded by what the running Talos release supports. Advertising
+		// past that boundary invites an upgrade that cannot succeed.
+		if state.TalosStatus != consts.UpgradeStatusInProgress {
+			supported, reason := talosversion.SupportsKubernetesVersion(state.TalosCurrent, operatorK8sVersion)
+			switch {
+			case !supported:
+				// Also retracts a value advertised before this check existed.
+				if err := s.WithdrawKubernetesUpgradeAvailable(ctx, cluster, reason); err != nil {
+					return err
+				}
+			case operatorK8sVer.GreaterThan(clusterK8sVer):
+				if err := s.SetKubernetesUpgradeAvailable(ctx, cluster, operatorK8sVersion); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -1214,6 +1228,48 @@ func (s *UpgradeService) FailKubernetesUpgrade(ctx context.Context, cluster *vit
 	})
 }
 
+// WithdrawKubernetesUpgradeAvailable removes a kubernetes-available annotation
+// the running Talos version cannot support, recording why.
+//
+// Advertisement is otherwise write-once per value: SetKubernetesUpgradeAvailable
+// returns early when the annotation already holds the version it is about to
+// write, so a cluster that was offered an incompatible version before this gate
+// existed would keep offering it forever. This is what clears those.
+//
+// It deliberately leaves any user-set kubernetes-target alone. Silently
+// discarding a requested upgrade would hide the problem; the target is rejected
+// by ValidateKubernetesUpgradeTarget instead, which surfaces the reason on the
+// cluster.
+func (s *UpgradeService) WithdrawKubernetesUpgradeAvailable(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, reason string) error {
+	state := s.GetUpgradeState(cluster)
+
+	// Record the reason first, and whether or not anything was advertised: a
+	// cluster that never had an offer still has to explain why none appears,
+	// and removal is what makes this a no-op on later passes, so a message
+	// written after it could be lost with no way back to it.
+	// SetUpgradeAnnotations patches only on change, so repeating this is free.
+	updates := map[string]string{consts.KubernetesMessageAnnotation: reason}
+	if state.KubernetesStatus == "" || state.KubernetesStatus == consts.UpgradeStatusCompleted {
+		updates[consts.KubernetesStatusAnnotation] = string(consts.UpgradeStatusIdle)
+	}
+	if err := s.SetUpgradeAnnotations(ctx, cluster, updates); err != nil {
+		return err
+	}
+
+	// Nothing was advertised, so there is nothing to retract.
+	if state.KubernetesAvailable == "" {
+		return nil
+	}
+
+	if err := s.RemoveAnnotation(ctx, cluster, consts.KubernetesAvailableAnnotation); err != nil {
+		return err
+	}
+
+	vlog.Info(fmt.Sprintf("Kubernetes upgrade withdrawn: %s available=%s reason=%s",
+		clusterlog.Tag(cluster), state.KubernetesAvailable, reason))
+	return nil
+}
+
 // BlockKubernetesUpgrade marks a Kubernetes upgrade as blocked (e.g., waiting for Talos upgrade)
 func (s *UpgradeService) BlockKubernetesUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, reason string) error {
 	updates := map[string]string{
@@ -1271,7 +1327,14 @@ func (s *UpgradeService) ValidateUpgradeTarget(currentVersion, targetVersion str
 // ValidateKubernetesUpgradeTarget validates Kubernetes upgrade target version.
 // Unlike ValidateUpgradeTarget, this allows same-version "upgrades" to re-apply
 // configuration when some nodes may be lagging behind.
-func (s *UpgradeService) ValidateKubernetesUpgradeTarget(currentVersion, targetVersion string) error {
+//
+// talosCurrent is the Talos version the cluster's nodes are actually running.
+// A target the running Talos release cannot support is rejected: Kubernetes and
+// Talos upgrade independently, but only within the range Talos supports, and
+// nothing else in the upgrade path enforces that. An empty or unrecognised
+// talosCurrent skips the compatibility check rather than blocking the upgrade;
+// see talosversion.SupportsKubernetesVersion.
+func (s *UpgradeService) ValidateKubernetesUpgradeTarget(talosCurrent, currentVersion, targetVersion string) error {
 	if currentVersion == "" || targetVersion == "" {
 		return fmt.Errorf("current and target versions must be specified")
 	}
@@ -1300,6 +1363,12 @@ func (s *UpgradeService) ValidateKubernetesUpgradeTarget(currentVersion, targetV
 			return fmt.Errorf("can only upgrade one minor version at a time: %s → %s (max: %d.%d.x)",
 				currentVersion, targetVersion, current.Major(), current.Minor()+1)
 		}
+	}
+
+	// The running Talos release has to support the target. Checked last so the
+	// version-shape errors above keep their more specific messages.
+	if supported, reason := talosversion.SupportsKubernetesVersion(talosCurrent, targetVersion); !supported {
+		return fmt.Errorf("incompatible Kubernetes target %s: %s", targetVersion, reason)
 	}
 
 	return nil

@@ -249,7 +249,7 @@ func (c *UpgradeController) startKubernetesUpgrade(
 		clusterlog.Tag(cluster), upgState.KubernetesCurrent, upgState.KubernetesTarget))
 
 	// Validate upgrade
-	if err := c.upgradeService.ValidateKubernetesUpgradeTarget(upgState.KubernetesCurrent, upgState.KubernetesTarget); err != nil {
+	if err := c.upgradeService.ValidateKubernetesUpgradeTarget(upgState.TalosCurrent, upgState.KubernetesCurrent, upgState.KubernetesTarget); err != nil {
 		vlog.Errorf("Invalid Kubernetes upgrade target %s: %v", clusterlog.Tag(cluster), err)
 		_ = c.upgradeService.FailKubernetesUpgrade(ctx, cluster, err.Error())
 		return 30 * time.Second, true, nil

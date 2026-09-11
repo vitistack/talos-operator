@@ -9,7 +9,10 @@ The talos-operator uses an **annotation-based upgrade system** that is provider-
 1. **Talos OS Upgrade** - Upgrades the underlying Talos Linux operating system
 2. **Kubernetes Version Upgrade** - Upgrades Kubernetes components (API server, kubelet, etc.)
 
-> **Note:** Talos and Kubernetes can be upgraded independently. However, you cannot run both upgrades simultaneously - one must complete before the other can start.
+> **Note:** Talos and Kubernetes can be upgraded independently, but only within the range the
+> running Talos release supports — a Kubernetes version above that range requires upgrading
+> Talos first. You also cannot run both upgrades simultaneously: one must complete before the
+> other can start.
 
 ## How Talos Upgrades Work
 
@@ -554,6 +557,12 @@ state machine still advances, prefer the retry recipe above instead.
 
 - **Kubernetes**: Can only upgrade one minor version at a time (e.g., 1.30 → 1.31 → 1.32)
 - **Talos**: Check the [Talos support matrix](https://www.talos.dev/docs/support-matrix/) for compatible Kubernetes versions
+- **Talos/Kubernetes pairing**: the operator refuses a Kubernetes target outside the range the
+  running Talos release supports, and withholds the `kubernetes-available` annotation in that
+  case. Upgrade Talos first. The ranges are not maintained here — they come from
+  `github.com/siderolabs/talos/pkg/machinery/compatibility`, so a new Talos release is picked up
+  by bumping that dependency. A release the vendored machinery does not know is not checked at
+  all, deliberately: see `SupportsKubernetesVersion`.
 
 ### Pre-upgrade Checklist
 
