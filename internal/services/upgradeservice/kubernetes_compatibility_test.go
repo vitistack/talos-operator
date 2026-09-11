@@ -29,7 +29,8 @@ func TestValidateKubernetesUpgradeTarget_TalosCompatibility(t *testing.T) {
 			current:      "1.35.0",
 			target:       "1.36.3",
 			wantErr:      true,
-			wantErrHas:   "upgrade Talos",
+			// Machinery's own wording, which is what reaches the cluster.
+			wantErrHas: "too new to be used with Talos",
 		},
 		{
 			// Regression guard for the upgrade this gate was written after: a

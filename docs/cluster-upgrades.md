@@ -557,11 +557,12 @@ state machine still advances, prefer the retry recipe above instead.
 
 - **Kubernetes**: Can only upgrade one minor version at a time (e.g., 1.30 → 1.31 → 1.32)
 - **Talos**: Check the [Talos support matrix](https://www.talos.dev/docs/support-matrix/) for compatible Kubernetes versions
-- **Talos/Kubernetes pairing**: the operator refuses a Kubernetes target above the ceiling its
-  version adapter records for the running Talos release, and withholds the
-  `kubernetes-available` annotation in that case. Upgrade Talos first. The ceilings live in
-  `internal/services/talosversion` (`maxK8sMinor` per adapter); a Talos release newer than the
-  newest adapter is not checked, so keep that table current.
+- **Talos/Kubernetes pairing**: the operator refuses a Kubernetes target outside the range the
+  running Talos release supports, and withholds the `kubernetes-available` annotation in that
+  case. Upgrade Talos first. The ranges are not maintained here — they come from
+  `github.com/siderolabs/talos/pkg/machinery/compatibility`, so a new Talos release is picked up
+  by bumping that dependency. A release the vendored machinery does not know is not checked at
+  all, deliberately: see `SupportsKubernetesVersion`.
 
 ### Pre-upgrade Checklist
 

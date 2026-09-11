@@ -14,8 +14,6 @@ func NewV1_12Adapter() *V1_12Adapter {
 				config: adapterConfig{
 					version:           versionV1_12,
 					kubernetesVersion: "1.35.4",
-					maxK8sMajor:       1,
-					maxK8sMinor:       35,
 					etcdVersion:       defaultEtcdVersion,
 					etcdRegistry:      defaultEtcdRegistry,
 					multiDoc:          true,
