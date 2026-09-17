@@ -2,6 +2,7 @@ package status
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"time"
 
@@ -11,7 +12,9 @@ import (
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes"
@@ -56,14 +59,18 @@ type StatusManager struct {
 	client.Client
 	SecretService *secretservice.SecretService
 	StateService  *talosstateservice.TalosStateService
+
+	// kubeSystemNamespace reads the workload cluster's kube-system namespace.
+	kubeSystemNamespace func(ctx context.Context, kubeconfig []byte) (*corev1.Namespace, error)
 }
 
 // NewManager creates a new status manager
 func NewManager(c client.Client, secretService *secretservice.SecretService, stateService *talosstateservice.TalosStateService) *StatusManager {
 	return &StatusManager{
-		Client:        c,
-		SecretService: secretService,
-		StateService:  stateService,
+		Client:              c,
+		SecretService:       secretService,
+		StateService:        stateService,
+		kubeSystemNamespace: fetchKubeSystemNamespace,
 	}
 }
 
@@ -87,32 +94,13 @@ func (m *StatusManager) UpdateKubernetesClusterStatus(ctx context.Context, kuber
 		_ = m.SetCondition(ctx, kubernetesCluster, c.Type, c.Status, c.Reason, c.Message)
 	}
 
-	// If kubeconfig is present, record kube-system creation time but do NOT
-	// flip the cluster Phase to Ready here. Reaching kube-system means the
-	// API server is up; it does not mean every expected node has joined and
+	// If kubeconfig is present, record kube-system's creation time and UID but
+	// do NOT flip the cluster Phase to Ready here. Reaching kube-system means
+	// the API server is up; it does not mean every expected node has joined and
 	// reached Ready. The authoritative Ready transition happens in the
 	// Talos init flow's final stage, gated by the node-health check.
-	if len(kubeconfig) > 0 {
-		if ts, err := getKubeSystemCreated(ctx, kubeconfig); err == nil && !ts.IsZero() {
-			_ = m.SetStateCreated(ctx, kubernetesCluster, ts)
-		} else if err != nil {
-			vlog.Debug("Failed to get kube-system creation time from target cluster: " + err.Error())
-		}
-
-		// Get and store kube-system namespace UID (only if not already stored)
-		// UID is immutable, so we only need to fetch it once
-		if m.shouldFetchKubeSystemUID(kubernetesCluster) {
-			if uid, err := getKubeSystemUID(ctx, kubeconfig); err == nil && uid != "" {
-				// Store in annotation
-				_ = m.SetKubeSystemUID(ctx, kubernetesCluster, uid)
-				// Store in secret
-				if m.StateService != nil {
-					_ = m.StateService.SetKubeSystemUID(ctx, kubernetesCluster, uid)
-				}
-			} else if err != nil {
-				vlog.Debug("Failed to get kube-system UID from target cluster: " + err.Error())
-			}
-		}
+	if len(kubeconfig) > 0 && m.shouldFetchKubeSystemUID(kubernetesCluster) {
+		m.recordKubeSystemIdentity(ctx, kubernetesCluster, kubeconfig)
 	}
 	// Aggregate machine info into status (best effort)
 	_ = m.AggregateFromMachines(ctx, kubernetesCluster)
@@ -198,7 +186,12 @@ func condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) []con
 }
 
 // SetStateCreated sets status.state.created to the provided timestamp (RFC3339Nano) and bumps lastUpdated fields.
+// It does nothing when the timestamp is already recorded. A write conflict is returned as an error.
 func (m *StatusManager) SetStateCreated(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster, created time.Time) error {
+	if kc.Status.State.Created.Time.Equal(created) {
+		return nil
+	}
+
 	// Convert typed KubernetesCluster to unstructured for status manipulation
 	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
 	if err != nil {
@@ -216,51 +209,63 @@ func (m *StatusManager) SetStateCreated(ctx context.Context, kc *vitistackv1alph
 		return err
 	}
 	createdStr := created.UTC().Format(time.RFC3339Nano)
+	if current, _, _ := unstructured.NestedString(u.Object, stateFieldStatus, stateFieldState, "created"); current == createdStr {
+		kc.Status.State.Created = metav1.NewTime(created)
+		return nil
+	}
 	_ = unstructured.SetNestedField(u.Object, createdStr, stateFieldStatus, stateFieldState, "created")
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, stateFieldStatus, stateFieldState, "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
+	updateStatusTimestamps(u)
 
 	if err := m.Status().Update(ctx, u); err != nil {
+		if apierrors.IsConflict(err) {
+			return err
+		}
 		if fallbackErr := m.Update(ctx, u); fallbackErr != nil {
 			return fallbackErr
 		}
 	}
+	kc.Status.State.Created = metav1.NewTime(created)
 	return nil
 }
 
-// getKubeSystemCreated returns the creation timestamp of the kube-system namespace from the target cluster referenced by kubeconfig.
-func getKubeSystemCreated(ctx context.Context, kubeconfig []byte) (time.Time, error) {
-	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+// recordKubeSystemIdentity reads the workload cluster's kube-system namespace
+// and records its creation time (status.state.created) and UID (annotation and
+// secret). Both are fixed for the life of the cluster, so callers only invoke
+// this until the UID annotation is stored. The UID is stored last, so a failed
+// creation-time write is retried on the next pass.
+func (m *StatusManager) recordKubeSystemIdentity(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster, kubeconfig []byte) {
+	ns, err := m.kubeSystemNamespace(ctx, kubeconfig)
 	if err != nil {
-		return time.Time{}, err
+		vlog.Debug("Failed to get kube-system namespace from target cluster: " + err.Error())
+		return
 	}
-	cs, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return time.Time{}, err
+	if !ns.CreationTimestamp.IsZero() {
+		if err := m.SetStateCreated(ctx, kc, ns.CreationTimestamp.Time); err != nil {
+			vlog.Debug("Failed to record kube-system creation time: cluster=" + kc.Name + " error=" + err.Error())
+			return
+		}
 	}
-	ns, err := cs.CoreV1().Namespaces().Get(ctx, "kube-system", metav1.GetOptions{})
-	if err != nil {
-		return time.Time{}, err
+	uid := string(ns.UID)
+	if uid == "" {
+		return
 	}
-	return ns.CreationTimestamp.Time, nil
+	_ = m.SetKubeSystemUID(ctx, kc, uid)
+	if m.StateService != nil {
+		_ = m.StateService.SetKubeSystemUID(ctx, kc, uid)
+	}
 }
 
-// getKubeSystemUID returns the UID of the kube-system namespace from the target cluster referenced by kubeconfig.
-func getKubeSystemUID(ctx context.Context, kubeconfig []byte) (string, error) {
+// fetchKubeSystemNamespace reads the kube-system namespace from the target cluster referenced by kubeconfig.
+func fetchKubeSystemNamespace(ctx context.Context, kubeconfig []byte) (*corev1.Namespace, error) {
 	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	ns, err := cs.CoreV1().Namespaces().Get(ctx, "kube-system", metav1.GetOptions{})
-	if err != nil {
-		return "", err
-	}
-	return string(ns.UID), nil
+	return cs.CoreV1().Namespaces().Get(ctx, "kube-system", metav1.GetOptions{})
 }
 
 // ensureStatusMap creates an empty status map on the object if it doesn't exist yet.
@@ -374,6 +379,11 @@ func defaultResourceUsage() map[string]any {
 
 // SetPhase sets the simple phase string on status.
 func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster, phase string) error {
+	// The held object already has this phase: skip the live read.
+	if kc.Status.Phase == phase {
+		return nil
+	}
+
 	// Convert typed KubernetesCluster to unstructured for status manipulation
 	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
 	if err != nil {
@@ -390,6 +400,7 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 	// Check if phase is already set to the desired value - skip update if unchanged
 	currentPhase, _, _ := unstructured.NestedString(u.Object, stateFieldStatus, "phase")
 	if currentPhase == phase {
+		kc.Status.Phase = phase
 		return nil // No change needed
 	}
 
@@ -424,12 +435,18 @@ func (m *StatusManager) SetPhase(ctx context.Context, kc *vitistackv1alpha1.Kube
 		}
 		vlog.Info("Fallback Update succeeded: cluster=" + kc.Name)
 	}
+	kc.Status.Phase = phase
 	return nil
 }
 
 // SetMessage sets the human-readable message on status.message describing the current activity.
 // Pass an empty string to clear the message.
 func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster, message string) error {
+	// The held object already has this message: skip the live read.
+	if kc.Status.Message == message {
+		return nil
+	}
+
 	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
 	if err != nil {
 		return err
@@ -444,6 +461,7 @@ func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.Ku
 
 	currentMessage, _, _ := unstructured.NestedString(u.Object, stateFieldStatus, "message")
 	if currentMessage == message {
+		kc.Status.Message = message
 		return nil
 	}
 
@@ -464,6 +482,7 @@ func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.Ku
 		}
 		return err
 	}
+	kc.Status.Message = message
 	return nil
 }
 
@@ -473,6 +492,11 @@ func (m *StatusManager) SetMessage(ctx context.Context, kc *vitistackv1alpha1.Ku
 func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster,
 	condType, status, reason, message string,
 ) error {
+	// The held object already has this condition: skip the live read.
+	if heldConditionMatches(kc, condType, status, reason, message) {
+		return nil
+	}
+
 	// Convert typed KubernetesCluster to unstructured for status manipulation
 	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
 	if err != nil {
@@ -496,20 +520,61 @@ func (m *StatusManager) SetCondition(ctx context.Context, kc *vitistackv1alpha1.
 		return err
 	}
 	if !changed {
+		setHeldCondition(kc, condType, status, reason, message)
 		return nil // No change needed, skip API update
 	}
 
 	// Touch state.lastUpdated and lastUpdatedBy
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, stateFieldStatus, stateFieldState, "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
+	updateStatusTimestamps(u)
 
-	return m.updateStatusWithConflictHandling(ctx, u, kc.Name, condType)
+	written, err := m.updateStatusWithConflictHandling(ctx, u, kc.Name, condType)
+	if written {
+		setHeldCondition(kc, condType, status, reason, message)
+	}
+	return err
+}
+
+// heldConditionMatches reports whether kc already carries condType with the given status, reason and message.
+func heldConditionMatches(kc *vitistackv1alpha1.KubernetesCluster, condType, status, reason, message string) bool {
+	for i := range kc.Status.Conditions {
+		c := &kc.Status.Conditions[i]
+		if c.Type == condType {
+			return c.Status == status && c.Reason == reason && c.Message == message
+		}
+	}
+	return false
+}
+
+// setHeldCondition records a condition the API server now has on kc, so later
+// checks in the same pass compare against it.
+func setHeldCondition(kc *vitistackv1alpha1.KubernetesCluster, condType, status, reason, message string) {
+	for i := range kc.Status.Conditions {
+		c := &kc.Status.Conditions[i]
+		if c.Type == condType {
+			if c.Status != status || c.Reason != reason || c.Message != message {
+				c.LastTransitionTime = time.Now().UTC().Format(time.RFC3339Nano)
+			}
+			c.Status, c.Reason, c.Message = status, reason, message
+			return
+		}
+	}
+	kc.Status.Conditions = append(kc.Status.Conditions, vitistackv1alpha1.KubernetesClusterCondition{
+		Type:               condType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: time.Now().UTC().Format(time.RFC3339Nano),
+	})
 }
 
 // ClearValidationError resets the phase from ValidationError to Pending if needed.
 // This allows the reconciliation to proceed normally after a validation error is fixed.
 func (m *StatusManager) ClearValidationError(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) error {
+	// The held object is not in ValidationError: skip the live read.
+	if kc.Status.Phase != PhaseValidationError {
+		return nil
+	}
+
 	// Convert typed KubernetesCluster to unstructured for status manipulation
 	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
 	if err != nil {
@@ -536,12 +601,14 @@ func (m *StatusManager) ClearValidationError(ctx context.Context, kc *vitistackv
 	}
 
 	// Touch state.lastUpdated and lastUpdatedBy
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_ = unstructured.SetNestedField(u.Object, now, stateFieldStatus, stateFieldState, "lastUpdated")
-	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
+	updateStatusTimestamps(u)
 
 	vlog.Info("Cleared ValidationError phase, resetting to Pending: cluster=" + kc.Name)
-	return m.updateStatusWithConflictHandling(ctx, u, kc.Name, "phase-reset")
+	written, err := m.updateStatusWithConflictHandling(ctx, u, kc.Name, "phase-reset")
+	if written {
+		kc.Status.Phase = PhasePending
+	}
+	return err
 }
 
 // updateConditionInStatus updates the condition in the status.conditions slice
@@ -618,30 +685,32 @@ func sortConditionsByTime(conds []any) []any {
 	return conds
 }
 
-// updateStatusWithConflictHandling handles status update with conflict error handling
-func (m *StatusManager) updateStatusWithConflictHandling(ctx context.Context, u *unstructured.Unstructured, clusterName, condType string) error {
+// updateStatusWithConflictHandling handles status update with conflict error handling.
+// It reports whether the object was written; a conflict is skipped without an error.
+func (m *StatusManager) updateStatusWithConflictHandling(ctx context.Context, u *unstructured.Unstructured, clusterName, condType string) (bool, error) {
 	if err := m.Status().Update(ctx, u); err != nil {
 		// Check if this is a conflict error - if so, just log and skip
 		if apierrors.IsConflict(err) {
 			vlog.Debug("Status update conflict for condition (object modified), skipping: cluster=" + clusterName + " condition=" + condType)
-			return nil
+			return false, nil
 		}
 		vlog.Error("Status().Update failed for condition, trying fallback Update: cluster="+clusterName+" condition="+condType, err)
 		// fallback for CRDs without status subresource
 		if fallbackErr := m.Update(ctx, u); fallbackErr != nil {
 			if apierrors.IsConflict(fallbackErr) {
 				vlog.Debug("Fallback update conflict for condition, skipping: cluster=" + clusterName + " condition=" + condType)
-				return nil
+				return false, nil
 			}
 			vlog.Error("Fallback Update also failed for condition: cluster="+clusterName+" condition="+condType, fallbackErr)
-			return fallbackErr
+			return false, fallbackErr
 		}
 		vlog.Info("Fallback Update succeeded for condition: cluster=" + clusterName + " condition=" + condType)
 	}
-	return nil
+	return true, nil
 }
 
 // AggregateFromMachines fetches Machines for the given cluster and updates status aggregates.
+// It writes only when an aggregate changed.
 func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) error {
 	// List Machines labeled with this cluster
 	ml := &vitistackv1alpha1.MachineList{}
@@ -653,8 +722,12 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 		return err
 	}
 
-	// Build aggregates
-	totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning, workerCount, cpNodes := aggregateMachineResources(ml)
+	agg := aggregateMachineResources(ml)
+
+	// The held object already has these aggregates: skip the live read.
+	if agg.matches(kc) {
+		return nil
+	}
 
 	// Convert typed KubernetesCluster to unstructured for status manipulation
 	u, err := unstructuredutil.KubernetesClusterToUnstructured(kc)
@@ -668,48 +741,123 @@ func (m *StatusManager) AggregateFromMachines(ctx context.Context, kc *vitistack
 		}
 		return err
 	}
+	stored := u.DeepCopy()
 	if err := ensureStatusMap(u); err != nil {
 		return err
 	}
 
-	m.updateControlPlaneStatus(u, cpCount, cpRunning, cpNodes)
+	m.updateControlPlaneStatus(u, agg.cpCount, agg.cpRunning, agg.cpNodes)
 
 	// Update worker count
-	_ = unstructured.SetNestedField(u.Object, workerCount, stateFieldStatus, "workers")
+	_ = unstructured.SetNestedField(u.Object, agg.workerCount, stateFieldStatus, "workers")
 
 	// Update cluster resource aggregates
-	updateClusterResourceStatus(u, totalCPU, totalMem, diskCap, diskUsed)
+	updateClusterResourceStatus(u, agg.totalCPU, agg.totalMem, agg.diskCap, agg.diskUsed)
+
+	if sameStatus(stored, u) {
+		agg.applyTo(kc)
+		return nil
+	}
 
 	// Touch timestamps
 	updateStatusTimestamps(u)
 
-	return m.updateStatus(ctx, u)
+	written, err := m.updateStatusWithConflictHandling(ctx, u, kc.Name, "aggregates")
+	if written {
+		agg.applyTo(kc)
+	}
+	return err
 }
 
-// aggregateMachineResources aggregates resource usage from all machines in the list
-func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) (totalCPU, totalMem, diskCap, diskUsed, cpCount, cpRunning, workerCount int64, cpNodes []string) {
+// sameStatus reports whether two KubernetesClusters carry the same status once
+// decoded, so a quantity stored as 14 and one stored as "14" compare equal.
+func sameStatus(a, b *unstructured.Unstructured) bool {
+	typedA, errA := unstructuredutil.KubernetesClusterFromUnstructured(a)
+	typedB, errB := unstructuredutil.KubernetesClusterFromUnstructured(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return equality.Semantic.DeepEqual(typedA.Status, typedB.Status)
+}
+
+// machineAggregates are the status totals derived from a cluster's Machines.
+type machineAggregates struct {
+	totalCPU, totalMem, diskCap, diskUsed int64
+	cpCount, cpRunning, workerCount       int64
+	cpNodes                               []string
+}
+
+// aggregateMachineResources aggregates resource usage from all machines in the list.
+// cpNodes is sorted so the result does not depend on list order.
+func aggregateMachineResources(ml *vitistackv1alpha1.MachineList) machineAggregates {
+	var agg machineAggregates
 	for i := range ml.Items {
 		mObj := &ml.Items[i]
 		// Sum resources
-		totalCPU += int64(mObj.Status.CPUs)
-		totalMem += mObj.Status.Memory
+		agg.totalCPU += int64(mObj.Status.CPUs)
+		agg.totalMem += mObj.Status.Memory
 		for i := range mObj.Status.Disks {
 			d := mObj.Status.Disks[i]
-			diskCap += d.Size
-			diskUsed += d.UsedBytes
+			agg.diskCap += d.Size
+			agg.diskUsed += d.UsedBytes
 		}
 		// Control-plane specifics
 		if isControlPlaneMachine(mObj) {
-			cpCount++
-			cpNodes = append(cpNodes, mObj.Name)
+			agg.cpCount++
+			agg.cpNodes = append(agg.cpNodes, mObj.Name)
 			if mObj.Status.Phase == phaseRunning {
-				cpRunning++
+				agg.cpRunning++
 			}
 		} else {
-			workerCount++
+			agg.workerCount++
 		}
 	}
-	return
+	sort.Strings(agg.cpNodes)
+	return agg
+}
+
+// matches reports whether kc's status already carries these aggregates.
+func (a *machineAggregates) matches(kc *vitistackv1alpha1.KubernetesCluster) bool {
+	cp := &kc.Status.State.Cluster.ControlPlaneStatus
+	res := &kc.Status.State.Cluster.Resources
+	return int64(kc.Status.Workers) == a.workerCount &&
+		int64(cp.Scale) == a.cpCount &&
+		cp.Status == determineControlPlaneStatus(a.cpCount, a.cpRunning) &&
+		slices.Equal(cp.Nodes, a.cpNodes) &&
+		resourceUsageMatches(&res.CPU, a.totalCPU, 0) &&
+		resourceUsageMatches(&res.Memory, a.totalMem, 0) &&
+		resourceUsageMatches(&res.Disk, a.diskCap, a.diskUsed)
+}
+
+// applyTo records the aggregates on kc after the API server has them.
+func (a *machineAggregates) applyTo(kc *vitistackv1alpha1.KubernetesCluster) {
+	kc.Status.Workers = int(a.workerCount)
+	cp := &kc.Status.State.Cluster.ControlPlaneStatus
+	cp.Scale = int(a.cpCount)
+	cp.Nodes = a.cpNodes
+	cp.Status = determineControlPlaneStatus(a.cpCount, a.cpRunning)
+	res := &kc.Status.State.Cluster.Resources
+	setHeldResourceUsage(&res.CPU, a.totalCPU, 0)
+	setHeldResourceUsage(&res.Memory, a.totalMem, 0)
+	setHeldResourceUsage(&res.Disk, a.diskCap, a.diskUsed)
+}
+
+func resourceUsageMatches(r *vitistackv1alpha1.KubernetesClusterStatusClusterStatusResource, capacity, used int64) bool {
+	return r.Capacity.Value() == capacity && r.Used.Value() == used && int64(r.Percetage) == usagePercentage(capacity, used)
+}
+
+func setHeldResourceUsage(r *vitistackv1alpha1.KubernetesClusterStatusClusterStatusResource, capacity, used int64) {
+	r.Capacity = *resource.NewQuantity(capacity, resource.DecimalSI)
+	r.Used = *resource.NewQuantity(used, resource.DecimalSI)
+	r.Percetage = int(usagePercentage(capacity, used))
+}
+
+// usagePercentage is used as a whole percentage of capacity, or 0 when either is unknown.
+func usagePercentage(capacity, used int64) int64 {
+	if capacity > 0 && used > 0 {
+		return (used * 100) / capacity
+	}
+	return 0
 }
 
 // isControlPlaneMachine checks if a machine is a control plane node
@@ -761,16 +909,6 @@ func updateStatusTimestamps(u *unstructured.Unstructured) {
 	_ = unstructured.SetNestedField(u.Object, "talos-operator", stateFieldStatus, stateFieldState, "lastUpdatedBy")
 }
 
-// updateStatus updates the status with fallback to regular update
-func (m *StatusManager) updateStatus(ctx context.Context, u *unstructured.Unstructured) error {
-	if err := m.Status().Update(ctx, u); err != nil {
-		if fallbackErr := m.Update(ctx, u); fallbackErr != nil {
-			return fallbackErr
-		}
-	}
-	return nil
-}
-
 // setResourceUsage writes capacity/used/percentage for a given resource path.
 func setResourceUsage(u *unstructured.Unstructured, path []string, capacity, used int64) error {
 	// Ensure map exists
@@ -778,10 +916,7 @@ func setResourceUsage(u *unstructured.Unstructured, path []string, capacity, use
 	usage := map[string]any{
 		"capacity":   capacity,
 		"used":       used,
-		"percentage": int64(0),
-	}
-	if capacity > 0 && used > 0 {
-		usage["percentage"] = (used * 100) / capacity
+		"percentage": usagePercentage(capacity, used),
 	}
 	// Build full path for the object map
 	if err := unstructured.SetNestedMap(u.Object, usage, path...); err != nil {
@@ -815,14 +950,14 @@ func (m *StatusManager) SetKubeSystemUID(ctx context.Context, cluster *vitistack
 		return nil
 	}
 
+	// A merge patch carries no resourceVersion, so it cannot lose to the status
+	// writes made earlier in the same pass the way an Update would.
+	base := cluster.DeepCopy()
 	annotations["vitistack.io/kube-system-uid"] = uid
 	cluster.SetAnnotations(annotations)
 
-	if err := m.Update(ctx, cluster); err != nil {
-		if apierrors.IsConflict(err) {
-			vlog.Debug("Update conflict when setting kube-system UID annotation, skipping")
-			return nil
-		}
+	if err := m.Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
+		cluster.SetAnnotations(base.GetAnnotations())
 		return err
 	}
 	return nil

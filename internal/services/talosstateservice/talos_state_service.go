@@ -196,13 +196,16 @@ func (s *TalosStateService) SetFlags(ctx context.Context, cluster *vitistackv1al
 			return nil
 		}
 
-		// If conflict error, retry with fresh data
+		// If conflict error, retry with fresh data. The cached read often trails a
+		// write made just before, so a conflict here is expected and only worth a
+		// warning once every attempt has hit one.
 		if apierrors.IsConflict(err) {
 			if attempt < maxRetries-1 {
-				vlog.Warn(fmt.Sprintf("Secret conflict on attempt %d, retrying: %v", attempt+1, err))
+				vlog.Debug(fmt.Sprintf("Secret conflict on attempt %d, retrying: %v", attempt+1, err))
 				time.Sleep(time.Millisecond * 100 * time.Duration(attempt+1)) // exponential backoff
 				continue
 			}
+			vlog.Warn(fmt.Sprintf("Secret conflict persisted after %d attempts, flags not saved: %v", maxRetries, err))
 		}
 		return err
 	}

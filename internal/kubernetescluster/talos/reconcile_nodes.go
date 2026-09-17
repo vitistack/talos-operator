@@ -27,12 +27,13 @@ import (
 const dependentVIPRequeueDelay = 15 * time.Second
 
 // reconcileNewNodes handles adding new nodes to an existing cluster
-// This is called when the cluster is already initialized but new machines have been added
-func (t *TalosManager) reconcileNewNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+// This is called when the cluster is already initialized but new machines have been added.
+// nodes is this pass's workload Node list, or nil when it is unavailable.
+func (t *TalosManager) reconcileNewNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodes *workloadNodes) error {
 	// Check for nodes that were marked as configured but never actually joined the cluster.
 	// If they are still in Talos maintenance mode, remove them from the configured list
 	// so they get reconfigured on this pass.
-	if err := t.reconcileFailedNodes(ctx, cluster); err != nil {
+	if err := t.reconcileFailedNodes(ctx, cluster, nodes); err != nil {
 		vlog.Warn(fmt.Sprintf("Error during failed node reconciliation %s: %v", clusterLogTag(cluster), err))
 	}
 
@@ -45,6 +46,7 @@ func (t *TalosManager) reconcileNewNodes(ctx context.Context, cluster *vitistack
 	}
 
 	vlog.Info(fmt.Sprintf("Found %d new machines to configure for %s", len(newMachines), clusterLogTag(cluster)))
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Configuring %d new machine(s)", len(newMachines)))
 
 	// Wait for new machines to be ready
 	readyMachines, err := t.machineService.WaitForMachinesReady(ctx, cluster, newMachines)
@@ -166,7 +168,8 @@ func (t *TalosManager) findUnconfiguredMachines(ctx context.Context, cluster *vi
 // Talos maintenance mode, meaning the configuration was never successfully applied
 // or the node was reset. These nodes are removed from the configured list so they
 // get picked up by findUnconfiguredMachines and reconfigured on the next pass.
-func (t *TalosManager) reconcileFailedNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+// Nodes that are Ready in nodes are not probed (see maintenanceProbeTargets).
+func (t *TalosManager) reconcileFailedNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodes *workloadNodes) error {
 	configuredNodes, err := t.getConfiguredNodes(ctx, cluster)
 	if err != nil || len(configuredNodes) == 0 {
 		return err
@@ -177,27 +180,12 @@ func (t *TalosManager) reconcileFailedNodes(ctx context.Context, cluster *vitist
 		return fmt.Errorf("failed to get cluster machines: %w", err)
 	}
 
-	// Build a lookup of machine name -> Machine
-	machineMap := make(map[string]*vitistackv1alpha1.Machine)
-	for _, m := range machines {
-		machineMap[m.Name] = m
-	}
-
-	for nodeName := range configuredNodes {
-		m, exists := machineMap[nodeName]
-		if !exists {
-			continue // Machine CRD was deleted; handled by reconcileRemovedNodes
-		}
-
-		ip := getFirstIPv4(m)
-		if ip == "" {
-			continue
-		}
-
-		if t.clientService.IsNodeInMaintenanceMode(ip) {
-			vlog.Warn(fmt.Sprintf("Node %s/%s is marked as configured but still in maintenance mode, removing from configured list to retry configuration", clusterLogTag(cluster), nodeName))
-			if err := t.stateService.RemoveConfiguredNode(ctx, cluster, nodeName); err != nil {
-				vlog.Error(fmt.Sprintf("Failed to remove node %s/%s from configured list: %v", clusterLogTag(cluster), nodeName, err), err)
+	// Machines whose CRD was deleted are handled by reconcileRemovedNodes.
+	for _, probe := range maintenanceProbeTargets(configuredNodes, machines, nodes) {
+		if t.clientService.IsNodeInMaintenanceMode(probe.ip) {
+			vlog.Warn(fmt.Sprintf("Node %s/%s is marked as configured but still in maintenance mode, removing from configured list to retry configuration", clusterLogTag(cluster), probe.name))
+			if err := t.stateService.RemoveConfiguredNode(ctx, cluster, probe.name); err != nil {
+				vlog.Error(fmt.Sprintf("Failed to remove node %s/%s from configured list: %v", clusterLogTag(cluster), probe.name, err), err)
 			}
 		}
 	}
@@ -348,7 +336,16 @@ func (t *TalosManager) desiredKubernetesVersion(ctx context.Context, cluster *vi
 // that are running a Kubernetes version older than the cluster's desired version.
 // This handles the case where a node joins with a stale config template that has an
 // older Kubernetes version baked in (e.g., after a cluster-wide upgrade).
-func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+// nodes is this pass's workload Node list.
+func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodes []corev1.Node) error {
+	// The rolling-upgrade flow owns node versions while it runs, and the
+	// desired version only moves to its target when it completes. Checking
+	// now would call every node it already upgraded "newer than desired", and
+	// could start a Kubernetes upgrade on a node a Talos upgrade is rebooting.
+	if upState, err := t.stateService.GetUpgradeState(ctx, cluster); err == nil && upState != nil && upState.InProgress {
+		return nil
+	}
+
 	desiredVersion := t.desiredKubernetesVersion(ctx, cluster)
 	if desiredVersion == "" {
 		return nil // No explicit version set, nothing to enforce
@@ -357,19 +354,9 @@ func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitis
 	// Normalize to "v1.35.0" format for comparison with node.Status.NodeInfo.KubeletVersion
 	desiredVersion = consts.EnsureVersionPrefix(desiredVersion)
 
-	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
-	if err != nil || clientset == nil {
-		return err
-	}
-
-	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to list workload cluster nodes: %w", err)
-	}
-
 	// Re-resolve after the refresh so this pass acts on the corrected version
 	// rather than warning once more and fixing it next time round.
-	t.refreshKubernetesCurrentVersion(ctx, cluster, nodeList.Items)
+	t.refreshKubernetesCurrentVersion(ctx, cluster, nodes)
 	if refreshed := t.desiredKubernetesVersion(ctx, cluster); refreshed != "" {
 		desiredVersion = consts.EnsureVersionPrefix(refreshed)
 	}
@@ -388,7 +375,7 @@ func (t *TalosManager) reconcileNodeVersions(ctx context.Context, cluster *vitis
 		return fmt.Errorf("failed to parse desired Kubernetes version %q: %w", desiredVersion, err)
 	}
 
-	candidates := collectNodeUpgradeCandidates(nodeList.Items, machineMap, desiredSemver, desiredVersion, clusterLogTag(cluster))
+	candidates := collectNodeUpgradeCandidates(nodes, machineMap, desiredSemver, desiredVersion, clusterLogTag(cluster))
 	if len(candidates) == 0 {
 		return nil
 	}
