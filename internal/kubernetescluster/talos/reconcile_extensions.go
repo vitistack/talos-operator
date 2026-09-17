@@ -3,7 +3,6 @@ package talos
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -12,6 +11,7 @@ import (
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 
 	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
+	"github.com/vitistack/talos-operator/internal/helpers/talosextensions"
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 )
@@ -68,7 +68,7 @@ func (t *TalosManager) reconcileExtensions(ctx context.Context, cluster *vitista
 	if !viper.GetBool(consts.TALOS_EXTENSION_ENFORCE_ENABLED) {
 		return nil
 	}
-	required := parseRequiredExtensions(viper.GetString(consts.TALOS_REQUIRED_EXTENSIONS))
+	required := talosextensions.ParseRequired(viper.GetString(consts.TALOS_REQUIRED_EXTENSIONS))
 	if len(required) == 0 {
 		return nil // feature disabled
 	}
@@ -262,7 +262,7 @@ func (t *TalosManager) processMachineExtensions(
 		return extOutcomeSkipped, err
 	}
 
-	missing := diffExtensions(required, installed)
+	missing := talosextensions.Missing(required, installed)
 	if len(missing) == 0 {
 		// Tell the operator the roll completed for this node — useful
 		// counterpart to the "triggering" log so the trigger/complete pair
@@ -359,53 +359,6 @@ func (t *TalosManager) pruneStaleExtensionState(
 		}
 		delete(state, name)
 	}
-}
-
-// parseRequiredExtensions splits the comma-separated env value, trims
-// whitespace, and drops empty entries.
-func parseRequiredExtensions(raw string) []string {
-	if raw == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if v := strings.TrimSpace(p); v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
-// diffExtensions returns the entries from required that are not present in
-// installed. Order follows required, so warning lines stay readable.
-//
-// Names are compared case-sensitively after stripping any "<author>/" prefix:
-// Talos's ExtensionStatus reports the bare manifest name (e.g. "iscsi-tools")
-// while the image-factory display path is "siderolabs/iscsi-tools". Both
-// forms in the env var are accepted and treated as equivalent so operators
-// can paste straight from factory.talos.dev without a transformation step.
-func diffExtensions(required, installed []string) []string {
-	have := make(map[string]struct{}, len(installed))
-	for _, e := range installed {
-		have[normalizeExtensionName(e)] = struct{}{}
-	}
-	var missing []string
-	for _, r := range required {
-		if _, ok := have[normalizeExtensionName(r)]; !ok {
-			missing = append(missing, r)
-		}
-	}
-	return missing
-}
-
-// normalizeExtensionName returns the substring after the last "/" so that
-// "siderolabs/iscsi-tools" and "iscsi-tools" compare equal.
-func normalizeExtensionName(name string) string {
-	if i := strings.LastIndexByte(name, '/'); i >= 0 {
-		return name[i+1:]
-	}
-	return name
 }
 
 // extensionCooldownActive reports whether the previously-persisted record

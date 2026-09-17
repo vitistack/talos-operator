@@ -11,8 +11,10 @@ package upgradeservice
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/Masterminds/semver/v3"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -44,6 +46,16 @@ type UpgradeService struct {
 	machineService *machineservice.MachineService
 	stateService   *talosstateservice.TalosStateService
 	configService  *talosconfigservice.TalosConfigService
+
+	// installedExtensions and healthCheck talk to the nodes' Talos API;
+	// replaceable so tests need none.
+	installedExtensions extensionProbe
+	healthCheck         nodeHealthCheck
+
+	// schematicChecked remembers, per cluster, the pin/configured image/required
+	// extensions the nodes were last probed for, so an unchanged pin is not
+	// re-probed on every drift pass.
+	schematicChecked sync.Map
 }
 
 // NewUpgradeService creates a new UpgradeService instance
@@ -55,7 +67,7 @@ func NewUpgradeService(
 	stateService *talosstateservice.TalosStateService,
 	configService *talosconfigservice.TalosConfigService,
 ) *UpgradeService {
-	return &UpgradeService{
+	s := &UpgradeService{
 		Client:         c,
 		statusManager:  statusManager,
 		clientService:  clientService,
@@ -63,6 +75,9 @@ func NewUpgradeService(
 		stateService:   stateService,
 		configService:  configService,
 	}
+	s.installedExtensions = s.probeInstalledExtensions
+	s.healthCheck = s.checkNodeHealth
+	return s
 }
 
 // UpgradeState represents the current upgrade state for a cluster
@@ -162,20 +177,14 @@ func (s *UpgradeService) GetUpgradeState(cluster *vitistackv1alpha1.KubernetesCl
 
 // SetAnnotation sets a single annotation on the cluster
 func (s *UpgradeService) SetAnnotation(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, key, value string) error {
-	annotations := cluster.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-
 	// Skip if value unchanged
-	if annotations[key] == value {
+	if cluster.GetAnnotations()[key] == value {
 		return nil
 	}
 
-	annotations[key] = value
-	cluster.SetAnnotations(annotations)
-
-	if err := s.Update(ctx, cluster); err != nil {
+	if err := s.patchAnnotations(ctx, cluster, func(annotations map[string]string) {
+		annotations[key] = value
+	}); err != nil {
 		return fmt.Errorf("failed to set annotation %s: %w", key, err)
 	}
 	return nil
@@ -183,20 +192,34 @@ func (s *UpgradeService) SetAnnotation(ctx context.Context, cluster *vitistackv1
 
 // RemoveAnnotation removes an annotation from the cluster
 func (s *UpgradeService) RemoveAnnotation(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, key string) error {
-	annotations := cluster.GetAnnotations()
-	if annotations == nil {
+	if _, exists := cluster.GetAnnotations()[key]; !exists {
 		return nil
 	}
 
-	if _, exists := annotations[key]; !exists {
-		return nil
+	if err := s.patchAnnotations(ctx, cluster, func(annotations map[string]string) {
+		delete(annotations, key)
+	}); err != nil {
+		return fmt.Errorf("failed to remove annotation %s: %w", key, err)
 	}
+	return nil
+}
 
-	delete(annotations, key)
+// patchAnnotations applies mutate to the cluster's annotations and writes only
+// that change as a merge patch. A full Update would resend the whole spec, and
+// the API server rejects it for clusters created before
+// spec.data.networkNamespaceName became required: the Go field has no
+// omitempty, so the absent field goes out as "" and fails minLength. On error
+// the held annotations are restored so the caller's view matches the server.
+func (s *UpgradeService) patchAnnotations(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, mutate func(map[string]string)) error {
+	base := cluster.DeepCopy()
+	annotations := make(map[string]string, len(base.GetAnnotations())+1)
+	maps.Copy(annotations, base.GetAnnotations())
+	mutate(annotations)
 	cluster.SetAnnotations(annotations)
 
-	if err := s.Update(ctx, cluster); err != nil {
-		return fmt.Errorf("failed to remove annotation %s: %w", key, err)
+	if err := s.Patch(ctx, cluster, client.MergeFrom(base)); err != nil {
+		cluster.SetAnnotations(base.GetAnnotations())
+		return err
 	}
 	return nil
 }
@@ -692,30 +715,16 @@ func (s *UpgradeService) BuildTalosInstallerImage(
 	targetVersion string,
 ) (string, error) {
 	versionTag := "v" + strings.TrimPrefix(targetVersion, "v")
+	base, source := s.resolveInstallerBase(ctx, cluster, clientConfig)
 
-	var base, source string
-	if s.stateService != nil {
-		if saved, err := s.stateService.GetInstallImage(ctx, cluster); err == nil && saved != "" {
-			base = saved
-			source = "secret"
-		}
-	}
-	if base == "" && clientConfig != nil {
-		if fetched := s.fetchInstallImageFromCluster(ctx, cluster, clientConfig); fetched != "" {
-			base = fetched
-			source = "live-fetch"
-			// Best-effort backfill so subsequent upgrades don't have to live-fetch.
-			if s.stateService != nil {
-				if err := s.stateService.SetInstallImage(ctx, cluster, fetched); err != nil {
-					vlog.Warn(fmt.Sprintf("Failed to backfill install_image after live-fetch: %v", err))
-				}
-			}
-		}
-	}
-	if base == "" {
-		if env := viper.GetString(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT); env != "" {
-			base = env
-			source = "env"
+	// A pinned schematic that lacks a required extension would roll every node
+	// onto an installer without it; move the pin to the configured schematic.
+	if base != "" && source != "env" {
+		if reconciled, err := s.alignInstallImageSchematic(ctx, cluster, clientConfig); err != nil {
+			vlog.Warn(fmt.Sprintf("Could not check the pinned install image schematic for %s: %v", clusterlog.Tag(cluster), err))
+		} else if reconciled != "" && reconciled != base {
+			base = reconciled
+			source += "+configured-schematic"
 		}
 	}
 
@@ -725,6 +734,36 @@ func (s *UpgradeService) BuildTalosInstallerImage(
 	resolved := swapImageTag(base, versionTag)
 	vlog.Info(fmt.Sprintf("Resolved Talos installer image for %s: %s (source=%s)", clusterlog.Tag(cluster), resolved, source))
 	return resolved, nil
+}
+
+// resolveInstallerBase returns the image BuildTalosInstallerImage retags and
+// where it came from, following the resolution order documented there.
+// Returns "" when nothing resolves.
+func (s *UpgradeService) resolveInstallerBase(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+) (base, source string) {
+	if s.stateService != nil {
+		if saved, err := s.stateService.GetInstallImage(ctx, cluster); err == nil && saved != "" {
+			return saved, "secret"
+		}
+	}
+	if clientConfig != nil {
+		if fetched := s.fetchInstallImageFromCluster(ctx, cluster, clientConfig); fetched != "" {
+			// Best-effort backfill so subsequent upgrades don't have to live-fetch.
+			if s.stateService != nil {
+				if err := s.stateService.SetInstallImage(ctx, cluster, fetched); err != nil {
+					vlog.Warn(fmt.Sprintf("Failed to backfill install_image after live-fetch: %v", err))
+				}
+			}
+			return fetched, "live-fetch"
+		}
+	}
+	if env := viper.GetString(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT); env != "" {
+		return env, "env"
+	}
+	return "", ""
 }
 
 // fetchInstallImageFromCluster queries the active machine config of any
@@ -850,6 +889,53 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 
 	vlog.Info(fmt.Sprintf("Talos upgrade completed: %s version=%s", clusterlog.Tag(cluster), targetVersion))
 	return nil
+}
+
+// CompleteTalosTargetAlreadyRunning closes a Talos upgrade request whose target
+// is the version the cluster already runs — typically an upgrade that finished
+// but could not clear its target annotation. Nothing is rolled: the request is
+// cleared and recorded as completed so it is not evaluated again.
+func (s *UpgradeService) CompleteTalosTargetAlreadyRunning(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, version string) error {
+	// The resume/skip/retry flags answered the failure this request left
+	// behind. A failed Kubernetes upgrade may still be what they are meant for.
+	clearControlFlags := s.GetUpgradeState(cluster).KubernetesStatus != consts.UpgradeStatusFailed
+
+	// One patch: the request is closed completely or not at all.
+	if err := s.patchAnnotations(ctx, cluster, func(annotations map[string]string) {
+		annotations[consts.TalosStatusAnnotation] = string(consts.UpgradeStatusCompleted)
+		annotations[consts.TalosMessageAnnotation] = fmt.Sprintf("Talos is already running %s; nothing to upgrade", version)
+		for _, key := range []string{consts.TalosTargetAnnotation, consts.TalosProgressAnnotation, consts.FailedNodesAnnotation} {
+			delete(annotations, key)
+		}
+		if clearControlFlags {
+			for _, key := range []string{consts.ResumeUpgradeAnnotation, consts.SkipFailedNodesAnnotation, consts.RetryFailedNodesAnnotation} {
+				delete(annotations, key)
+			}
+		}
+	}); err != nil {
+		return fmt.Errorf("failed to close the Talos upgrade request: %w", err)
+	}
+
+	if err := s.statusManager.SetPhase(ctx, cluster, status.PhaseReady); err != nil {
+		vlog.Error("Failed to set phase to Ready", err)
+	}
+	if err := s.statusManager.SetCondition(ctx, cluster, "TalosUpgrade", "False", "Completed",
+		fmt.Sprintf("Talos is already running %s", version)); err != nil {
+		vlog.Error("Failed to set TalosUpgrade condition", err)
+	}
+
+	vlog.Info(fmt.Sprintf("Talos upgrade target already running, request closed: %s version=%s", clusterlog.Tag(cluster), version))
+	return nil
+}
+
+// DropRejectedTarget removes a target annotation the operator refused, so a
+// request that can never succeed is reported once instead of being
+// re-validated and re-failed on every pass. The refusal stays visible in the
+// status and message annotations and in the upgrade condition.
+func (s *UpgradeService) DropRejectedTarget(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, key string) {
+	if err := s.RemoveAnnotation(ctx, cluster, key); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to drop rejected %s %s: %v", key, clusterlog.Tag(cluster), err))
+	}
 }
 
 // RegenerateMachineConfigsAfterUpgrade regenerates the controlplane.yaml and worker.yaml
@@ -1232,6 +1318,20 @@ func (s *UpgradeService) BlockKubernetesUpgrade(ctx context.Context, cluster *vi
 
 	vlog.Info(fmt.Sprintf("Kubernetes upgrade blocked: %s reason=%s", clusterlog.Tag(cluster), reason))
 	return nil
+}
+
+// sameVersion reports whether a and b name the same version, ignoring a
+// leading "v". Unparseable input is never the same.
+func sameVersion(a, b string) bool {
+	av, err := semver.NewVersion(consts.StripVersionPrefix(a))
+	if err != nil {
+		return false
+	}
+	bv, err := semver.NewVersion(consts.StripVersionPrefix(b))
+	if err != nil {
+		return false
+	}
+	return av.Equal(bv)
 }
 
 // ValidateUpgradeTarget validates that a target version is a valid upgrade path

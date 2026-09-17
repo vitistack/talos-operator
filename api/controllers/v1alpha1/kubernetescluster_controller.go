@@ -410,6 +410,10 @@ func (r *KubernetesClusterReconciler) isTalosProvider(kc *vitistackv1alpha1.Kube
 }
 
 // ensureFinalizer adds the finalizer if not present. Returns requeue=true when an update was made.
+// Uses a patch rather than Update for the same reason as removeFinalizer: a full
+// Update resends spec and fails validation on clusters that predate newer
+// required fields. The optimistic lock keeps the conflict retry meaningful,
+// since a merge patch replaces the whole finalizer list.
 func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *vitistackv1alpha1.KubernetesCluster) (bool, error) {
 	if controllerutil.ContainsFinalizer(kc, KubernetesClusterFinalizer) {
 		return false, nil
@@ -430,8 +434,9 @@ func (r *KubernetesClusterReconciler) ensureFinalizer(ctx context.Context, kc *v
 			}
 		}
 
+		patch := client.MergeFromWithOptions(kc.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		controllerutil.AddFinalizer(kc, KubernetesClusterFinalizer)
-		err := r.Update(ctx, kc)
+		err := r.Patch(ctx, kc, patch)
 		if err == nil {
 			return true, nil
 		}
@@ -525,7 +530,9 @@ func (r *KubernetesClusterReconciler) removeFinalizer(ctx context.Context, kc *v
 			kc = freshKC
 		}
 
-		patch := client.MergeFrom(kc.DeepCopy())
+		// Optimistic lock: a merge patch replaces the whole finalizer list, so
+		// without it a concurrent writer's finalizer could be dropped.
+		patch := client.MergeFromWithOptions(kc.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		controllerutil.RemoveFinalizer(kc, KubernetesClusterFinalizer)
 		err := r.Patch(ctx, kc, patch)
 		if err == nil {

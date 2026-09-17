@@ -12,7 +12,6 @@ import (
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
-	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 )
 
 // Node role constants
@@ -901,95 +900,6 @@ func (o *UpgradeOrchestrator) WaitForNodeReady(
 	}
 
 	return fmt.Errorf("timeout waiting for node %s to be ready", nodeIP)
-}
-
-// PreflightChecks performs comprehensive health checks before starting an upgrade
-// and persists the result to the cluster secret for tracking.
-func (o *UpgradeOrchestrator) PreflightChecks(
-	ctx context.Context,
-	cluster *vitistackv1alpha1.KubernetesCluster,
-	clientConfig *clientconfig.Config,
-	controlPlaneIP string,
-	allNodeIPs []string,
-) (*talosstateservice.HealthCheckState, error) {
-	healthState := &talosstateservice.HealthCheckState{
-		Passed:            false,
-		EtcdHealthy:       false,
-		NodesReady:        false,
-		ControlPlaneReady: false,
-	}
-
-	var issues []string
-
-	// 1. Check Talos API reachability on control plane
-	vlog.Info(fmt.Sprintf("Pre-upgrade health check: checking Talos API reachability on %s", controlPlaneIP))
-	if !o.clientService.IsTalosAPIReachable(controlPlaneIP) {
-		issues = append(issues, fmt.Sprintf("Talos API not reachable on control plane %s", controlPlaneIP))
-	} else {
-		healthState.ControlPlaneReady = true
-	}
-
-	// 2. Check etcd health
-	vlog.Info("Pre-upgrade health check: checking etcd cluster health")
-	client, err := o.clientService.CreateTalosClient(ctx, false, clientConfig, []string{controlPlaneIP})
-	if err != nil {
-		issues = append(issues, fmt.Sprintf("Failed to create Talos client: %v", err))
-	} else {
-		defer func() { _ = client.Close() }()
-
-		healthy, etcdErr := o.clientService.IsEtcdHealthy(ctx, client, controlPlaneIP)
-		switch {
-		case etcdErr != nil:
-			issues = append(issues, fmt.Sprintf("Failed to check etcd health: %v", etcdErr))
-		case !healthy:
-			issues = append(issues, "etcd cluster is not healthy")
-		default:
-			healthState.EtcdHealthy = true
-			vlog.Info("Pre-upgrade health check: etcd cluster is healthy")
-		}
-	}
-
-	// 3. Check all nodes are reachable
-	vlog.Info(fmt.Sprintf("Pre-upgrade health check: checking %d nodes are reachable", len(allNodeIPs)))
-	allNodesReachable := true
-	unreachableNodes := []string{}
-	for _, nodeIP := range allNodeIPs {
-		if !o.clientService.IsTalosAPIReachable(nodeIP) {
-			allNodesReachable = false
-			unreachableNodes = append(unreachableNodes, nodeIP)
-		}
-	}
-	if !allNodesReachable {
-		issues = append(issues, fmt.Sprintf("Talos API not reachable on nodes: %v", unreachableNodes))
-	} else {
-		healthState.NodesReady = true
-		vlog.Info(fmt.Sprintf("Pre-upgrade health check: all %d nodes are reachable", len(allNodeIPs)))
-	}
-
-	// Build result message
-	if len(issues) > 0 {
-		healthState.Message = fmt.Sprintf("Health check failed: %s", strings.Join(issues, "; "))
-		healthState.Passed = false
-		vlog.Errorf("Pre-upgrade health check FAILED: %s issues=%v", clusterlog.Tag(cluster), issues)
-	} else {
-		healthState.Message = "All health checks passed"
-		healthState.Passed = true
-		vlog.Info(fmt.Sprintf("Pre-upgrade health check PASSED: cluster=%s etcd=%v nodes=%v cp=%v",
-			cluster.Name, healthState.EtcdHealthy, healthState.NodesReady, healthState.ControlPlaneReady))
-	}
-
-	// Persist health state to secret (if state service available)
-	if o.upgradeService != nil && o.upgradeService.stateService != nil {
-		if err := o.upgradeService.stateService.SetHealthCheckState(ctx, cluster, healthState); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to persist health check state: %v", err))
-		}
-	}
-
-	if !healthState.Passed {
-		return healthState, fmt.Errorf("pre-upgrade health check failed: %s", healthState.Message)
-	}
-
-	return healthState, nil
 }
 
 // SyncMachineConfigsAfterUpgrade fetches the current machine configs from nodes

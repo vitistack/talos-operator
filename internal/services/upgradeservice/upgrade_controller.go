@@ -4,6 +4,7 @@ package upgradeservice
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -95,7 +96,7 @@ func (c *UpgradeController) HandleUpgrade(
 	upgState := c.upgradeService.GetUpgradeState(cluster)
 
 	// Check for Talos upgrade request
-	if c.upgradeService.IsTalosUpgradeRequested(cluster) {
+	if c.upgradeService.IsTalosUpgradeRequested(cluster) && !failedPlanOwnsTarget(state, upgState) {
 		return c.startTalosUpgrade(ctx, cluster, clientConfig, machines, upgState)
 	}
 
@@ -110,7 +111,89 @@ func (c *UpgradeController) HandleUpgrade(
 		return c.resumeFailedUpgrade(ctx, cluster, clientConfig, upgState)
 	}
 
+	// Reached only when no persisted upgrade is running, so any condition
+	// still reporting progress is left over.
+	c.retireStaleUpgradeConditions(ctx, cluster, upgState)
 	return 0, false, nil
+}
+
+// failedPlanOwnsTarget reports whether a failed Talos upgrade plan for this
+// same target is still stored. talos-current is the lowest version among the
+// nodes that ANSWER, so a node that failed and went unreachable can let it
+// reach the target while that node is still behind: closing the request as
+// completed would erase the failure. The plan is left for resume or reset.
+func failedPlanOwnsTarget(state *ClusterUpgradeState, upgState *UpgradeState) bool {
+	return state != nil && state.IsFailed() && state.UpgradeType == UpgradeTypeTalos &&
+		sameVersion(state.TargetVersion, upgState.TalosTarget) &&
+		sameVersion(upgState.TalosCurrent, upgState.TalosTarget)
+}
+
+// retireStaleUpgradeConditions ends an upgrade condition that no longer
+// describes the cluster, in either of two ways:
+//
+//   - It still reports InProgress although no upgrade is running. An upgrade
+//     that stopped without completing or failing (state cleared by hand, a
+//     write the API server rejected) otherwise leaves the condition claiming
+//     progress indefinitely.
+//   - It still reports a failure the operator itself no longer reports: the
+//     status annotation has moved on and no target is requested. Nothing else
+//     rewrites a failed condition, so it would sit there until the next
+//     upgrade — d-trd-atlas-001 and t-trd-obao-001 carried a failure from May
+//     and June for over three months.
+//
+// A failure the operator still stands behind (status failed, or a target it
+// can act on) is left alone.
+func (c *UpgradeController) retireStaleUpgradeConditions(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	upgState *UpgradeState,
+) {
+	upgrades := []struct {
+		condType string
+		status   consts.UpgradeStatus
+		target   string
+		current  string
+	}{
+		{"TalosUpgrade", upgState.TalosStatus, upgState.TalosTarget, upgState.TalosCurrent},
+		{"KubernetesUpgrade", upgState.KubernetesStatus, upgState.KubernetesTarget, upgState.KubernetesCurrent},
+	}
+
+	for _, u := range upgrades {
+		cond := findCondition(cluster, u.condType)
+		if cond == nil {
+			continue
+		}
+		name := strings.TrimSuffix(u.condType, "Upgrade")
+
+		var reason, message string
+		switch {
+		case cond.Status == "True" && cond.Reason == "InProgress":
+			reason = "Interrupted"
+			message = fmt.Sprintf("%s upgrade is no longer running; it last reported: %s", name, cond.Message)
+		case cond.Reason == "Failed" && u.status != consts.UpgradeStatusFailed && u.target == "":
+			reason = "Cleared"
+			message = fmt.Sprintf("No %s upgrade is failing or requested", name)
+			if u.current != "" {
+				message += fmt.Sprintf("; the cluster runs %s", u.current)
+			}
+		default:
+			continue
+		}
+
+		if err := c.statusManager.SetCondition(ctx, cluster, u.condType, "False", reason, message); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to retire stale %s condition %s: %v", u.condType, clusterlog.Tag(cluster), err))
+		}
+	}
+}
+
+// findCondition returns the cluster's condition of this type, or nil.
+func findCondition(cluster *vitistackv1alpha1.KubernetesCluster, condType string) *vitistackv1alpha1.KubernetesClusterCondition {
+	for i := range cluster.Status.Conditions {
+		if cluster.Status.Conditions[i].Type == condType {
+			return &cluster.Status.Conditions[i]
+		}
+	}
+	return nil
 }
 
 // handleCompletedUpgrade handles an upgrade that has just completed
@@ -193,6 +276,26 @@ func (c *UpgradeController) startTalosUpgrade(
 	machines []vitistackv1alpha1.Machine,
 	upgState *UpgradeState,
 ) (time.Duration, bool, error) {
+	if upgState.TalosCurrent == "" {
+		// The running version has not been read yet (a cluster whose
+		// annotations are still being initialised). Keep the request and let
+		// this pass fill it in.
+		vlog.Debug("Talos upgrade requested before the running version is known: " + clusterlog.Tag(cluster))
+		return 0, false, nil
+	}
+
+	// The requested version already runs, so there is nothing to roll.
+	if sameVersion(upgState.TalosCurrent, upgState.TalosTarget) {
+		if err := c.upgradeService.CompleteTalosTargetAlreadyRunning(ctx, cluster, upgState.TalosTarget); err != nil {
+			return 30 * time.Second, true, fmt.Errorf("failed to close Talos upgrade request: %w", err)
+		}
+		// Any plan left in the secret described this same request.
+		if err := c.stateManager.ClearUpgradeState(ctx, cluster); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to clear the closed upgrade plan %s: %v", clusterlog.Tag(cluster), err))
+		}
+		return 10 * time.Second, true, nil
+	}
+
 	vlog.Info(fmt.Sprintf("Starting Talos upgrade: %s current=%s target=%s",
 		clusterlog.Tag(cluster), upgState.TalosCurrent, upgState.TalosTarget))
 
@@ -200,6 +303,7 @@ func (c *UpgradeController) startTalosUpgrade(
 	if err := c.upgradeService.ValidateUpgradeTarget(upgState.TalosCurrent, upgState.TalosTarget); err != nil {
 		vlog.Errorf("Invalid Talos upgrade target %s: %v", clusterlog.Tag(cluster), err)
 		_ = c.upgradeService.FailTalosUpgrade(ctx, cluster, err.Error())
+		c.upgradeService.DropRejectedTarget(ctx, cluster, consts.TalosTargetAnnotation)
 		return 30 * time.Second, true, nil
 	}
 
@@ -214,6 +318,9 @@ func (c *UpgradeController) startTalosUpgrade(
 
 	// Build node lists
 	controlPlanes, workers := c.buildNodeLists(machines)
+
+	// Record the cluster's health as the upgrade starts (secret health_check_*).
+	c.upgradeService.RecordPreUpgradeHealth(ctx, cluster, clientConfig, controlPlanes, workers)
 
 	// Initialize upgrade state
 	_, err = c.stateManager.InitializeUpgradeState(
@@ -245,6 +352,11 @@ func (c *UpgradeController) startKubernetesUpgrade(
 	machines []vitistackv1alpha1.Machine,
 	upgState *UpgradeState,
 ) (time.Duration, bool, error) {
+	if upgState.KubernetesCurrent == "" {
+		vlog.Debug("Kubernetes upgrade requested before the running version is known: " + clusterlog.Tag(cluster))
+		return 0, false, nil
+	}
+
 	vlog.Info(fmt.Sprintf("Starting Kubernetes upgrade: %s current=%s target=%s",
 		clusterlog.Tag(cluster), upgState.KubernetesCurrent, upgState.KubernetesTarget))
 
@@ -252,11 +364,15 @@ func (c *UpgradeController) startKubernetesUpgrade(
 	if err := c.upgradeService.ValidateKubernetesUpgradeTarget(upgState.KubernetesCurrent, upgState.KubernetesTarget); err != nil {
 		vlog.Errorf("Invalid Kubernetes upgrade target %s: %v", clusterlog.Tag(cluster), err)
 		_ = c.upgradeService.FailKubernetesUpgrade(ctx, cluster, err.Error())
+		c.upgradeService.DropRejectedTarget(ctx, cluster, consts.KubernetesTargetAnnotation)
 		return 30 * time.Second, true, nil
 	}
 
 	// Build node lists
 	controlPlanes, workers := c.buildNodeLists(machines)
+
+	// Record the cluster's health as the upgrade starts (secret health_check_*).
+	c.upgradeService.RecordPreUpgradeHealth(ctx, cluster, clientConfig, controlPlanes, workers)
 
 	// Initialize upgrade state
 	_, err := c.stateManager.InitializeUpgradeState(
@@ -291,8 +407,17 @@ func (c *UpgradeController) resumeFailedUpgrade(
 
 	// Get current state
 	state, err := c.stateManager.GetUpgradeState(ctx, cluster)
-	if err != nil || state == nil {
-		return 0, false, fmt.Errorf("no upgrade state to resume")
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to read upgrade state to resume: %w", err)
+	}
+	if state == nil {
+		// Nothing was persisted — the upgrade failed before rolling any node,
+		// or its state was cleared — so there is no plan to resume. Drop the
+		// request instead of failing on it every pass; setting a target
+		// starts a fresh upgrade.
+		vlog.Warn("Resume requested but there is no upgrade state to resume, dropping the request: " + clusterlog.Tag(cluster))
+		_ = c.upgradeService.ClearUpgradeControlAnnotations(ctx, cluster)
+		return 0, false, nil
 	}
 
 	// Reset phase from failed
@@ -461,6 +586,11 @@ func (c *UpgradeController) HandleTalosResetUpgradeState(
 		consts.TalosProgressAnnotation,
 		consts.TalosTargetAnnotation,
 		consts.FailedNodesAnnotation,
+		// The control flags answer the upgrade being reset; left behind they
+		// would act on whatever upgrade comes next.
+		consts.ResumeUpgradeAnnotation,
+		consts.SkipFailedNodesAnnotation,
+		consts.RetryFailedNodesAnnotation,
 	}
 	for _, key := range talosAnnotations {
 		if err := c.upgradeService.RemoveAnnotation(ctx, cluster, key); err != nil {
@@ -472,6 +602,11 @@ func (c *UpgradeController) HandleTalosResetUpgradeState(
 	// cluster locked out of the regular reconcile flow.
 	if err := c.statusManager.SetPhase(ctx, cluster, status.PhaseReady); err != nil {
 		vlog.Warn(fmt.Sprintf("Failed to reset phase after talos-reset-upgrade-state %s: %v", clusterlog.Tag(cluster), err))
+	}
+	// The condition would otherwise keep reporting the failure that was reset.
+	if err := c.statusManager.SetCondition(ctx, cluster, "TalosUpgrade", "False", "Reset",
+		"Talos upgrade state was reset on request"); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to reset TalosUpgrade condition %s: %v", clusterlog.Tag(cluster), err))
 	}
 
 	// Remove the trigger annotation last so a partial failure leaves the
