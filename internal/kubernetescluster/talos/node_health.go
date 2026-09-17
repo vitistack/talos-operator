@@ -3,14 +3,12 @@ package talos
 import (
 	"context"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // checkAllExpectedNodesReady queries the workload cluster's Kubernetes API
@@ -31,45 +29,19 @@ func (t *TalosManager) checkAllExpectedNodesReady(
 		return false, "no expected machines", nil
 	}
 
-	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
+	nodes, err := t.listWorkloadNodes(ctx, cluster)
 	if err != nil {
-		return false, "", fmt.Errorf("failed to build workload cluster client: %w", err)
+		return false, "", err
 	}
-	if clientset == nil {
+	if nodes == nil {
 		return false, "kubeconfig not available yet", nil
 	}
 
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return false, "", fmt.Errorf("failed to list nodes in workload cluster: %w", err)
+	ready, reason := nodesReadiness(nodes.items, expected)
+	if !ready {
+		vlog.Info(fmt.Sprintf("Node health check pending %s: %s", clusterLogTag(cluster), reason))
 	}
-
-	byName := make(map[string]*corev1.Node, len(nodes.Items))
-	for i := range nodes.Items {
-		byName[nodes.Items[i].Name] = &nodes.Items[i]
-	}
-
-	var missing, notReady []string
-	for _, m := range expected {
-		node, ok := byName[m.Name]
-		if !ok {
-			missing = append(missing, m.Name)
-			continue
-		}
-		if !isNodeReady(node) {
-			notReady = append(notReady, m.Name)
-		}
-	}
-
-	if len(missing) == 0 && len(notReady) == 0 {
-		return true, "", nil
-	}
-
-	sort.Strings(missing)
-	sort.Strings(notReady)
-	reason := buildNotReadyMessage(missing, notReady)
-	vlog.Info(fmt.Sprintf("Node health check pending %s: %s", clusterLogTag(cluster), reason))
-	return false, reason, nil
+	return ready, reason, nil
 }
 
 // isNodeReady returns true when the Node has a Ready condition with status True.
@@ -131,20 +103,22 @@ func (t *TalosManager) stageWaitNodesHealthy(
 // refreshNodesHealthFlag is the short-circuit path's equivalent — best-effort
 // re-evaluation so the flag (and therefore the cluster Phase) tracks reality
 // when nodes go NotReady or new Machines have been added but haven't joined
-// yet. Never returns an error; logs and moves on.
+// yet. nodes is this pass's Node list; a pass without one skips the refresh so
+// a transient API error never flips the flag. Never returns an error; logs and
+// moves on.
 func (t *TalosManager) refreshNodesHealthFlag(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
+	nodes []corev1.Node,
 ) {
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
 	if err != nil || len(machines) == 0 {
 		return
 	}
 
-	ready, reason, err := t.checkAllExpectedNodesReady(ctx, cluster, machines)
-	if err != nil {
-		// Don't flip the flag based on transient API errors — leave previous value.
-		return
+	ready, reason := nodesReadiness(nodes, machines)
+	if !ready {
+		vlog.Info(fmt.Sprintf("Node health check pending %s: %s", clusterLogTag(cluster), reason))
 	}
 
 	flags, _ := t.getTalosSecretFlags(ctx, cluster)

@@ -105,6 +105,11 @@ func (m *UpgradeStateManager) GetUpgradeState(ctx context.Context, cluster *viti
 		return nil, fmt.Errorf("failed to get cluster secret: %w", err)
 	}
 
+	return decodeUpgradeState(secret)
+}
+
+// decodeUpgradeState returns the upgrade state stored in secret, or nil when there is none.
+func decodeUpgradeState(secret *corev1.Secret) (*ClusterUpgradeState, error) {
 	stateJSON, ok := secret.Data["upgrade_state"]
 	if !ok || len(stateJSON) == 0 {
 		return nil, nil // No upgrade state stored
@@ -118,8 +123,80 @@ func (m *UpgradeStateManager) GetUpgradeState(ctx context.Context, cluster *viti
 	return &state, nil
 }
 
-// SaveUpgradeState saves the upgrade state to the cluster secret
+// upgradeStateWriteAttempts bounds how often an upgrade state write is tried
+// when it hits a conflict. The secret is read through the informer cache,
+// which can trail a write made moments earlier in the same pass;
+// upgradeStateRetryBackoff (growing per attempt) gives it time to catch up.
+const (
+	upgradeStateWriteAttempts = 5
+	upgradeStateRetryBackoff  = 100 * time.Millisecond
+)
+
+// SaveUpgradeState saves the upgrade state to the cluster secret, replacing any stored state
 func (m *UpgradeStateManager) SaveUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, state *ClusterUpgradeState) error {
+	return m.writeUpgradeState(ctx, cluster, func(*corev1.Secret) (*ClusterUpgradeState, error) {
+		return state, nil
+	})
+}
+
+// updateUpgradeState applies mutate to the stored upgrade state and saves the
+// result. Each attempt reads the state again before applying mutate, so a
+// retry builds on the latest stored state instead of overwriting it.
+func (m *UpgradeStateManager) updateUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, mutate func(state *ClusterUpgradeState)) error {
+	return m.writeUpgradeState(ctx, cluster, func(secret *corev1.Secret) (*ClusterUpgradeState, error) {
+		state, err := decodeUpgradeState(secret)
+		if err != nil {
+			return nil, err
+		}
+		if state == nil {
+			return nil, fmt.Errorf("no upgrade state found")
+		}
+		mutate(state)
+		return state, nil
+	})
+}
+
+// writeUpgradeState reads the cluster secret, stores the state that build
+// derives from it, and writes the secret back. A write conflict is retried
+// from a fresh read; the last conflict is returned if every attempt hits one.
+func (m *UpgradeStateManager) writeUpgradeState(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	build func(secret *corev1.Secret) (*ClusterUpgradeState, error),
+) error {
+	var err error
+	for attempt := range upgradeStateWriteAttempts {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(upgradeStateRetryBackoff * time.Duration(attempt)):
+			}
+		}
+		err = m.tryWriteUpgradeState(ctx, cluster, build)
+		if !apierrors.IsConflict(err) {
+			return err
+		}
+		vlog.Debug(fmt.Sprintf("Upgrade state write conflict on attempt %d for %s, retrying: %v", attempt+1, cluster.Name, err))
+	}
+	return err
+}
+
+func (m *UpgradeStateManager) tryWriteUpgradeState(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	build func(secret *corev1.Secret) (*ClusterUpgradeState, error),
+) error {
+	secret, err := m.secretGetter.GetTalosSecret(ctx, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster secret: %w", err)
+	}
+
+	state, err := build(secret)
+	if err != nil {
+		return err
+	}
+
 	// Update timestamp
 	state.LastUpdatedAt = time.Now().UTC()
 
@@ -127,12 +204,6 @@ func (m *UpgradeStateManager) SaveUpgradeState(ctx context.Context, cluster *vit
 	stateJSON, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("failed to marshal upgrade state: %w", err)
-	}
-
-	// Get current secret
-	secret, err := m.secretGetter.GetTalosSecret(ctx, cluster)
-	if err != nil {
-		return fmt.Errorf("failed to get cluster secret: %w", err)
 	}
 
 	if secret.Data == nil {
@@ -212,153 +283,116 @@ func (m *UpgradeStateManager) InitializeUpgradeState(
 
 // MarkNodeUpgradeInitiated marks that an upgrade has been initiated on a node
 func (m *UpgradeStateManager) MarkNodeUpgradeInitiated(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
-	state, err := m.GetUpgradeState(ctx, cluster)
-	if err != nil {
-		return err
-	}
-	if state == nil {
-		return fmt.Errorf("no upgrade state found")
-	}
-
-	for i := range state.Nodes {
-		if state.Nodes[i].NodeName == nodeName {
-			state.Nodes[i].UpgradeInitiated = true
-			state.Nodes[i].InitiatedAt = time.Now().UTC()
-			break
+	return m.updateUpgradeState(ctx, cluster, func(state *ClusterUpgradeState) {
+		for i := range state.Nodes {
+			if state.Nodes[i].NodeName == nodeName {
+				state.Nodes[i].UpgradeInitiated = true
+				state.Nodes[i].InitiatedAt = time.Now().UTC()
+				break
+			}
 		}
-	}
-
-	return m.SaveUpgradeState(ctx, cluster, state)
+	})
 }
 
 // MarkNodeUpgradeCompleted marks that a node upgrade has completed (version verified)
 func (m *UpgradeStateManager) MarkNodeUpgradeCompleted(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
-	state, err := m.GetUpgradeState(ctx, cluster)
-	if err != nil {
-		return err
-	}
-	if state == nil {
-		return fmt.Errorf("no upgrade state found")
-	}
-
-	for i := range state.Nodes {
-		if state.Nodes[i].NodeName == nodeName {
-			state.Nodes[i].UpgradeCompleted = true
-			state.Nodes[i].CompletedAt = time.Now().UTC()
-			break
+	return m.updateUpgradeState(ctx, cluster, func(state *ClusterUpgradeState) {
+		for i := range state.Nodes {
+			if state.Nodes[i].NodeName == nodeName {
+				state.Nodes[i].UpgradeCompleted = true
+				state.Nodes[i].CompletedAt = time.Now().UTC()
+				break
+			}
 		}
-	}
-
-	return m.SaveUpgradeState(ctx, cluster, state)
+	})
 }
 
 // MarkNodeReady marks that a node is ready in Kubernetes
 func (m *UpgradeStateManager) MarkNodeReady(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
-	state, err := m.GetUpgradeState(ctx, cluster)
-	if err != nil {
-		return err
-	}
-	if state == nil {
-		return fmt.Errorf("no upgrade state found")
-	}
-
-	for i := range state.Nodes {
-		if state.Nodes[i].NodeName == nodeName {
-			state.Nodes[i].NodeReady = true
-			break
+	return m.updateUpgradeState(ctx, cluster, func(state *ClusterUpgradeState) {
+		for i := range state.Nodes {
+			if state.Nodes[i].NodeName == nodeName {
+				state.Nodes[i].NodeReady = true
+				break
+			}
 		}
-	}
-
-	return m.SaveUpgradeState(ctx, cluster, state)
+	})
 }
 
 // AdvanceToNextNode moves to the next node in the upgrade sequence
 func (m *UpgradeStateManager) AdvanceToNextNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	state, err := m.GetUpgradeState(ctx, cluster)
-	if err != nil {
-		return err
-	}
-	if state == nil {
-		return fmt.Errorf("no upgrade state found")
-	}
+	var logMsg string
+	err := m.updateUpgradeState(ctx, cluster, func(state *ClusterUpgradeState) {
+		logMsg = ""
+		nextIndex := state.CurrentNodeIndex + 1
 
-	nextIndex := state.CurrentNodeIndex + 1
-
-	// Check if we're done with control planes and need to wait
-	switch {
-	case state.Phase == UpgradePhaseControlPlanes && nextIndex >= state.ControlPlaneCount:
-		// All control planes done, transition to waiting phase
-		state.Phase = UpgradePhaseControlPlanesWait
-		state.ControlPlanesReadyAt = time.Now().UTC()
-		state.CurrentNodeName = ""
-		vlog.Info(fmt.Sprintf("All control planes upgraded, entering wait phase: cluster=%s", cluster.Name))
-	case state.Phase == UpgradePhaseWorkers && nextIndex >= len(state.Nodes):
-		// All workers done, upgrade complete
-		state.Phase = UpgradePhaseCompleted
-		state.CompletedAt = time.Now().UTC()
-		state.CurrentNodeName = ""
-		vlog.Info(fmt.Sprintf("All nodes upgraded, upgrade complete: cluster=%s", cluster.Name))
-	default:
-		// Move to next node
-		state.CurrentNodeIndex = nextIndex
-		if nextIndex < len(state.Nodes) {
-			state.CurrentNodeName = state.Nodes[nextIndex].NodeName
+		// Check if we're done with control planes and need to wait
+		switch {
+		case state.Phase == UpgradePhaseControlPlanes && nextIndex >= state.ControlPlaneCount:
+			// All control planes done, transition to waiting phase
+			state.Phase = UpgradePhaseControlPlanesWait
+			state.ControlPlanesReadyAt = time.Now().UTC()
+			state.CurrentNodeName = ""
+			logMsg = fmt.Sprintf("All control planes upgraded, entering wait phase: cluster=%s", cluster.Name)
+		case state.Phase == UpgradePhaseWorkers && nextIndex >= len(state.Nodes):
+			// All workers done, upgrade complete
+			state.Phase = UpgradePhaseCompleted
+			state.CompletedAt = time.Now().UTC()
+			state.CurrentNodeName = ""
+			logMsg = fmt.Sprintf("All nodes upgraded, upgrade complete: cluster=%s", cluster.Name)
+		default:
+			// Move to next node
+			state.CurrentNodeIndex = nextIndex
+			if nextIndex < len(state.Nodes) {
+				state.CurrentNodeName = state.Nodes[nextIndex].NodeName
+			}
 		}
+	})
+	if err == nil && logMsg != "" {
+		vlog.Info(logMsg)
 	}
-
-	return m.SaveUpgradeState(ctx, cluster, state)
+	return err
 }
 
 // TransitionToWorkers transitions from control plane wait phase to workers
 func (m *UpgradeStateManager) TransitionToWorkers(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	state, err := m.GetUpgradeState(ctx, cluster)
-	if err != nil {
-		return err
-	}
-	if state == nil {
-		return fmt.Errorf("no upgrade state found")
-	}
-
-	if state.WorkerCount == 0 {
-		// No workers, upgrade is complete
-		state.Phase = UpgradePhaseCompleted
-		state.CompletedAt = time.Now().UTC()
-		vlog.Info(fmt.Sprintf("No workers to upgrade, upgrade complete: cluster=%s", cluster.Name))
-	} else {
+	var logMsg string
+	err := m.updateUpgradeState(ctx, cluster, func(state *ClusterUpgradeState) {
+		if state.WorkerCount == 0 {
+			// No workers, upgrade is complete
+			state.Phase = UpgradePhaseCompleted
+			state.CompletedAt = time.Now().UTC()
+			logMsg = fmt.Sprintf("No workers to upgrade, upgrade complete: cluster=%s", cluster.Name)
+			return
+		}
 		state.Phase = UpgradePhaseWorkers
 		state.CurrentNodeIndex = state.ControlPlaneCount // First worker
 		state.CurrentNodeName = state.Nodes[state.CurrentNodeIndex].NodeName
-		vlog.Info(fmt.Sprintf("Starting worker upgrades: cluster=%s workers=%d", cluster.Name, state.WorkerCount))
+		logMsg = fmt.Sprintf("Starting worker upgrades: cluster=%s workers=%d", cluster.Name, state.WorkerCount)
+	})
+	if err == nil {
+		vlog.Info(logMsg)
 	}
-
-	return m.SaveUpgradeState(ctx, cluster, state)
+	return err
 }
 
 // MarkUpgradeFailed marks the upgrade as failed with a reason
 func (m *UpgradeStateManager) MarkUpgradeFailed(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName, reason string) error {
-	state, err := m.GetUpgradeState(ctx, cluster)
-	if err != nil {
-		return err
-	}
-	if state == nil {
-		return fmt.Errorf("no upgrade state found")
-	}
-
-	state.Phase = UpgradePhaseFailed
-	state.FailedNodeName = nodeName
-	state.FailedReason = reason
-
-	// Mark the node as failed
-	for i := range state.Nodes {
-		if state.Nodes[i].NodeName == nodeName {
-			state.Nodes[i].Error = reason
-			break
-		}
-	}
-
 	vlog.Error(fmt.Sprintf("Upgrade failed: cluster=%s node=%s reason=%s", cluster.Name, nodeName, reason), nil)
 
-	return m.SaveUpgradeState(ctx, cluster, state)
+	return m.updateUpgradeState(ctx, cluster, func(state *ClusterUpgradeState) {
+		state.Phase = UpgradePhaseFailed
+		state.FailedNodeName = nodeName
+		state.FailedReason = reason
+
+		// Mark the node as failed
+		for i := range state.Nodes {
+			if state.Nodes[i].NodeName == nodeName {
+				state.Nodes[i].Error = reason
+				break
+			}
+		}
+	})
 }
 
 // GetCurrentNode returns the current node being upgraded

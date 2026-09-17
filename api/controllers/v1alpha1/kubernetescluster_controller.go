@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -173,13 +174,6 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 		return result, nil
 	}
 
-	// Update KubernetesCluster status (skip if being deleted)
-	if kubernetesCluster.GetDeletionTimestamp() == nil {
-		if err := r.StatusManager.UpdateKubernetesClusterStatus(ctx, kubernetesCluster); err != nil {
-			vlog.Error("Failed to update KubernetesCluster status "+clusterlog.Tag(kubernetesCluster), err)
-		}
-	}
-
 	// Initialize upgrade annotations for ready clusters (detects current versions)
 	if kubernetesCluster.Status.Phase == status.PhaseReady {
 		r.initializeUpgradeAnnotations(ctx, kubernetesCluster)
@@ -237,7 +231,7 @@ func (r *KubernetesClusterReconciler) handleUpgrades(ctx context.Context, cluste
 	}
 
 	if handled {
-		return ctrl.Result{RequeueAfter: requeueAfter}, true
+		return ctrl.Result{RequeueAfter: upgradeRequeueAfter(requeueAfter)}, true
 	}
 
 	return ctrl.Result{}, false
@@ -608,8 +602,8 @@ func (r *KubernetesClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	vlog.Info(fmt.Sprintf("KubernetesCluster controller max concurrent reconciles: %d", maxConcurrent))
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&vitistackv1alpha1.KubernetesCluster{}).
-		Owns(&vitistackv1alpha1.Machine{}).
+		For(&vitistackv1alpha1.KubernetesCluster{}, builder.WithPredicates(kubernetesClusterEventFilter())).
+		Owns(&vitistackv1alpha1.Machine{}, builder.WithPredicates(machineEventFilter())).
 		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Complete(r)
 }

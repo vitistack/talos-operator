@@ -78,6 +78,7 @@ func (t *TalosManager) reconcileRemovedNodes(ctx context.Context, cluster *vitis
 	}
 
 	vlog.Info(fmt.Sprintf("Found %d nodes to remove from %s: %v", len(nodesToRemove), clusterLogTag(cluster), nodesToRemove))
+	_ = t.statusManager.SetMessage(ctx, cluster, fmt.Sprintf("Removing nodes %v", nodesToRemove))
 
 	// Load Talos artifacts for deletion operations
 	clientConfig, _, err := t.loadTalosArtifacts(ctx, cluster)
@@ -737,44 +738,6 @@ func isMirrorPod(pod *corev1.Pod) bool {
 	return exists
 }
 
-// CleanupOrphanedK8sNodes finds and deletes Kubernetes nodes in the workload cluster
-// that have no corresponding Machine CRD and are in NotReady state with SchedulingDisabled.
-// This handles cases where the Machine was deleted but the K8s node wasn't cleaned up properly.
-func (t *TalosManager) CleanupOrphanedK8sNodes(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	// Get workload cluster clientset
-	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
-	if err != nil {
-		return err
-	}
-	if clientset == nil {
-		// No kubeconfig yet, cluster not fully initialized
-		return nil
-	}
-
-	// Get all nodes from the workload cluster
-	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to list nodes from workload cluster: %w", err)
-	}
-
-	// Get machine names for this cluster
-	machineNames, err := t.getClusterMachineNames(ctx, cluster)
-	if err != nil {
-		return err
-	}
-
-	// Find and delete orphaned nodes
-	clusterTag := clusterLogTag(cluster)
-	for i := range nodeList.Items {
-		node := &nodeList.Items[i]
-		if err := t.deleteOrphanedNodeIfNeeded(ctx, clientset, node, machineNames, clusterTag); err != nil {
-			vlog.Error(fmt.Sprintf("Error processing node %s/%s: %v", clusterTag, node.Name, err), err)
-		}
-	}
-
-	return nil
-}
-
 // getWorkloadClusterClient creates a Kubernetes client for the workload cluster
 func (t *TalosManager) getWorkloadClusterClient(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (*kubernetes.Clientset, error) {
 	secret, err := t.secretService.GetTalosSecret(ctx, cluster)
@@ -812,40 +775,6 @@ func (t *TalosManager) getClusterMachineNames(ctx context.Context, cluster *viti
 		machineNames[m.Name] = true
 	}
 	return machineNames, nil
-}
-
-// deleteOrphanedNodeIfNeeded checks if a node is orphaned (no Machine CRD, NotReady, Unschedulable) and deletes it
-func (t *TalosManager) deleteOrphanedNodeIfNeeded(
-	ctx context.Context,
-	clientset *kubernetes.Clientset,
-	node *corev1.Node,
-	machineNames map[string]bool,
-	clusterTag string,
-) error {
-	nodeName := node.Name
-
-	// Skip if there's a corresponding Machine
-	if machineNames[nodeName] {
-		return nil
-	}
-
-	// Check if node is orphaned: NotReady AND Unschedulable
-	if !isNodeOrphaned(node) {
-		return nil
-	}
-
-	vlog.Info(fmt.Sprintf("Found orphaned Kubernetes node (NotReady + SchedulingDisabled, no Machine CRD): node=%s %s",
-		nodeName, clusterTag))
-
-	if err := clientset.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{}); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to delete orphaned node %s: %w", nodeName, err)
-	}
-
-	vlog.Info(fmt.Sprintf("Successfully deleted orphaned Kubernetes node: node=%s %s", nodeName, clusterTag))
-	return nil
 }
 
 // isNodeOrphaned checks if a node is NotReady and Unschedulable

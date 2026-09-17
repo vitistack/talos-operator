@@ -20,17 +20,9 @@ import (
 // the expected vitistack annotations. This covers cases where the cluster spec
 // has changed after initial provisioning (e.g. project, environment, region)
 // and keeps annotations in sync without requiring a node re-provision.
-func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
-	if err != nil || clientset == nil {
-		return err
-	}
-
-	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to list workload cluster nodes for annotation reconciliation: %w", err)
-	}
-
+//
+// nodes is this pass's workload Node list; its client is used for the patches.
+func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodes *workloadNodes) error {
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
 	if err != nil {
 		return fmt.Errorf("failed to get cluster machines for annotation reconciliation: %w", err)
@@ -56,8 +48,8 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 		skipKeys[vitistackv1alpha1.InfrastructureAnnotation] = true //nolint:staticcheck // backward compatibility
 	}
 
-	for i := range nodeList.Items {
-		node := &nodeList.Items[i]
+	for i := range nodes.items {
+		node := &nodes.items[i]
 		m, exists := machineMap[node.Name]
 		if !exists {
 			continue
@@ -90,7 +82,7 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 		}
 		updated, removed := countPatchOps(patch)
 
-		if _, err := clientset.CoreV1().Nodes().Patch(ctx, node.Name, k8stypes.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		if _, err := nodes.client.CoreV1().Nodes().Patch(ctx, node.Name, k8stypes.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to patch annotations on node %s: %v", node.Name, err))
 			continue
 		}

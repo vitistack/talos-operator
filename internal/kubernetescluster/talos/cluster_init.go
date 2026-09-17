@@ -39,33 +39,46 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			// this pass.
 			t.backfillOSInstalledAnnotations(ctx, cluster)
 
+			// This branch runs on every pass of a settled cluster, so it sets a
+			// status message only where there is work to report: each message
+			// is a status write that every KubernetesCluster watcher receives.
+
 			// Reconcile removed nodes first (scale-down), then new nodes (scale-up)
-			_ = t.statusManager.SetMessage(ctx, cluster, "Reconciling removed nodes")
 			if err := t.reconcileRemovedNodes(ctx, cluster); err != nil {
 				vlog.Warn(fmt.Sprintf("Error during node removal reconciliation %s: %v", clusterLogTag(cluster), err))
 				// Continue with new node reconciliation even if removal has issues
 			}
 
-			// Cleanup orphaned K8s nodes (NotReady + SchedulingDisabled with no Machine CRD)
-			_ = t.statusManager.SetMessage(ctx, cluster, "Cleaning up orphaned nodes")
-			if err := t.CleanupOrphanedK8sNodes(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during orphaned node cleanup %s: %v", clusterLogTag(cluster), err))
-				// Continue even if cleanup has issues
+			// One Node list serves every workload-cluster check in this pass.
+			// Without it those checks are skipped until the next pass; new
+			// machines are still configured.
+			nodes, err := t.listWorkloadNodes(ctx, cluster)
+			if err != nil {
+				vlog.Warn(fmt.Sprintf("Skipping workload node checks this pass %s: %v", clusterLogTag(cluster), err))
 			}
 
-			_ = t.statusManager.SetMessage(ctx, cluster, "Reconciling new nodes")
-			if err := t.reconcileNewNodes(ctx, cluster); err != nil {
+			// Cleanup orphaned K8s nodes (NotReady + SchedulingDisabled with no Machine CRD)
+			if nodes != nil {
+				if err := t.cleanupOrphanedK8sNodes(ctx, cluster, nodes); err != nil {
+					vlog.Warn(fmt.Sprintf("Error during orphaned node cleanup %s: %v", clusterLogTag(cluster), err))
+					// Continue even if cleanup has issues
+				}
+			}
+
+			if err := t.reconcileNewNodes(ctx, cluster, nodes); err != nil {
 				return err
 			}
 
-			// Reconcile Kubernetes version on nodes that joined with a stale config
-			if err := t.reconcileNodeVersions(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during node version reconciliation %s: %v", clusterLogTag(cluster), err))
-			}
+			if nodes != nil {
+				// Reconcile Kubernetes version on nodes that joined with a stale config
+				if err := t.reconcileNodeVersions(ctx, cluster, nodes.items); err != nil {
+					vlog.Warn(fmt.Sprintf("Error during node version reconciliation %s: %v", clusterLogTag(cluster), err))
+				}
 
-			// Reconcile node annotations to keep them in sync with cluster/machine spec
-			if err := t.reconcileNodeAnnotations(ctx, cluster); err != nil {
-				vlog.Warn(fmt.Sprintf("Error during node annotation reconciliation %s: %v", clusterLogTag(cluster), err))
+				// Reconcile node annotations to keep them in sync with cluster/machine spec
+				if err := t.reconcileNodeAnnotations(ctx, cluster, nodes); err != nil {
+					vlog.Warn(fmt.Sprintf("Error during node annotation reconciliation %s: %v", clusterLogTag(cluster), err))
+				}
 			}
 
 			// Talos-version enforcement and extension reconciliation are
@@ -104,7 +117,9 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 			// nodes_health_ready flag (and therefore the cluster Phase) tracks
 			// reality. Flips Ready->ConfigApplied if a node goes NotReady, and
 			// catches up legacy clusters that pre-date the flag.
-			t.refreshNodesHealthFlag(ctx, cluster)
+			if nodes != nil {
+				t.refreshNodesHealthFlag(ctx, cluster, nodes.items)
+			}
 
 			return nil
 		}

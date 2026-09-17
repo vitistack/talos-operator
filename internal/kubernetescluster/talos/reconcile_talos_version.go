@@ -72,6 +72,9 @@ func versionEnforceCooldown() time.Duration {
 // Skip rules:
 //   - feature flag TALOS_VERSION_ENFORCE_ENABLED=false disables the pass entirely (default);
 //   - talos-target annotation unset → no intent for this cluster, no action;
+//     in both cases a TalosVersionEnforcement condition left by an earlier
+//     pass is set to False with the reason, so it stops reporting a stale
+//     comparison;
 //   - upgrade_in_progress=true → the rolling-upgrade flow owns the cluster;
 //   - any node runs a version newer than desired → never downgrade. We
 //     warn and surface a TalosVersionEnforcement=True/Downgrade condition
@@ -85,10 +88,6 @@ func versionEnforceCooldown() time.Duration {
 //
 //nolint:gocognit,gocyclo,funlen // single linear flow with explicit branches
 func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	if !viper.GetBool(consts.TALOS_VERSION_ENFORCE_ENABLED) {
-		return nil
-	}
-
 	clusterTag := clusterLogTag(cluster)
 
 	// Desired version is the per-cluster intent expressed via the
@@ -98,8 +97,9 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 	// default. We never downgrade — a target below a node's running
 	// version is rejected by the GreaterThan guard below.
 	desired := strings.TrimSpace(cluster.GetAnnotations()[consts.TalosTargetAnnotation])
-	if desired == "" {
-		return nil // no intent for this cluster
+	if reason, message, skip := versionEnforcementSkip(viper.GetBool(consts.TALOS_VERSION_ENFORCE_ENABLED), desired); skip {
+		t.retireEnforcementCondition(ctx, cluster, reason, message)
+		return nil
 	}
 	desired = consts.NormalizeTalosVersion(desired) // "v1.12.7"
 
@@ -151,7 +151,7 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 		if actualSemver.GreaterThan(desiredSemver) {
 			msg := fmt.Sprintf("Node %s runs Talos %s which is newer than desired %s — refusing to downgrade", m.Name, actual, desired)
 			vlog.Warn(msg)
-			_ = t.statusManager.SetCondition(ctx, cluster, "TalosVersionEnforcement", "True", "Downgrade", msg)
+			_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "True", "Downgrade", msg)
 			return nil
 		}
 	}
@@ -162,7 +162,7 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 		// Everyone matches — clear any previous enforcement condition AND
 		// drop any stale per-node throttle records so the next mismatch
 		// starts with a clean slate.
-		_ = t.statusManager.SetCondition(ctx, cluster, "TalosVersionEnforcement", "False", "InSync",
+		_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "False", "InSync",
 			fmt.Sprintf("All nodes run Talos %s", desired))
 		if cerr := t.stateService.ClearVersionEnforcementStates(ctx, cluster); cerr != nil {
 			vlog.Debug(fmt.Sprintf("failed to clear version-enforcement records on in-sync for %s: %v", clusterTag, cerr))
@@ -177,7 +177,7 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 	if installerImage == "" {
 		msg := fmt.Sprintf("Cannot resolve Talos installer image to enforce version on %s: no install_image pinned, no control plane reachable to live-fetch, and TALOS_VM_INSTALL_IMAGE_* unset", clusterTag)
 		vlog.Warn(msg)
-		_ = t.statusManager.SetCondition(ctx, cluster, "TalosVersionEnforcement", "True", "ImageUnresolvable", msg)
+		_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "True", "ImageUnresolvable", msg)
 		return nil
 	}
 
@@ -198,7 +198,7 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 		msg := fmt.Sprintf("Waiting for Talos upgrade to settle on %s/%s: running=%s target=%s initiated=%s ago (cooldown %s remaining)",
 			clusterTag, target.Name, actualByMachine[target.Name], desired, elapsed, remaining)
 		vlog.Info(msg)
-		_ = t.statusManager.SetCondition(ctx, cluster, "TalosVersionEnforcement", "True", "WaitingForReboot", msg)
+		_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "True", "WaitingForReboot", msg)
 		return nil
 	}
 
@@ -216,7 +216,7 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 					msg := fmt.Sprintf("Talos version enforcement deferred on %s/%s: extension reconciler triggered Talos upgrade %s ago with image=%s (cooldown %s)",
 						clusterTag, target.Name, since.Round(time.Second), exRec.Image, exCooldown)
 					vlog.Info(msg)
-					_ = t.statusManager.SetCondition(ctx, cluster, "TalosVersionEnforcement", "True", "WaitingForExtensionUpgrade", msg)
+					_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "True", "WaitingForExtensionUpgrade", msg)
 					return nil
 				}
 			}
@@ -239,7 +239,7 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 	if uerr := t.clientService.UpgradeNode(ctx, tClient, targetIP, installerImage); uerr != nil {
 		msg := fmt.Sprintf("Failed to trigger enforcement upgrade on %s/%s: %v", clusterTag, target.Name, uerr)
 		vlog.Error(msg, uerr)
-		_ = t.statusManager.SetCondition(ctx, cluster, "TalosVersionEnforcement", "True", "UpgradeFailed", msg)
+		_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "True", "UpgradeFailed", msg)
 		return nil
 	}
 
@@ -250,10 +250,38 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 		vlog.Warn(fmt.Sprintf("Failed to persist version-enforcement record for %s/%s: %v — will re-trigger next pass", clusterTag, target.Name, serr))
 	}
 
-	_ = t.statusManager.SetCondition(ctx, cluster, "TalosVersionEnforcement", "True", "Reconciling",
+	_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "True", "Reconciling",
 		fmt.Sprintf("Upgrading node %s from %s to %s", target.Name, actualByMachine[target.Name], desired))
 
 	return nil
+}
+
+// enforcementConditionType is the cluster condition reconcileTalosVersion reports on.
+const enforcementConditionType = "TalosVersionEnforcement"
+
+// versionEnforcementSkip reports whether reconcileTalosVersion has nothing to
+// enforce for a cluster, with a condition reason and message saying why.
+func versionEnforcementSkip(enabled bool, target string) (reason, message string, skip bool) {
+	if !enabled {
+		return "Disabled", "Talos version enforcement is disabled (" + consts.TALOS_VERSION_ENFORCE_ENABLED + "=false)", true
+	}
+	if strings.TrimSpace(target) == "" {
+		return "NoTarget", "Talos version is not enforced: no " + consts.TalosTargetAnnotation + " annotation", true
+	}
+	return "", "", false
+}
+
+// retireEnforcementCondition replaces a TalosVersionEnforcement condition
+// left by an earlier pass once enforcement no longer runs, so it stops
+// reporting a comparison that no longer applies. Clusters that never had the
+// condition are left alone.
+func (t *TalosManager) retireEnforcementCondition(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, reason, message string) {
+	for i := range cluster.Status.Conditions {
+		if cluster.Status.Conditions[i].Type == enforcementConditionType {
+			_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "False", reason, message)
+			return
+		}
+	}
 }
 
 // refreshTalosCurrentVersion keeps the upgrade.vitistack.io/talos-current
