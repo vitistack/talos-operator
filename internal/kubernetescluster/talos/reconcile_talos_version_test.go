@@ -1,10 +1,19 @@
 package talos
 
 import (
+	"context"
 	"testing"
 
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
+	"github.com/vitistack/talos-operator/internal/services/secretservice"
+	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
@@ -157,4 +166,149 @@ func TestSwapImageTagForEnforcement(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVersionEnforcementSkip(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		enabled    bool
+		target     string
+		wantSkip   bool
+		wantReason string
+	}{
+		{name: "feature flag off", enabled: false, target: "1.13.10", wantSkip: true, wantReason: "Disabled"},
+		{name: "enabled without a target", enabled: true, target: "", wantSkip: true, wantReason: "NoTarget"},
+		{name: "enabled with a blank target", enabled: true, target: "  ", wantSkip: true, wantReason: "NoTarget"},
+		{name: "enabled with a target", enabled: true, target: "1.13.10", wantSkip: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, message, skip := versionEnforcementSkip(tt.enabled, tt.target)
+			if skip != tt.wantSkip || reason != tt.wantReason {
+				t.Errorf("versionEnforcementSkip(%v, %q) = (%q, %q, %v), want reason %q skip %v",
+					tt.enabled, tt.target, reason, message, skip, tt.wantReason, tt.wantSkip)
+			}
+			if skip && message == "" {
+				t.Error("a skip must explain itself in the condition message")
+			}
+		})
+	}
+}
+
+// Conditions written before enforcement became opt-in (2026-05-22) still
+// claimed "desired v1.12.7" four months later, because a pass that does not
+// enforce returned before touching the condition.
+func TestRetireEnforcementCondition(t *testing.T) {
+	t.Parallel()
+
+	const (
+		disabledMsg = "Talos version enforcement is disabled"
+		stale       = "2026-05-22T10:37:57.649560523Z"
+	)
+	bootstrapped := vitistackv1alpha1.KubernetesClusterCondition{
+		Type: "Bootstrapped", Status: "True", Reason: "Done", Message: "Talos cluster bootstrapped", LastTransitionTime: stale,
+	}
+
+	tests := []struct {
+		name  string
+		conds []vitistackv1alpha1.KubernetesClusterCondition
+		want  []vitistackv1alpha1.KubernetesClusterCondition // compared without LastTransitionTime
+	}{
+		{
+			name: "stale downgrade refusal",
+			conds: []vitistackv1alpha1.KubernetesClusterCondition{bootstrapped, {
+				Type: "TalosVersionEnforcement", Status: "True", Reason: "Downgrade", LastTransitionTime: stale,
+				Message: "Node d-wh-osl-001-k732-wrk0 runs Talos v1.13.2 which is newer than desired v1.12.7 — refusing to downgrade",
+			}},
+			want: []vitistackv1alpha1.KubernetesClusterCondition{
+				{Type: "Bootstrapped", Status: "True", Reason: "Done", Message: "Talos cluster bootstrapped"},
+				{Type: "TalosVersionEnforcement", Status: "False", Reason: "Disabled", Message: disabledMsg},
+			},
+		},
+		{
+			name: "stale in-sync claim",
+			conds: []vitistackv1alpha1.KubernetesClusterCondition{{
+				Type: "TalosVersionEnforcement", Status: "False", Reason: "InSync", LastTransitionTime: stale,
+				Message: "All nodes run Talos v1.12.7",
+			}},
+			want: []vitistackv1alpha1.KubernetesClusterCondition{
+				{Type: "TalosVersionEnforcement", Status: "False", Reason: "Disabled", Message: disabledMsg},
+			},
+		},
+		{
+			name:  "cluster that never had the condition gets none",
+			conds: []vitistackv1alpha1.KubernetesClusterCondition{bootstrapped},
+			want: []vitistackv1alpha1.KubernetesClusterCondition{
+				{Type: "Bootstrapped", Status: "True", Reason: "Done", Message: "Talos cluster bootstrapped"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cluster := &vitistackv1alpha1.KubernetesCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "d-wh-osl-001", Namespace: "team-meldingsflyt"},
+				Status:     vitistackv1alpha1.KubernetesClusterStatus{Phase: "Ready", Conditions: tt.conds},
+			}
+			tm, c := newStatusTestTalosManager(t, cluster)
+			held := &vitistackv1alpha1.KubernetesCluster{}
+			key := types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}
+			if err := c.Get(context.Background(), key, held); err != nil {
+				t.Fatal(err)
+			}
+
+			tm.retireEnforcementCondition(context.Background(), held, "Disabled", disabledMsg)
+
+			got := &vitistackv1alpha1.KubernetesCluster{}
+			if err := c.Get(context.Background(), key, got); err != nil {
+				t.Fatal(err)
+			}
+			assertConditions(t, got.Status.Conditions, tt.want)
+		})
+	}
+}
+
+// assertConditions compares conditions by type, status, reason and message.
+func assertConditions(t *testing.T, got, want []vitistackv1alpha1.KubernetesClusterCondition) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("conditions = %+v, want %+v", got, want)
+	}
+	byType := make(map[string]vitistackv1alpha1.KubernetesClusterCondition, len(got))
+	for _, g := range got {
+		byType[g.Type] = g
+	}
+	for _, w := range want {
+		g, ok := byType[w.Type]
+		if !ok {
+			t.Errorf("condition %s missing from %+v", w.Type, got)
+			continue
+		}
+		if g.Status != w.Status || g.Reason != w.Reason || g.Message != w.Message {
+			t.Errorf("%s = %s/%s/%q, want %s/%s/%q", w.Type, g.Status, g.Reason, g.Message, w.Status, w.Reason, w.Message)
+		}
+	}
+}
+
+func newStatusTestTalosManager(t *testing.T, objs ...client.Object) (*TalosManager, client.Client) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := vitistackv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objs...).
+		WithStatusSubresource(&vitistackv1alpha1.KubernetesCluster{}).
+		Build()
+	secretSvc := secretservice.NewSecretService(c)
+	return NewTalosManager(c, status.NewManager(c, secretSvc, talosstateservice.NewTalosStateService(secretSvc))), c
 }
