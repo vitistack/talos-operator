@@ -104,6 +104,9 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 				// manual upgrades bypass the orchestrated flow that normally
 				// maintains it.
 				t.refreshTalosCurrentVersion(ctx, cluster)
+				// Before either reinstall pass, so both resolve the
+				// pinned image with the required extensions.
+				t.refreshInstallImageSchematic(ctx, cluster)
 				if err := t.reconcileTalosVersion(ctx, cluster); err != nil {
 					vlog.Warn(fmt.Sprintf("Error during Talos version enforcement %s: %v", clusterLogTag(cluster), err))
 				}

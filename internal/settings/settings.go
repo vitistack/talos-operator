@@ -30,7 +30,8 @@ func Init() {
 	// TALOS_REQUIRED_EXTENSIONS lists Talos system extensions every node must
 	// have installed. Must stay in sync with the schematic baked into the
 	// TALOS_VM_INSTALL_IMAGE_* default above (factory schematic
-	// b0f2a8b5…d49365). Override to "" to disable the check.
+	// 060a9454…33ba8e). Override to "" to disable the check. It also decides
+	// when a cluster's pinned install_image moves to that schematic.
 	viper.SetDefault(consts.TALOS_REQUIRED_EXTENSIONS, "siderolabs/iscsi-tools,siderolabs/qemu-guest-agent,siderolabs/trident-iscsi-tools,siderolabs/util-linux-tools,siderolabs/nfs-utils")
 	// Extension reconciliation reinstalls nodes from TALOS_VM_INSTALL_IMAGE_*,
 	// which also moves them to that image's Talos version — so it can upgrade

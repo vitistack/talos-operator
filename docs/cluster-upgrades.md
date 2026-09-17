@@ -128,7 +128,7 @@ The upgrade state is stored in the cluster's Kubernetes secret in the supervisor
 | -------------------- | --------- | --------------------------------------------- |
 | Talos kernel         | ✅ Yes    | New Linux kernel version                      |
 | Talos userspace      | ✅ Yes    | containerd, kubelet binaries, system services |
-| System extensions    | ✅ Yes    | If included in the installer image            |
+| System extensions    | ✅ Yes    | If included in the installer image (see below) |
 | Machine config       | ❌ No     | Preserved in STATE partition                  |
 | etcd data            | ❌ No     | Preserved in STATE partition                  |
 | Certificates         | ❌ No     | Preserved in STATE partition                  |
@@ -136,11 +136,62 @@ The upgrade state is stored in the cluster's Kubernetes secret in the supervisor
 
 ### Pre-flight Checks
 
-Before upgrading each node, the operator verifies:
+When an upgrade starts, the operator:
 
-1. **etcd health** - Cluster must have quorum before proceeding
-2. **Talos API reachable** - Node must be responding to API calls
-3. **Version validation** - Target version must be newer than current
+1. **Validates the target** - A Talos target must be newer than the running
+   version; a Kubernetes target may equal it (a re-apply that pulls lagging
+   nodes up). Neither may skip more than one minor version.
+   - A Talos target equal to the running version closes the request as
+     `completed` without touching any node. That is what a finished upgrade
+     whose target annotation could not be cleared looks like. The exception
+     is a failed upgrade plan still stored for that same target: it is left
+     untouched for `resume` or for the reset annotation, because
+     `talos-current` is the lowest version among the nodes that *answer* and
+     a failed, unreachable node may still be behind.
+   - Any other rejected target (a downgrade, an unparseable version, too big
+     a version jump) is reported once in `*-status`/`*-message` and the
+     `*-target` annotation is removed, so it is not re-evaluated every pass.
+   - A target set before the operator has read the running version is kept
+     and acted on once that version is known.
+2. **Records cluster health** - etcd health on the first control plane and
+   Talos API reachability on every node are written to the cluster secret
+   (`health_check_passed`, `health_check_at`, `health_etcd_healthy`,
+   `health_nodes_ready`, `health_controlplane_ready`,
+   `health_check_message`). The check is informational: a failure is logged
+   and recorded but does not stop the upgrade.
+
+### Installer Image and System Extensions
+
+System extensions are baked into the installer image's factory schematic, so a
+node only gets the extensions its installer carries. Each cluster pins its
+installer in the secret's `install_image`; upgrades keep the pinned schematic
+and change only the version tag.
+
+When the operator's configured image (`TALOS_VM_INSTALL_IMAGE_*`) moves to a
+schematic with more extensions (the schematic shipped with v1.13.10 added
+`siderolabs/nfs-utils`), clusters pinned earlier would keep the old set
+forever. The operator therefore moves the pin to the configured schematic when
+a node reports a `TALOS_REQUIRED_EXTENSIONS` entry missing. It checks this on
+the steady-state drift pass (about every 90s, for virtual-machine clusters with
+no upgrade running) and again when an upgrade starts.
+
+Only the schematic ID changes. The pinned registry, installer platform
+(`nocloud-installer`, `metal-installer`, …) and version tag are kept, and the
+pin is left alone when:
+
+- a node reports an extension outside `TALOS_REQUIRED_EXTENSIONS`, since the
+  schematic was then built for this cluster and replacing it would drop that
+  extension;
+- every probed node already has the required extensions;
+- no node answers, the pin has no version tag, or the two images are not on
+  the same registry.
+
+Once a decision is made it is remembered until the pin, the configured image or
+the required list changes, so a cluster is not re-probed on every pass.
+
+Moving the pin changes no node. Nodes added afterwards install the full set,
+and existing nodes get it at their next Talos upgrade (or through the opt-in
+extension enforcement pass, `TALOS_EXTENSION_ENFORCE_ENABLED`).
 
 ### Rollback
 
@@ -462,7 +513,9 @@ The cluster phase will be `UpgradeFailed`.
 
 2. Investigate the specific node that failed
 
-3. To retry the upgrade, first clear the failed status by removing the target annotation, then set it again:
+3. While the target annotation is still set, the operator restarts the upgrade
+   from the first node about every 30 seconds. Remove the target to stop that;
+   set it again to retry:
 
    ```bash
    # Remove the target annotation
@@ -511,19 +564,34 @@ On the next reconcile the operator will, in a single pass:
    image).
 3. Remove the user-facing Talos upgrade-status annotations:
    `talos-status`, `talos-message`, `talos-progress`, `talos-target`,
-   `failed-nodes`.
-4. Reset `status.phase` to `Ready`.
+   `failed-nodes`, and the control flags `resume`, `skip-failed-nodes` and
+   `retry-failed-nodes` (left behind, they would act on the next upgrade).
+4. Reset `status.phase` to `Ready` and set the `TalosUpgrade` condition to
+   `False`/`Reset`.
 5. Remove the `talos-reset-upgrade-state` annotation itself (one-shot — if
    any earlier step errors transiently, the trigger annotation is left in
    place so the next reconcile retries the reset).
 
-The next reconcile then runs the regular Talos version-enforcement pass
-against ground truth (current Talos version on each node, queried via the
-Talos API) and re-derives the correct installer image from the cluster's
-pinned schematic. If a node still does not match `TALOS_VERSION`, an
-upgrade is initiated using that resolved image — never the generic
-installer.
+The reset removes `talos-target`, so nothing is being enforced afterwards: the
+next reconcile re-derives `talos-current` from the running nodes (queried via
+the Talos API) and waits for a new target. Setting one starts a fresh upgrade
+with the installer image resolved from the cluster's pinned schematic — never
+the generic installer. (The version-enforcement pass also reads
+`talos-target`, and is opt-in via `TALOS_VERSION_ENFORCE_ENABLED`.)
 
+Annotation writes are merge patches of metadata only, so the reset also works
+on clusters created before `spec.data.networkNamespaceName` became required.
+
+An upgrade condition that no longer describes the cluster is retired on the
+next pass: `InProgress` with nothing running becomes `False`/`Interrupted`
+(keeping its last message), and a `Failed` condition whose failure the operator
+itself no longer reports (status has moved on, no target requested) becomes
+`False`/`Cleared`. A failure the operator still stands behind is kept.
+
+A `resume` annotation with no persisted upgrade to resume is dropped with a
+warning. `resume`, `skip-failed-nodes` and `retry-failed-nodes` only take
+effect when the target is not being acted on — a target the operator can still
+act on restarts the upgrade instead. 
 What this annotation does **not** do:
 
 - It does **not** delete or modify any Kubernetes upgrade annotations or

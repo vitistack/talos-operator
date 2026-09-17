@@ -304,6 +304,24 @@ func (t *TalosManager) refreshTalosCurrentVersion(ctx context.Context, cluster *
 	}
 }
 
+// refreshInstallImageSchematic moves the cluster's pinned install image onto
+// the operator's configured schematic when its nodes lack a required system
+// extension, so nodes added later and the next upgrade install the full set.
+// Independent of the enforcement flags: it changes only the pin, never a node.
+// Best-effort and runs on the throttled drift-recovery cadence.
+func (t *TalosManager) refreshInstallImageSchematic(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) {
+	if t.upgradeService == nil {
+		return
+	}
+	clientConfig, err := t.GetTalosClientConfig(ctx, cluster)
+	if err != nil {
+		return
+	}
+	if _, err := t.upgradeService.ReconcileInstallImageSchematic(ctx, cluster, clientConfig); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to refresh install image schematic for %s: %v", clusterLogTag(cluster), err))
+	}
+}
+
 // runningTalosVersion returns the lowest Talos version observed across the
 // cluster's reachable nodes (normalized, e.g. "v1.13.9"), or "" if none are
 // reachable. The minimum is used so talos-current only advances once every
