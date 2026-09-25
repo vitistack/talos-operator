@@ -420,10 +420,15 @@ func (s *EndpointService) EnsureControlPlaneVIPs(ctx context.Context, networkNam
 				},
 			},
 			Spec: vitistackv1alpha1.ControlPlaneVirtualSharedIPSpec{
-				DatacenterIdentifier:       networkNamespace.Spec.DatacenterIdentifier,
-				ClusterIdentifier:          cluster.Spec.Cluster.ClusterId,
-				SupervisorIdentifier:       networkNamespace.Spec.SupervisorIdentifier,
-				Provider:                   cluster.Spec.Cluster.Provider.String(),
+				// datacenterIdentifier and supervisorIdentifier were removed from the
+				// NetworkNamespace; they are now optional on ControlPlaneVirtualSharedIP
+				// and no longer set here.
+				ClusterIdentifier: cluster.Spec.Cluster.ClusterId,
+				// Provider selects which operator reconciles this CPVSharedIP — NOT the
+				// cluster provider ("talos"). Configured via LOADBALANCER_PROVIDER:
+				// "static-ip-operator" -> static-ip-operator; anything else (default "nam")
+				// -> nms-operator.
+				Provider:                   viper.GetString(consts.LOADBALANCER_PROVIDER),
 				Method:                     "first-alive",
 				PoolMembers:                controlPlaneIPs,
 				Environment:                cluster.Spec.Cluster.Environment,

@@ -1,0 +1,20 @@
+apiVersion: vitistack.io/v1alpha2
+kind: NetworkNamespace
+metadata:
+  name: test-dhcp-networknamespace
+  labels:
+    app: vitistack
+    network-type: dhcp
+spec:
+  datacenterIdentifier: dc1
+  supervisorIdentifier: svr1
+  networkProvisioning:
+    provider: nam
+    nam: {}
+  ipAllocation:
+    type: dhcp
+    provider: kea
+    dhcp:
+      requireClientClasses:
+        - "viti-machines"
+        - "ipv4-clients"
