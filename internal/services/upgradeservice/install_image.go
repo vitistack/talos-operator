@@ -2,6 +2,7 @@ package upgradeservice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -52,15 +53,19 @@ func (s *UpgradeService) ReconcileInstallImageSchematic(
 // keeps its repository — the schematic — and changes the tag. So when the
 // operator's configured schematic gains an extension (v1.13.10 added
 // nfs-utils), every cluster pinned earlier keeps the old set: its upgrades and
-// its new nodes install without the extension. When a reachable node lacks a
-// required extension, the pin moves to the configured image's schematic and
-// keeps its own version tag; the nodes themselves change on their next upgrade.
+// its new nodes install without the extension. When the pinned schematic, as
+// the image factory describes it, lacks a required extension, the pin moves to
+// the configured image's schematic and keeps its own version tag; the nodes
+// themselves change on their next upgrade. The nodes are no evidence for the
+// pin: they may already carry the extension while the pin does not.
 //
 // The pin is left alone when no extensions are required, when it already uses
-// the configured schematic, when every probed node has the required
-// extensions (a deliberately different schematic keeps its extras), when no
-// node answers, and for clusters without virtual-machine providers, whose
-// installers are not the configured VM images.
+// the configured schematic, when its schematic has every required extension,
+// when it carries extensions or customization beyond the required list (a
+// schematic built for this cluster), and for clusters without virtual-machine
+// providers, whose installers are not the configured VM images. When the
+// factory cannot describe the schematic, the nodes decide as a fallback: the
+// pin moves only when a reachable node lacks a required extension.
 func (s *UpgradeService) alignInstallImageSchematic(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
@@ -90,22 +95,69 @@ func (s *UpgradeService) alignInstallImageSchematic(
 		return pinned, nil
 	}
 
+	// The pin's own schematic decides: the nodes can already carry the
+	// required extensions (installed by hand, or by the extension pass) while
+	// the pin still lacks them, and the next upgrade would strip them again.
+	schematic, err := s.schematicLookup(ctx, pinned)
+	switch {
+	case err == nil:
+		// A schematic's content never changes, so the decision holds until
+		// the pin, the configured image or the required list does.
+		s.rememberSchematicDecision(cluster, pinned, configured, required)
+		return s.movePinBySchematic(ctx, cluster, pinned, configured, schematic, required)
+	case errors.Is(err, errSchematicNotFound):
+		vlog.Debug(fmt.Sprintf("Image factory does not know pinned install image %s: %s; checking the nodes", clusterlog.Tag(cluster), pinned))
+	default:
+		vlog.Warn(fmt.Sprintf("Could not read pinned install image schematic %s from the image factory, checking the nodes instead: %v", clusterlog.Tag(cluster), err))
+	}
+
 	probed := s.installedExtensions(ctx, clientConfig, machines)
 	if len(probed) == 0 {
 		// No node answered, so there is nothing to conclude. Try again next pass.
 		return pinned, nil
 	}
 
-	// Whatever is decided below holds until the pin, the configured image or
-	// the required list changes; remember it so the nodes are not probed again
-	// on every drift pass.
-	s.rememberSchematicDecision(cluster, pinned, configured, required)
+	// The factory will not learn an unknown schematic, so what the nodes show
+	// holds until something changes; remember it so they are not probed on
+	// every drift pass. A factory that failed is asked again next pass.
+	if errors.Is(err, errSchematicNotFound) {
+		s.rememberSchematicDecision(cluster, pinned, configured, required)
+	}
 	return s.movePinToConfiguredSchematic(ctx, cluster, pinned, configured, probed, required)
+}
+
+// movePinBySchematic writes the configured schematic into the cluster's pin
+// when the pinned schematic lacks a required extension and carries nothing
+// the configured one would drop, and returns the pin as it stands afterwards.
+func (s *UpgradeService) movePinBySchematic(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	pinned, configured string,
+	schematic factorySchematic,
+	required []string,
+) (string, error) {
+	extras := unexpectedExtensions(schematic.Extensions, required)
+	switch {
+	case schematic.Customized:
+		vlog.Info(fmt.Sprintf("Keeping pinned install image %s: schematic %s carries customization beyond system extensions",
+			clusterlog.Tag(cluster), pinned))
+		return pinned, nil
+	case len(extras) > 0:
+		vlog.Info(fmt.Sprintf("Keeping pinned install image %s: schematic %s carries %v beyond %s",
+			clusterlog.Tag(cluster), pinned, extras, consts.TALOS_REQUIRED_EXTENSIONS))
+		return pinned, nil
+	}
+	missing := talosextensions.Missing(required, schematic.Extensions)
+	if len(missing) == 0 {
+		return pinned, nil
+	}
+	return s.writeConfiguredSchematic(ctx, cluster, pinned, configured, fmt.Sprintf("missing=%v (pinned schematic)", missing))
 }
 
 // movePinToConfiguredSchematic writes the configured schematic into the
 // cluster's pin when the probed nodes show it is needed and nothing would be
-// lost, and returns the pin as it stands afterwards.
+// lost, and returns the pin as it stands afterwards. It is the fallback when
+// the image factory cannot describe the pinned schematic.
 func (s *UpgradeService) movePinToConfiguredSchematic(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
@@ -135,7 +187,17 @@ func (s *UpgradeService) movePinToConfiguredSchematic(
 	case len(lacking) == 0:
 		return pinned, nil
 	}
+	return s.writeConfiguredSchematic(ctx, cluster, pinned, configured, fmt.Sprintf("missing=%v nodes=%v", missing, lacking))
+}
 
+// writeConfiguredSchematic pins configured's schematic with pinned's registry,
+// platform and version tag, and returns the pin as it stands afterwards.
+// reason is logged with the move.
+func (s *UpgradeService) writeConfiguredSchematic(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	pinned, configured, reason string,
+) (string, error) {
 	tag := imageTag(pinned)
 	if tag == "" {
 		vlog.Warn(fmt.Sprintf("Cannot move pinned install image %s: %s has no version tag to keep", clusterlog.Tag(cluster), pinned))
@@ -150,8 +212,8 @@ func (s *UpgradeService) movePinToConfiguredSchematic(
 	if err := s.stateService.SetInstallImage(ctx, cluster, updated); err != nil {
 		return pinned, fmt.Errorf("failed to pin install image %s: %w", updated, err)
 	}
-	vlog.Info(fmt.Sprintf("Pinned install image moved to the configured schematic: %s from=%s to=%s missing=%v nodes=%v",
-		clusterlog.Tag(cluster), pinned, updated, missing, lacking))
+	vlog.Info(fmt.Sprintf("Pinned install image moved to the configured schematic: %s from=%s to=%s %s",
+		clusterlog.Tag(cluster), pinned, updated, reason))
 	return updated, nil
 }
 

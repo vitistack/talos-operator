@@ -66,6 +66,9 @@ type fixture struct {
 	service    *UpgradeService
 	controller *UpgradeController
 	failPatch  error
+	// factory answers the service's schematic lookups; it knows the two
+	// schematics the fleet is pinned to.
+	factory *factoryStub
 }
 
 func newFixture(t *testing.T, objs ...client.Object) *fixture {
@@ -116,6 +119,8 @@ func newFixture(t *testing.T, objs ...client.Object) *fixture {
 	statusMgr := status.NewManager(f.client, secretSvc, stateSvc)
 	clientSvc := talosclientservice.NewTalosClientService()
 	f.service = NewUpgradeService(f.client, statusMgr, clientSvc, machineservice.NewMachineService(f.client), stateSvc, talosconfigservice.NewTalosConfigService())
+	f.factory = newFactoryStub()
+	f.service.schematicLookup = f.factory.lookup
 	f.controller = NewUpgradeController(f.client, secretSvc, statusMgr, clientSvc, f.service)
 	return f
 }

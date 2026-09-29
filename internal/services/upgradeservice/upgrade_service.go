@@ -47,15 +47,19 @@ type UpgradeService struct {
 	stateService   *talosstateservice.TalosStateService
 	configService  *talosconfigservice.TalosConfigService
 
-	// installedExtensions and healthCheck talk to the nodes' Talos API;
-	// replaceable so tests need none.
+	// installedExtensions and healthCheck talk to the nodes' Talos API and
+	// schematicLookup to the image factory; replaceable so tests need none.
 	installedExtensions extensionProbe
 	healthCheck         nodeHealthCheck
+	schematicLookup     schematicLookup
 
 	// schematicChecked remembers, per cluster, the pin/configured image/required
 	// extensions the nodes were last probed for, so an unchanged pin is not
 	// re-probed on every drift pass.
 	schematicChecked sync.Map
+
+	// schematics caches the image factory's answers per registry/schematic ID.
+	schematics sync.Map
 }
 
 // NewUpgradeService creates a new UpgradeService instance
@@ -77,6 +81,7 @@ func NewUpgradeService(
 	}
 	s.installedExtensions = s.probeInstalledExtensions
 	s.healthCheck = s.checkNodeHealth
+	s.schematicLookup = s.lookupFactorySchematic
 	return s
 }
 
