@@ -29,6 +29,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/services/upgradeservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	yaml "gopkg.in/yaml.v3"
+	"k8s.io/client-go/kubernetes"
 )
 
 const controlPlaneRole = "control-plane"
@@ -49,6 +50,9 @@ type TalosManager struct {
 	// be supplied at NewTalosManager time. Used by the drift-recovery pass to
 	// keep the talos-current annotation aligned with the running version.
 	upgradeService *upgradeservice.UpgradeService
+	// workloadClient returns a client for the workload cluster, or nil when no
+	// kubeconfig exists yet. Nil means getWorkloadClusterClient; set in tests.
+	workloadClient func(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (kubernetes.Interface, error)
 }
 
 // SetUpgradeService injects the UpgradeService used to refresh Talos version

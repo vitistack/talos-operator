@@ -117,6 +117,15 @@ talos:
   # recovery; once it elapses with the node still on the wrong version the
   # operator re-triggers (likely the previous upgrade failed). Min: 1.
   versionEnforceCooldownMinutes: 5
+  # Minutes a node drain (before a Talos upgrade, or before a node is removed
+  # on scale-down) may wait on PodDisruptionBudgets before it is reported as
+  # blocked. Drains go through the Eviction API and never delete PDB-protected
+  # pods. Drains do not block reconciles: each pass evicts what it can and
+  # requeues with backoff. Past this timeout the KubernetesCluster gets a
+  # NodeDrain=False/Blocked condition naming the blocking pods and PDBs, and
+  # each blocked pod gets a Warning event in its own namespace; the upgrade or
+  # removal stays on hold and the drain keeps retrying. Min: 1.
+  drainTimeoutMinutes: 10
 
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:

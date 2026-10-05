@@ -11,6 +11,7 @@ import (
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
+	"github.com/vitistack/talos-operator/internal/services/drainservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 )
 
@@ -620,6 +621,18 @@ func (o *UpgradeOrchestrator) executeNodeUpgrade(
 	vlog.Info(fmt.Sprintf("Upgrading Talos on node: cluster=%s node=%s ip=%s role=%s (%d/%d)",
 		cluster.Name, node.Name, node.IP, node.Role, nodeIndex+1, state.totalNodes))
 
+	// Cordon and drain the node before upgrade. The upgrade reboots the node, so
+	// it must not start while pods are still protected by a PodDisruptionBudget.
+	// The drain is non-blocking and runs before the node is claimed as the
+	// current upgrading node, so a drain still in progress leaves no upgrade
+	// bookkeeping behind; the next reconcile picks the same node again.
+	if o.nodeDrainer != nil {
+		if err := o.nodeDrainer.CordonAndDrainNode(ctx, cluster, node.Name); err != nil {
+			vlog.Info(fmt.Sprintf("Waiting for drain before upgrading node %s: %v", node.Name, err))
+			return o.requeueResult(state, drainservice.RetryAfter(err))
+		}
+	}
+
 	// Set this node as the current upgrading node BEFORE starting the upgrade
 	// This ensures only this node will be processed on subsequent reconciliations
 	if o.upgradeService.stateService != nil {
@@ -631,15 +644,6 @@ func (o *UpgradeOrchestrator) executeNodeUpgrade(
 	// Update progress annotation
 	if err := o.upgradeService.UpdateTalosUpgradeProgress(ctx, cluster, node.Name, state.nodesUpgraded, state.totalNodes); err != nil {
 		vlog.Warn(fmt.Sprintf("Failed to update progress: %v", err))
-	}
-
-	// Cordon and drain the node before upgrade
-	if o.nodeDrainer != nil {
-		vlog.Info(fmt.Sprintf("Cordoning and draining node %s before upgrade", node.Name))
-		if err := o.nodeDrainer.CordonAndDrainNode(ctx, cluster, node.Name); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to cordon/drain node %s: %v (continuing with upgrade)", node.Name, err))
-			// Don't fail the upgrade if drain fails - the node will reboot anyway
-		}
 	}
 
 	// Perform the actual upgrade
