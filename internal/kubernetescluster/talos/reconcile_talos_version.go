@@ -3,6 +3,7 @@ package talos
 import (
 	"context"
 	"fmt"
+	"github.com/vitistack/talos-operator/internal/helpers/imageref"
 	"strings"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 
+	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
+	"github.com/vitistack/talos-operator/internal/services/talosversion"
 	"github.com/vitistack/talos-operator/pkg/consts"
 )
 
@@ -28,7 +31,7 @@ const defaultVersionEnforceCooldown = 5 * time.Minute
 // deadline the call inherits the reconcile context (which has none) and
 // blocks, stalling the whole reconcile. 8s sits comfortably above a healthy
 // handshake + round trip while still failing fast on a stuck node.
-const talosNodeProbeTimeout = 8 * time.Second
+const talosNodeProbeTimeout = talosclientservice.VersionProbeTimeout
 
 // driftRecoveryInterval throttles the Talos-version and extension drift
 // recovery passes. They reconcile a node's running state back toward intent
@@ -136,7 +139,7 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 	// Probe every reachable node and compare to desired. Nodes that are
 	// unreachable surface as an error in actualByMachine and are skipped
 	// (we can't trigger an upgrade on a node we can't reach anyway).
-	actualByMachine := t.probeTalosVersions(ctx, cluster, machines, clientConfig)
+	actualByMachine := t.probeTalosVersions(ctx, machines, clientConfig)
 
 	// Detect any node above desired → never downgrade, surface a condition.
 	for _, m := range machines {
@@ -156,8 +159,17 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 		}
 	}
 
+	// Walk towards desired one supported step at a time: latest patch of the
+	// running minor, then of each minor in between, then desired.
+	step, reason, msg := enforcementStep(machines, actualByMachine, desired, cluster.GetAnnotations()[consts.KubernetesCurrentAnnotation])
+	if reason != "" {
+		vlog.Warn(fmt.Sprintf("%s %s", msg, clusterTag))
+		_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "True", reason, msg)
+		return nil
+	}
+
 	// Pick a single enforcement target: control plane first, then workers.
-	target := selectEnforcementTarget(machines, actualByMachine, desired)
+	target := selectEnforcementTarget(machines, actualByMachine, step)
 	if target == nil {
 		// Everyone matches — clear any previous enforcement condition AND
 		// drop any stale per-node throttle records so the next mismatch
@@ -173,7 +185,7 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 	// Resolve the installer image for THIS upgrade. Same resolution path
 	// as user-driven upgrades: secret → live-fetch → env var. Never the
 	// generic image — Talos rejects it on clusters with system extensions.
-	installerImage := resolveEnforcementInstallerImage(ctx, t, cluster, target, clientConfig, desired)
+	installerImage := resolveEnforcementInstallerImage(ctx, t, cluster, target, clientConfig, step)
 	if installerImage == "" {
 		msg := fmt.Sprintf("Cannot resolve Talos installer image to enforce version on %s: no install_image pinned, no control plane reachable to live-fetch, and TALOS_VM_INSTALL_IMAGE_* unset", clusterTag)
 		vlog.Warn(msg)
@@ -191,12 +203,12 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 	enforceStates, _ := t.stateService.GetVersionEnforcementStates(ctx, cluster)
 	if rec, ok := enforceStates[target.Name]; ok &&
 		rec.Image == installerImage &&
-		rec.TargetVersion == desired &&
+		rec.TargetVersion == step &&
 		time.Since(rec.TriggeredAt) < cooldown {
 		elapsed := time.Since(rec.TriggeredAt).Round(time.Second)
 		remaining := (cooldown - time.Since(rec.TriggeredAt)).Round(time.Second)
 		msg := fmt.Sprintf("Waiting for Talos upgrade to settle on %s/%s: running=%s target=%s initiated=%s ago (cooldown %s remaining)",
-			clusterTag, target.Name, actualByMachine[target.Name], desired, elapsed, remaining)
+			clusterTag, target.Name, actualByMachine[target.Name], step, elapsed, remaining)
 		vlog.Info(msg)
 		_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "True", "WaitingForReboot", msg)
 		return nil
@@ -233,8 +245,8 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 	}
 	defer func() { _ = tClient.Close() }()
 
-	vlog.Info(fmt.Sprintf("Talos version mismatch on %s/%s: running=%s desired=%s — triggering upgrade with %s",
-		clusterTag, target.Name, actualByMachine[target.Name], desired, installerImage))
+	vlog.Info(fmt.Sprintf("Talos version mismatch on %s/%s: running=%s desired=%s step=%s — triggering upgrade with %s",
+		clusterTag, target.Name, actualByMachine[target.Name], desired, step, installerImage))
 
 	if uerr := t.clientService.UpgradeNode(ctx, tClient, targetIP, installerImage); uerr != nil {
 		msg := fmt.Sprintf("Failed to trigger enforcement upgrade on %s/%s: %v", clusterTag, target.Name, uerr)
@@ -246,12 +258,12 @@ func (t *TalosManager) reconcileTalosVersion(ctx context.Context, cluster *vitis
 	// Persist the throttle record BEFORE returning so the next reconcile
 	// (5s away) sees it and skips the RPC. Best-effort: a write failure
 	// just means we'll re-trigger on the next pass — annoying but safe.
-	if serr := t.stateService.SetVersionEnforcementState(ctx, cluster, target.Name, installerImage, desired); serr != nil {
+	if serr := t.stateService.SetVersionEnforcementState(ctx, cluster, target.Name, installerImage, step); serr != nil {
 		vlog.Warn(fmt.Sprintf("Failed to persist version-enforcement record for %s/%s: %v — will re-trigger next pass", clusterTag, target.Name, serr))
 	}
 
 	_ = t.statusManager.SetCondition(ctx, cluster, enforcementConditionType, "True", "Reconciling",
-		fmt.Sprintf("Upgrading node %s from %s to %s", target.Name, actualByMachine[target.Name], desired))
+		fmt.Sprintf("Upgrading node %s from %s to %s (towards %s)", target.Name, actualByMachine[target.Name], step, desired))
 
 	return nil
 }
@@ -336,24 +348,7 @@ func (t *TalosManager) runningTalosVersion(ctx context.Context, cluster *vitista
 	if err != nil {
 		return ""
 	}
-	actual := t.probeTalosVersions(ctx, cluster, machines, clientConfig)
-
-	var minSem *semver.Version
-	var minStr string
-	for _, v := range actual {
-		sv, perr := semver.NewVersion(consts.StripVersionPrefix(v))
-		if perr != nil {
-			continue
-		}
-		if minSem == nil || sv.LessThan(minSem) {
-			minSem = sv
-			minStr = v
-		}
-	}
-	if minStr == "" {
-		return ""
-	}
-	return consts.NormalizeTalosVersion(minStr)
+	return talosversion.LowestVersion(t.probeTalosVersions(ctx, machines, clientConfig))
 }
 
 // ensureInstallImagePinned writes machine.install.image into the cluster
@@ -386,33 +381,14 @@ func (t *TalosManager) ensureInstallImagePinned(
 // degraded API server doesn't block the probe.
 func (t *TalosManager) probeTalosVersions(
 	ctx context.Context,
-	cluster *vitistackv1alpha1.KubernetesCluster,
 	machines []*vitistackv1alpha1.Machine,
 	clientConfig *clientconfig.Config,
 ) map[string]string {
-	out := make(map[string]string, len(machines))
-	clusterTag := clusterLogTag(cluster)
+	nodes := make([]talosclientservice.NodeEndpoint, 0, len(machines))
 	for _, m := range machines {
-		ip := getFirstIPv4(m)
-		if ip == "" {
-			continue
-		}
-		client, err := t.clientService.CreateTalosClient(ctx, false, clientConfig, []string{ip})
-		if err != nil {
-			vlog.Debug(fmt.Sprintf("Talos version probe skipped %s/%s: %v", clusterTag, m.Name, err))
-			continue
-		}
-		probeCtx, cancel := context.WithTimeout(ctx, talosNodeProbeTimeout)
-		ver, verr := t.clientService.GetTalosVersion(probeCtx, client, ip)
-		cancel()
-		_ = client.Close()
-		if verr != nil {
-			vlog.Debug(fmt.Sprintf("Talos version probe failed %s/%s: %v", clusterTag, m.Name, verr))
-			continue
-		}
-		out[m.Name] = ver
+		nodes = append(nodes, talosclientservice.NodeEndpoint{Name: m.Name, IP: getFirstIPv4(m)})
 	}
-	return out
+	return t.clientService.ProbeTalosVersions(ctx, clientConfig, nodes, talosNodeProbeTimeout)
 }
 
 // resolveEnforcementInstallerImage returns the installer image to use
@@ -446,28 +422,13 @@ func resolveEnforcementInstallerImage(
 	if base == "" {
 		return ""
 	}
-	return swapImageTagForEnforcement(base, versionTag)
+	return imageref.WithTag(base, versionTag)
 }
 
-// swapImageTagForEnforcement returns ref with its tag replaced by tag.
-// If ref has no tag, tag is appended. Anchored after the last "/" so a
-// registry port (e.g. "localhost:5000/foo") is not mistaken for a tag
-// separator.
-//
-// Local copy of upgradeservice.swapImageTag — the two packages are at
-// the same architectural level and we'd rather duplicate ten lines than
-// let one reach into the other's internals.
-func swapImageTagForEnforcement(ref, tag string) string {
-	slash := strings.LastIndexByte(ref, '/')
-	colon := strings.LastIndexByte(ref, ':')
-	if colon > slash {
-		return ref[:colon] + ":" + tag
-	}
-	return ref + ":" + tag
-}
-
-// selectEnforcementTarget returns the first machine that needs an
-// upgrade, or nil if every reachable node matches desired. Order:
+// selectEnforcementTarget returns the first machine running a version older
+// than desired, or nil if every reachable node has reached it. A node already
+// past desired (ahead of an intermediate step) is never picked: that would be
+// a downgrade. Order:
 // control planes first, then workers. Within a role the input order is
 // preserved so callers can sort upstream if they want stable picks.
 func selectEnforcementTarget(
@@ -484,7 +445,7 @@ func selectEnforcementTarget(
 			if !ok || running == "" {
 				continue // unreachable — leave alone, retry next pass
 			}
-			if running != desired {
+			if talosversion.IsOlder(running, desired) {
 				return m
 			}
 		}
@@ -502,9 +463,54 @@ func selectEnforcementTarget(
 		if !ok || running == "" {
 			continue
 		}
-		if running != desired {
+		if talosversion.IsOlder(running, desired) {
 			return m
 		}
 	}
 	return nil
+}
+
+// enforcementStep returns the version to enforce on this pass: the next step on
+// the supported upgrade path from the least-upgraded node towards desired,
+// normalized ("v1.12.12"). Every node is brought to that step before any goes
+// further, so the cluster never spans more than one step.
+//
+// When no step may be taken it returns a condition reason and message instead:
+// WaitingForNodes while a machine with an address has not reported its version
+// (it may be rebooting into the current step, or rolled back to an older one,
+// and stepping on without it could leave it a minor behind), PathUnknown when
+// the latest patch of a minor on the way is not known, and
+// KubernetesIncompatible when the step's Talos cannot run the cluster's
+// Kubernetes version.
+func enforcementStep(machines []*vitistackv1alpha1.Machine, actual map[string]string, desired, kubernetesVersion string) (step, reason, message string) {
+	var silent []string
+	for _, m := range machines {
+		if getFirstIPv4(m) == "" {
+			continue // not reachable at all yet; not part of any upgrade
+		}
+		if v, ok := actual[m.Name]; !ok || !talosversion.Valid(v) {
+			silent = append(silent, m.Name) // no answer, or one that does not parse
+		}
+	}
+	if len(silent) > 0 {
+		return "", "WaitingForNodes", fmt.Sprintf("Waiting to enforce Talos %s: no version reported by %s", desired, strings.Join(silent, ", "))
+	}
+
+	lowest := talosversion.LowestVersion(actual)
+	if lowest == "" {
+		return desired, "", ""
+	}
+	next, err := talosversion.NextUpgradeStep(lowest, desired)
+	if err != nil {
+		return "", "PathUnknown", fmt.Sprintf("Cannot enforce Talos %s: %v", desired, err)
+	}
+	step = desired
+	if next != "" {
+		step = consts.NormalizeTalosVersion(next)
+	}
+	if ok, why := talosversion.SupportsKubernetesVersion(step, kubernetesVersion); !ok {
+		return "", "KubernetesIncompatible", fmt.Sprintf("Cannot enforce Talos %s: the next step %s cannot run Kubernetes %s (%s); upgrade Kubernetes first",
+			desired, step, kubernetesVersion, why)
+	}
+	return step, "", ""
 }

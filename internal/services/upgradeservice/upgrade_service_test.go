@@ -7,52 +7,6 @@ const (
 	testFactoryRef = "factory.talos.dev/nocloud-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365"
 )
 
-func TestSwapImageTag(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		ref  string
-		tag  string
-		want string
-	}{
-		{
-			name: "factory image rewrites tag and preserves schematic",
-			ref:  testFactoryRef + ":v1.12.4",
-			tag:  testTag,
-			want: testFactoryRef + ":" + testTag,
-		},
-		{
-			name: "tagless image appends",
-			ref:  "ghcr.io/siderolabs/installer",
-			tag:  testTag,
-			want: "ghcr.io/siderolabs/installer:" + testTag,
-		},
-		{
-			name: "registry port is not a tag separator",
-			ref:  "localhost:5000/foo:v1",
-			tag:  "v2",
-			want: "localhost:5000/foo:v2",
-		},
-		{
-			name: "registry port without image tag still appends",
-			ref:  "localhost:5000/foo",
-			tag:  "v1.12.7",
-			want: "localhost:5000/foo:v1.12.7",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := swapImageTag(tt.ref, tt.tag)
-			if got != tt.want {
-				t.Fatalf("swapImageTag(%q, %q) = %q, want %q", tt.ref, tt.tag, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestIsIPv4(t *testing.T) {
 	t.Parallel()
 

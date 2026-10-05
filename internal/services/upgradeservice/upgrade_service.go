@@ -11,6 +11,7 @@ package upgradeservice
 import (
 	"context"
 	"fmt"
+	"github.com/vitistack/talos-operator/internal/helpers/imageref"
 	"maps"
 	"net"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	"github.com/vitistack/talos-operator/internal/services/talosconfigservice"
 	"github.com/vitistack/talos-operator/internal/services/talosstateservice"
+	"github.com/vitistack/talos-operator/internal/services/talosversion"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -561,27 +563,8 @@ func (s *UpgradeService) CheckForAvailableUpgrades(ctx context.Context, cluster 
 		return nil
 	}
 
-	// Get the operator's configured Talos version
-	operatorTalosVersion := consts.StripVersionPrefix(viper.GetString(consts.TALOS_VERSION))
-	clusterTalosVersion := consts.StripVersionPrefix(state.TalosCurrent)
-
-	// Compare versions using semver
-	operatorVer, err := semver.NewVersion(operatorTalosVersion)
-	if err != nil {
-		return nil // Can't parse operator version, skip silently
-	}
-
-	clusterVer, err := semver.NewVersion(clusterTalosVersion)
-	if err != nil {
-		return nil // Can't parse cluster version, skip silently
-	}
-
-	// If operator version is newer, set available annotation
-	if operatorVer.GreaterThan(clusterVer) {
-		// Use version without 'v' prefix for consistency
-		if err := s.SetTalosUpgradeAvailable(ctx, cluster, operatorTalosVersion); err != nil {
-			return err
-		}
+	if err := s.reconcileTalosAvailable(ctx, cluster, state); err != nil {
+		return err
 	}
 
 	// Check Kubernetes version - can be upgraded independently of Talos
@@ -613,6 +596,58 @@ func (s *UpgradeService) CheckForAvailableUpgrades(ctx context.Context, cluster 
 	return nil
 }
 
+// reconcileTalosAvailable advertises the next step on the supported upgrade
+// path from the cluster's Talos version towards the operator's TALOS_VERSION,
+// rather than TALOS_VERSION itself: Talos only tests the migration between
+// adjacent minors, through the latest patch of each (see
+// talosversion.NextUpgradeStep). A step the cluster's Kubernetes version
+// cannot run on is not offered, and an advertised version that is no longer
+// the right step is replaced or withdrawn, with the reason in talos-message.
+func (s *UpgradeService) reconcileTalosAvailable(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, state *UpgradeState) error {
+	operatorTalosVersion := viper.GetString(consts.TALOS_VERSION)
+	if operatorTalosVersion == "" {
+		return nil
+	}
+
+	step, err := talosversion.NextUpgradeStep(state.TalosCurrent, operatorTalosVersion)
+	if err != nil {
+		return s.withdrawTalosAvailable(ctx, cluster, state,
+			fmt.Sprintf("No Talos upgrade can be offered from %s towards %s: %v", state.TalosCurrent, operatorTalosVersion, err))
+	}
+	if step == "" {
+		return nil // up to date; ReconcileTalosCurrentVersion clears a stale offer
+	}
+	if ok, reason := talosversion.SupportsKubernetesVersion(step, state.KubernetesCurrent); !ok {
+		return s.withdrawTalosAvailable(ctx, cluster, state,
+			fmt.Sprintf("Talos %s is the next upgrade step but cannot run Kubernetes %s (%s); upgrade Kubernetes first", step, state.KubernetesCurrent, reason))
+	}
+	return s.SetTalosUpgradeAvailable(ctx, cluster, step)
+}
+
+// withdrawTalosAvailable removes talos-available and explains why in
+// talos-message. It writes only when something changes, since it runs on
+// every reconcile, and leaves a running upgrade alone. After a failed or
+// rejected upgrade talos-message holds that reason, which is kept.
+func (s *UpgradeService) withdrawTalosAvailable(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, state *UpgradeState, message string) error {
+	if state.TalosStatus == consts.UpgradeStatusInProgress {
+		return nil
+	}
+	writeMessage := state.TalosStatus != consts.UpgradeStatusFailed &&
+		cluster.GetAnnotations()[consts.TalosMessageAnnotation] != message
+	if writeMessage {
+		if err := s.SetUpgradeAnnotations(ctx, cluster, map[string]string{consts.TalosMessageAnnotation: message}); err != nil {
+			return err
+		}
+	}
+	if state.TalosAvailable != "" {
+		if err := s.RemoveAnnotation(ctx, cluster, consts.TalosAvailableAnnotation); err != nil {
+			return err
+		}
+		vlog.Info(fmt.Sprintf("Withdrew Talos upgrade offer %s: %s", clusterlog.Tag(cluster), message))
+	}
+	return nil
+}
+
 // IsTalosUpgradeRequested checks if user has requested a Talos upgrade
 func (s *UpgradeService) IsTalosUpgradeRequested(cluster *vitistackv1alpha1.KubernetesCluster) bool {
 	state := s.GetUpgradeState(cluster)
@@ -626,12 +661,16 @@ func (s *UpgradeService) IsKubernetesUpgradeRequested(cluster *vitistackv1alpha1
 }
 
 // StartTalosUpgrade marks the beginning of a Talos upgrade and updates status/conditions
-func (s *UpgradeService) StartTalosUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, totalNodes int) error {
+func (s *UpgradeService) StartTalosUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, stepVersion string, totalNodes int) error {
 	state := s.GetUpgradeState(cluster)
+	towards := ""
+	if !sameVersion(stepVersion, state.TalosTarget) {
+		towards = fmt.Sprintf(" (step towards %s)", state.TalosTarget)
+	}
 
 	updates := map[string]string{
 		consts.TalosStatusAnnotation:   string(consts.UpgradeStatusInProgress),
-		consts.TalosMessageAnnotation:  fmt.Sprintf("Starting Talos upgrade: %s → %s", state.TalosCurrent, state.TalosTarget),
+		consts.TalosMessageAnnotation:  fmt.Sprintf("Starting Talos upgrade: %s → %s%s", state.TalosCurrent, stepVersion, towards),
 		consts.TalosProgressAnnotation: fmt.Sprintf("0/%d", totalNodes),
 	}
 
@@ -641,7 +680,7 @@ func (s *UpgradeService) StartTalosUpgrade(ctx context.Context, cluster *vitista
 
 	// Persist upgrade state to secret for recovery
 	if s.stateService != nil {
-		if err := s.stateService.StartUpgradeState(ctx, cluster, "talos", state.TalosTarget, totalNodes); err != nil {
+		if err := s.stateService.StartUpgradeState(ctx, cluster, "talos", stepVersion, totalNodes); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to persist upgrade state to secret: %v", err))
 		}
 	}
@@ -651,7 +690,7 @@ func (s *UpgradeService) StartTalosUpgrade(ctx context.Context, cluster *vitista
 		vlog.Error("Failed to set phase to UpgradingTalos", err)
 	}
 	if err := s.statusManager.SetCondition(ctx, cluster, "TalosUpgrade", "True", "InProgress",
-		fmt.Sprintf("Upgrading Talos from %s to %s", state.TalosCurrent, state.TalosTarget)); err != nil {
+		fmt.Sprintf("Upgrading Talos from %s to %s%s", state.TalosCurrent, stepVersion, towards)); err != nil {
 		vlog.Error("Failed to set TalosUpgrade condition", err)
 	}
 
@@ -731,7 +770,7 @@ func (s *UpgradeService) BuildTalosInstallerImage(
 	if base == "" {
 		return "", fmt.Errorf("no Talos installer image available for cluster %s: cluster secret has no install_image, no control plane is reachable to live-fetch one, and TALOS_VM_INSTALL_IMAGE_DEFAULT is unset; refusing to fall back to the generic installer (it would drop the cluster's system extensions)", cluster.Name)
 	}
-	resolved := swapImageTag(base, versionTag)
+	resolved := imageref.WithTag(base, versionTag)
 	vlog.Info(fmt.Sprintf("Resolved Talos installer image for %s: %s (source=%s)", clusterlog.Tag(cluster), resolved, source))
 	return resolved, nil
 }
@@ -820,27 +859,21 @@ func isIPv4(s string) bool {
 	return ip != nil && ip.To4() != nil
 }
 
-// swapImageTag returns ref with its tag replaced by tag. If ref has no tag, tag
-// is appended. The colon search is anchored after the last '/' so registry
-// ports (e.g. "localhost:5000/foo") are not mistaken for tag separators.
-func swapImageTag(ref, tag string) string {
-	slash := strings.LastIndexByte(ref, '/')
-	colon := strings.LastIndexByte(ref, ':')
-	if colon > slash {
-		return ref[:colon] + ":" + tag
-	}
-	return ref + ":" + tag
-}
-
 // CompleteTalosUpgrade marks a successful Talos upgrade completion.
 // targetVersion is the version the cluster was upgraded to (from the persisted upgrade state).
+// continueTowards, when set, is a farther talos-target this was a step towards: the target
+// annotation is then kept so the next step is planned.
 // installerImage is the Talos installer image URL applied during the upgrade; it is pinned
 // in the secret so future node expansions install the same Talos version.
-func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, targetVersion, installerImage string) error {
+func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, targetVersion, installerImage, continueTowards string) error {
+	message := fmt.Sprintf("Talos upgrade completed: now running %s", targetVersion)
+	if continueTowards != "" {
+		message = fmt.Sprintf("Talos upgraded to %s; continuing towards %s", targetVersion, continueTowards)
+	}
 	updates := map[string]string{
 		consts.TalosCurrentAnnotation:  targetVersion,
 		consts.TalosStatusAnnotation:   string(consts.UpgradeStatusCompleted),
-		consts.TalosMessageAnnotation:  fmt.Sprintf("Talos upgrade completed: now running %s", targetVersion),
+		consts.TalosMessageAnnotation:  message,
 		consts.TalosProgressAnnotation: "",
 	}
 
@@ -867,9 +900,12 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 		}
 	}
 
-	// Remove target and available annotations
-	if err := s.RemoveAnnotation(ctx, cluster, consts.TalosTargetAnnotation); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to remove talos-target annotation: %v", err))
+	// Remove target and available annotations. A step towards a farther
+	// target keeps the target: the next pass rolls the following step.
+	if continueTowards == "" {
+		if err := s.RemoveAnnotation(ctx, cluster, consts.TalosTargetAnnotation); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to remove talos-target annotation: %v", err))
+		}
 	}
 	if err := s.RemoveAnnotation(ctx, cluster, consts.TalosAvailableAnnotation); err != nil {
 		vlog.Warn(fmt.Sprintf("Failed to remove talos-available annotation: %v", err))
@@ -882,8 +918,7 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 	if err := s.statusManager.SetPhase(ctx, cluster, status.PhaseReady); err != nil {
 		vlog.Error("Failed to set phase to Ready", err)
 	}
-	if err := s.statusManager.SetCondition(ctx, cluster, "TalosUpgrade", "False", "Completed",
-		fmt.Sprintf("Talos successfully upgraded to %s", targetVersion)); err != nil {
+	if err := s.statusManager.SetCondition(ctx, cluster, "TalosUpgrade", "False", "Completed", message); err != nil {
 		vlog.Error("Failed to set TalosUpgrade condition", err)
 	}
 
@@ -1334,42 +1369,8 @@ func sameVersion(a, b string) bool {
 	return av.Equal(bv)
 }
 
-// ValidateUpgradeTarget validates that a target version is a valid upgrade path
-func (s *UpgradeService) ValidateUpgradeTarget(currentVersion, targetVersion string) error {
-	if currentVersion == "" || targetVersion == "" {
-		return fmt.Errorf("current and target versions must be specified")
-	}
-
-	// Parse versions (strip 'v' prefix if present)
-	current, err := semver.NewVersion(consts.StripVersionPrefix(currentVersion))
-	if err != nil {
-		return fmt.Errorf("invalid current version %s: %w", currentVersion, err)
-	}
-
-	target, err := semver.NewVersion(consts.StripVersionPrefix(targetVersion))
-	if err != nil {
-		return fmt.Errorf("invalid target version %s: %w", targetVersion, err)
-	}
-
-	// Target must be greater than current
-	if !target.GreaterThan(current) {
-		return fmt.Errorf("target version %s must be greater than current version %s", targetVersion, currentVersion)
-	}
-
-	// For Kubernetes, only allow one minor version upgrade at a time
-	// This is a Kubernetes best practice
-	if target.Major() == current.Major() {
-		if target.Minor()-current.Minor() > 1 {
-			return fmt.Errorf("can only upgrade one minor version at a time: %s → %s (max: %d.%d.x)",
-				currentVersion, targetVersion, current.Major(), current.Minor()+1)
-		}
-	}
-
-	return nil
-}
-
 // ValidateKubernetesUpgradeTarget validates Kubernetes upgrade target version.
-// Unlike ValidateUpgradeTarget, this allows same-version "upgrades" to re-apply
+// Unlike a Talos target, this allows same-version "upgrades" to re-apply
 // configuration when some nodes may be lagging behind.
 func (s *UpgradeService) ValidateKubernetesUpgradeTarget(currentVersion, targetVersion string) error {
 	if currentVersion == "" || targetVersion == "" {

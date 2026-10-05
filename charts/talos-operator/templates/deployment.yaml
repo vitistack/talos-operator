@@ -113,6 +113,10 @@ spec:
             - name: TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.talos.latestPatchVersions }}
+            - name: TALOS_LATEST_PATCH_VERSIONS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

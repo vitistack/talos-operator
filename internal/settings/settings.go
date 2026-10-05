@@ -33,11 +33,11 @@ func Init() {
 	// 060a9454…33ba8e). Override to "" to disable the check. It also decides
 	// when a cluster's pinned install_image moves to that schematic.
 	viper.SetDefault(consts.TALOS_REQUIRED_EXTENSIONS, "siderolabs/iscsi-tools,siderolabs/qemu-guest-agent,siderolabs/trident-iscsi-tools,siderolabs/util-linux-tools,siderolabs/nfs-utils")
-	// Extension reconciliation reinstalls nodes from TALOS_VM_INSTALL_IMAGE_*,
-	// which also moves them to that image's Talos version — so it can upgrade
-	// clusters fleet-wide. Disabled by default; enable explicitly per
-	// environment. While false, no node is touched even if required extensions
-	// are listed/missing.
+	// Extension reconciliation reinstalls nodes with the schematic of
+	// TALOS_VM_INSTALL_IMAGE_* at the Talos version they already run, which
+	// reboots them. Disabled by default; enable explicitly per environment.
+	// While false, no node is touched even if required extensions are
+	// listed/missing.
 	viper.SetDefault(consts.TALOS_EXTENSION_ENFORCE_ENABLED, false)
 	// Cooldown between Talos upgrade triggers on the same node + image. 10
 	// minutes covers the typical reboot + extension unpack window with margin.
