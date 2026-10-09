@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/talos"
 	"github.com/vitistack/talos-operator/internal/machine"
+	"github.com/vitistack/talos-operator/internal/services/drainservice"
 	"github.com/vitistack/talos-operator/internal/services/machineservice"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
@@ -129,9 +131,12 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 
 	// Handle scale-down before machine reconciliation
 	// This ensures nodes are properly removed from etcd/VIP before Machine CRDs are deleted
-	if result, handled := r.handleScaleDown(ctx, kubernetesCluster); handled {
+	// A removal waiting on its drain does not stop the pass: machines and
+	// Talos config keep being reconciled while a PDB holds the drain.
+	scaleDown := r.handleScaleDown(ctx, kubernetesCluster)
+	if scaleDown.stop {
 		_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Scaling down")
-		return result, nil
+		return scaleDown.result, nil
 	}
 
 	// Gate Machine creation on the referenced NetworkNamespace being Ready.
@@ -169,22 +174,46 @@ func (r *KubernetesClusterReconciler) reconcileTalosCluster(ctx context.Context,
 		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
 	}
 
-	// Handle upgrade requests (only for ready clusters)
-	if result, handled := r.handleUpgrades(ctx, kubernetesCluster); handled {
-		return result, nil
+	// Handle upgrade requests (only for ready clusters). Not while a node
+	// removal waits on its drain: that node must not be picked for an upgrade.
+	if !scaleDown.drainPending {
+		if result, handled := r.handleUpgrades(ctx, kubernetesCluster); handled {
+			return result, nil
+		}
 	}
 
-	// Initialize upgrade annotations for ready clusters (detects current versions)
 	if kubernetesCluster.Status.Phase == status.PhaseReady {
-		r.initializeUpgradeAnnotations(ctx, kubernetesCluster)
-		// Check for available upgrades (compares cluster version with operator's configured version)
-		_ = r.UpgradeService.CheckForAvailableUpgrades(ctx, kubernetesCluster)
+		r.reconcileReadyCluster(ctx, kubernetesCluster, scaleDown.drainPending)
+	}
+
+	if scaleDown.drainPending {
+		_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "Scaling down: waiting for node drain")
+		return scaleDown.result, nil
 	}
 
 	// Clear activity message on successful reconciliation
 	_ = r.StatusManager.SetMessage(ctx, kubernetesCluster, "")
 
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, nil
+}
+
+// reconcileReadyCluster does the bookkeeping for a Ready cluster with no
+// upgrade being handled on this pass.
+func (r *KubernetesClusterReconciler) reconcileReadyCluster(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, scaleDownDrainPending bool) {
+	// Hand back nodes cordoned by a drain whose operation was called off
+	// (scale-down reverted, upgrade reset). handleScaleDown found nothing to
+	// remove on this pass, so scale-down drains are abandoned; upgrade drains
+	// only when no upgrade plan is stored.
+	if !scaleDownDrainPending {
+		hasPlan, planErr := r.UpgradeController.HasUpgradePlan(ctx, cluster)
+		if err := r.TalosManager.ReleaseAbandonedDrains(ctx, cluster, abandonedDrainPurposes(hasPlan, planErr)...); err != nil {
+			vlog.Warnf("Failed to release abandoned node drains %s: %v", clusterlog.Tag(cluster), err)
+		}
+	}
+	// Initialize upgrade annotations for ready clusters (detects current versions)
+	r.initializeUpgradeAnnotations(ctx, cluster)
+	// Check for available upgrades (compares cluster version with operator's configured version)
+	_ = r.UpgradeService.CheckForAvailableUpgrades(ctx, cluster)
 }
 
 // handleUpgrades checks for and processes upgrade requests via annotations.
@@ -355,13 +384,24 @@ func (r *KubernetesClusterReconciler) gateOnNetworkNamespaceReady(ctx context.Co
 	return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 }
 
+// scaleDownOutcome says how a reconcile pass goes on after handleScaleDown.
+type scaleDownOutcome struct {
+	result ctrl.Result
+	// stop: return result now (a node was removed, or removal failed).
+	stop bool
+	// drainPending: a node removal is waiting on its drain. The rest of the
+	// pass may run, but no upgrade may start and no drain may be released;
+	// return result at the end.
+	drainPending bool
+}
+
 // handleScaleDown handles machine scale-down operations.
-// Returns (result, true) if scale-down was needed and handled, (_, false) if no scale-down was needed.
-func (r *KubernetesClusterReconciler) handleScaleDown(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (ctrl.Result, bool) {
+// The zero outcome means no scale-down was needed.
+func (r *KubernetesClusterReconciler) handleScaleDown(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) scaleDownOutcome {
 	excessCPs, excessWorkers, err := r.MachineManager.GetExcessMachines(ctx, cluster)
 	if err != nil {
 		vlog.Error("Failed to get excess machines "+clusterlog.Tag(cluster), err)
-		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+		return scaleDownOutcome{result: ctrl.Result{RequeueAfter: ControllerRequeueDelay}, stop: true}
 	}
 
 	// Handle control plane scale-down (one at a time for safety)
@@ -370,16 +410,13 @@ func (r *KubernetesClusterReconciler) handleScaleDown(ctx context.Context, clust
 		vlog.Info(fmt.Sprintf("Scale-down: removing control plane %s %s (1 of %d excess)", cpToRemove.Name, clusterlog.Tag(cluster), len(excessCPs)))
 
 		if _, err := r.TalosManager.DeleteControlPlaneNode(ctx, cluster, cpToRemove.Name); err != nil {
-			vlog.Error(fmt.Sprintf("Failed to delete control plane node %s from Talos cluster %s", cpToRemove.Name, clusterlog.Tag(cluster)), err)
-			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+			return scaleDownRetry(cluster, "control plane", cpToRemove.Name, err)
 		}
 
 		if err := r.MachineManager.DeleteMachine(ctx, cpToRemove); err != nil {
 			vlog.Error(fmt.Sprintf("Failed to delete machine CRD %s %s", cpToRemove.Name, clusterlog.Tag(cluster)), err)
-			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 		}
-
-		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+		return scaleDownOutcome{result: ctrl.Result{RequeueAfter: ControllerRequeueDelay}, stop: true}
 	}
 
 	// Handle worker scale-down (one at a time for safety)
@@ -388,19 +425,54 @@ func (r *KubernetesClusterReconciler) handleScaleDown(ctx context.Context, clust
 		vlog.Info(fmt.Sprintf("Scale-down: removing worker %s %s (1 of %d excess)", workerToRemove.Name, clusterlog.Tag(cluster), len(excessWorkers)))
 
 		if _, err := r.TalosManager.DeleteWorkerNode(ctx, cluster, workerToRemove.Name); err != nil {
-			vlog.Error(fmt.Sprintf("Failed to delete worker node %s from Talos cluster %s", workerToRemove.Name, clusterlog.Tag(cluster)), err)
-			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+			return scaleDownRetry(cluster, "worker", workerToRemove.Name, err)
 		}
 
 		if err := r.MachineManager.DeleteMachine(ctx, workerToRemove); err != nil {
 			vlog.Error(fmt.Sprintf("Failed to delete machine CRD %s %s", workerToRemove.Name, clusterlog.Tag(cluster)), err)
-			return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
 		}
-
-		return ctrl.Result{RequeueAfter: ControllerRequeueDelay}, true
+		return scaleDownOutcome{result: ctrl.Result{RequeueAfter: ControllerRequeueDelay}, stop: true}
 	}
 
-	return ctrl.Result{}, false
+	return scaleDownOutcome{}
+}
+
+// scaleDownRetry logs a failed node removal and returns how the pass goes on.
+// A removal waiting on its drain is progress, not a failure.
+func scaleDownRetry(cluster *vitistackv1alpha1.KubernetesCluster, role, nodeName string, err error) scaleDownOutcome {
+	delay, pending := scaleDownRequeueAfter(err)
+	if pending {
+		vlog.Info(fmt.Sprintf("Scale-down of %s %s %s waits for its drain: %v", role, nodeName, clusterlog.Tag(cluster), err))
+		return scaleDownOutcome{result: ctrl.Result{RequeueAfter: delay}, drainPending: true}
+	}
+	vlog.Error(fmt.Sprintf("Failed to delete %s node %s from Talos cluster %s", role, nodeName, clusterlog.Tag(cluster)), err)
+	return scaleDownOutcome{result: ctrl.Result{RequeueAfter: delay}, stop: true}
+}
+
+// scaleDownRequeueAfter maps a node-removal error to the requeue delay and
+// whether it is a drain still in progress (expected, not a failure). A drain
+// waiting on PodDisruptionBudgets backs off on its own schedule.
+func scaleDownRequeueAfter(err error) (time.Duration, bool) {
+	var pending *drainservice.PendingError
+	if errors.As(err, &pending) {
+		return drainservice.RetryAfter(err), true
+	}
+	if errors.Is(err, drainservice.ErrIncomplete) {
+		return drainservice.RetryAfter(err), false
+	}
+	return ControllerRequeueDelay, false
+}
+
+// abandonedDrainPurposes returns the drain purposes no operation is using on
+// this pass. It is called only after handleScaleDown found nothing to remove,
+// so scale-down drains are always abandoned here. Upgrade drains are only when
+// the upgrade state was read and holds no plan; on a read error they are kept.
+func abandonedDrainPurposes(hasUpgradePlan bool, planErr error) []drainservice.Purpose {
+	purposes := []drainservice.Purpose{drainservice.PurposeScaleDown}
+	if planErr == nil && !hasUpgradePlan {
+		purposes = append(purposes, drainservice.PurposeUpgrade)
+	}
+	return purposes
 }
 
 // isTalosProvider returns true if spec.data.provider == "talos"

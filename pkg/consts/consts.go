@@ -73,6 +73,16 @@ var (
 	// (likely the previous upgrade failed). Default: 5. Min: 1.
 	TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES = "TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
 
+	// DRAIN_TIMEOUT_MINUTES is how long a node drain (before a Talos upgrade
+	// or before a node is removed on scale-down) may take before the operator
+	// reports it as blocked. Drains are non-blocking: each reconcile evicts
+	// what it can and requeues, retrying evictions a PodDisruptionBudget
+	// rejects with backoff. Past the timeout the KubernetesCluster gets a
+	// NodeDrain=False/Blocked condition naming the blocking pods and PDBs, a
+	// Warning event is recorded on each blocked pod, and the upgrade or
+	// removal stays on hold while the drain keeps retrying. Default: 10. Min: 1.
+	DRAIN_TIMEOUT_MINUTES = "DRAIN_TIMEOUT_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
+
 	VITISTACK_NAME           = "VITISTACK_NAME"
 	NAME_KUBERNETES_PROVIDER = "NAME_KUBERNETES_PROVIDER"
 
@@ -203,6 +213,26 @@ const (
 	// This annotation is generic so any Kubernetes operator can use it.
 	OSInstalledAnnotation = "vitistack.io/os-installed"
 )
+
+// DrainLabel marks a workload-cluster Node the operator has cordoned for a
+// drain; the value is the purpose ("upgrade" or "scale-down"). Nodes carrying
+// it are uncordoned again when no operation needs them drained any more.
+const DrainLabel = "vitistack.io/drain"
+
+// DrainStartedAtAnnotation records on the Node when the current drain began
+// (RFC 3339), so the drain timeout spans reconciles and operator restarts.
+const DrainStartedAtAnnotation = "vitistack.io/drain-started-at"
+
+// DrainNodeWasCordonedAnnotation is set on a Node that was already cordoned by
+// someone else when a drain began, so that ending the drain leaves it cordoned.
+const DrainNodeWasCordonedAnnotation = "vitistack.io/drain-node-was-cordoned"
+
+// ForceDrainAnnotation, set to "true" on a KubernetesCluster, makes node drains
+// bypass PodDisruptionBudgets: pods whose eviction is rejected are deleted
+// directly, and a drain that is unfinished after DRAIN_TIMEOUT_MINUTES or cannot
+// reach the workload cluster's API no longer holds the upgrade or node removal. This is an explicit escape hatch; the
+// default drain honours PDBs. The operator does not remove it.
+const ForceDrainAnnotation = "vitistack.io/force-drain"
 
 // Upgrade annotation constants for KubernetesCluster resources.
 // These annotations enable a provider-agnostic upgrade flow where:

@@ -11,6 +11,7 @@ import (
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
+	"github.com/vitistack/talos-operator/internal/services/drainservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 )
 
@@ -328,14 +329,21 @@ func (e *RollingUpgradeExecutor) initiateNodeUpgrade(
 	state *ClusterUpgradeState,
 	node *NodeUpgradeState,
 ) *RollingUpgradeResult {
+	// Cordon and drain the node first. The upgrade reboots the node, so it must
+	// not start until every pod has been evicted within its PodDisruptionBudget.
+	// The drain is non-blocking: until it completes, requeue on the drain's
+	// own backoff. A drain held by a PDB is not an upgrade failure; the node
+	// stays cordoned and the NodeDrain condition names the blocking pods.
+	if err := e.readinessChecker.DrainNode(ctx, cluster, node.NodeName); err != nil {
+		return &RollingUpgradeResult{
+			Continue:     true,
+			RequeueAfter: drainservice.RetryAfter(err),
+			Message:      fmt.Sprintf("Waiting to drain node %s before upgrade: %v", node.NodeName, err),
+		}
+	}
+
 	vlog.Info(fmt.Sprintf("Upgrading node: %s node=%s (%d/%d)",
 		clusterlog.Tag(cluster), node.NodeName, state.CurrentNodeIndex+1, len(state.Nodes)))
-
-	// Cordon and drain the node first
-	if err := e.readinessChecker.DrainNode(ctx, cluster, node.NodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Drain failed (continuing anyway): node=%s error=%v", node.NodeName, err))
-		// Don't fail on drain errors - the node will reboot anyway
-	}
 
 	// Create Talos client
 	client, err := e.talosClientService.CreateTalosClient(ctx, false, clientConfig, []string{node.IP})

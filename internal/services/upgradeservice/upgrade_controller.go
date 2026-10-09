@@ -13,6 +13,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/helpers/clusterlog"
 	"github.com/vitistack/talos-operator/internal/helpers/nodehelper"
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
+	"github.com/vitistack/talos-operator/internal/services/drainservice"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
@@ -48,7 +49,11 @@ func NewUpgradeController(
 	secretAdapter := &secretServiceAdapter{secretService}
 
 	stateManager := NewUpgradeStateManager(secretAdapter, secretAdapter)
-	readinessChecker := NewNodeReadinessChecker(c, secretAdapter)
+	var drainConditions drainservice.ConditionSetter
+	if statusManager != nil {
+		drainConditions = statusManager
+	}
+	readinessChecker := NewNodeReadinessChecker(c, secretAdapter, drainConditions)
 	rollingUpgrade := NewRollingUpgradeExecutor(stateManager, readinessChecker, talosClientService, upgradeService)
 
 	return &UpgradeController{
@@ -66,6 +71,19 @@ func NewUpgradeController(
 // secretServiceAdapter adapts secretservice.SecretService to the SecretGetter and SecretUpdater interfaces
 type secretServiceAdapter struct {
 	*secretservice.SecretService
+}
+
+// HasUpgradePlan reports whether an upgrade plan is stored for the cluster, in
+// any phase. A plan owns the nodes it cordoned until it completes or is reset:
+// a failed plan can still be resumed, so its node stays cordoned meanwhile.
+// This, not the cluster phase, is authoritative: the phase is re-derived from
+// the secret flags on every reconcile and can read Ready mid-upgrade.
+func (c *UpgradeController) HasUpgradePlan(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (bool, error) {
+	state, err := c.stateManager.GetUpgradeState(ctx, cluster)
+	if err != nil {
+		return false, err
+	}
+	return state != nil, nil
 }
 
 // HandleUpgrade is the main entry point for handling upgrades during reconciliation.

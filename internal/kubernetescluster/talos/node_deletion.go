@@ -2,17 +2,18 @@ package talos
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"sort"
-	"time"
 
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/services/drainservice"
 	"github.com/vitistack/talos-operator/internal/services/etcdservice"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	corev1 "k8s.io/api/core/v1"
-	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -237,8 +238,25 @@ func (t *TalosManager) DeleteControlPlaneNode(
 	nodeName string) (*NodeDeletionResult, error) {
 	result := &NodeDeletionResult{NodeName: nodeName}
 
+	// Refuse unsafe deletions (last control plane, unknown node) before
+	// touching anything.
+	controlPlanes, targetIP, err := t.validateControlPlaneDeletion(ctx, cluster, nodeName)
+	if err != nil {
+		result.Error = err
+		return result, err
+	}
+
+	// Drain before the costlier preparation below (loading Talos artifacts,
+	// probing control planes for a healthy etcd peer): while a PDB holds the
+	// drain, this returns on every pass, and the node must be empty before it
+	// leaves etcd anyway.
+	if err := t.drainWorkloadNode(ctx, cluster, nodeName); errors.Is(err, ErrDrainIncomplete) {
+		result.Error = err
+		return result, err
+	}
+
 	// Prepare deletion context
-	deleteCtx, err := t.prepareControlPlaneDeletion(ctx, cluster, nodeName)
+	deleteCtx, err := t.prepareControlPlaneDeletion(ctx, cluster, nodeName, controlPlanes, targetIP)
 	if err != nil {
 		result.Error = err
 		return result, err
@@ -261,28 +279,50 @@ type controlPlaneDeletionContext struct {
 	clientConfig *clientconfig.Config
 }
 
-// prepareControlPlaneDeletion prepares the context needed for control plane deletion
-func (t *TalosManager) prepareControlPlaneDeletion(
+// validateControlPlaneDeletion checks that nodeName is a known control plane
+// with an IP and not the last one, and returns the control planes and its IP.
+func (t *TalosManager) validateControlPlaneDeletion(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
-	nodeName string) (*controlPlaneDeletionContext, error) {
+	nodeName string) ([]*vitistackv1alpha1.Machine, string, error) {
 	machines, err := t.machineService.GetClusterMachines(ctx, cluster)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get cluster machines: %w", err)
+		return nil, "", fmt.Errorf("failed to get cluster machines: %w", err)
 	}
 
 	controlPlanes := t.machineService.FilterMachinesByRole(machines, controlPlaneRole)
 
 	if len(controlPlanes) <= 1 {
-		return nil, fmt.Errorf("cannot delete control plane: only %d control plane(s) remaining, minimum 1 required", len(controlPlanes))
+		return nil, "", fmt.Errorf("cannot delete control plane: only %d control plane(s) remaining, minimum 1 required", len(controlPlanes))
 	}
 
 	// Find the target machine and its IP
 	targetIP := t.findTargetMachineIP(controlPlanes, nodeName)
 	if targetIP == "" {
-		return nil, fmt.Errorf("control plane node %s not found or has no IP address", nodeName)
+		return nil, "", fmt.Errorf("control plane node %s not found or has no IP address", nodeName)
 	}
+	return controlPlanes, targetIP, nil
+}
 
+// drainWorkloadNode makes one scale-down drain pass over nodeName. An error
+// wrapping ErrDrainIncomplete means the node is not drained yet (or the
+// workload cluster cannot be reached); a plain error means there is nothing to
+// drain through, and the deletion steps handle it as before.
+func (t *TalosManager) drainWorkloadNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	clientset, err := t.drainClient(ctx, cluster, nodeName, drainservice.PurposeScaleDown)
+	if err != nil {
+		return err
+	}
+	return t.drainNode(ctx, clientset, cluster, nodeName, drainservice.PurposeScaleDown)
+}
+
+// prepareControlPlaneDeletion prepares the context needed for control plane deletion
+func (t *TalosManager) prepareControlPlaneDeletion(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	nodeName string,
+	controlPlanes []*vitistackv1alpha1.Machine,
+	targetIP string) (*controlPlaneDeletionContext, error) {
 	// Load Talos artifacts
 	clientConfig, _, err := t.loadTalosArtifacts(ctx, cluster)
 	if err != nil || clientConfig == nil {
@@ -333,9 +373,9 @@ func (t *TalosManager) executeControlPlaneDeletion(
 	nodeName string,
 	deleteCtx *controlPlaneDeletionContext,
 	result *NodeDeletionResult) error {
-	// Step 1: Cordon, drain, and delete the Kubernetes node from the workload cluster
-	// This must happen FIRST to ensure pods are safely evacuated before any cluster changes
-	if err := t.deleteK8sNodeFromWorkloadCluster(ctx, cluster, nodeName); err != nil {
+	// Step 1: Delete the Kubernetes node from the workload cluster. It was
+	// drained in DeleteControlPlaneNode, before the etcd preparation.
+	if err := t.deleteWorkloadNode(ctx, cluster, nodeName); err != nil {
 		vlog.Warn(fmt.Sprintf("Failed to delete Kubernetes node from workload cluster %s/%s: %v", clusterLogTag(cluster), nodeName, err))
 		// Continue - the node might not exist in K8s yet
 	} else {
@@ -414,6 +454,13 @@ func (t *TalosManager) DeleteWorkerNode(
 	// Step 1: Cordon, drain, and delete the Kubernetes node from the workload cluster
 	// This must happen FIRST to ensure pods are safely evacuated before the machine is deleted
 	if err := t.deleteK8sNodeFromWorkloadCluster(ctx, cluster, nodeName); err != nil {
+		if errors.Is(err, ErrDrainIncomplete) {
+			// The node is not drained yet (pods still being evicted, or held
+			// by a PDB): stop here and retry on a later reconcile instead of
+			// removing the node anyway.
+			result.Error = err
+			return result, err
+		}
 		vlog.Warn(fmt.Sprintf("Failed to delete Kubernetes node from workload cluster %s/%s: %v", clusterLogTag(cluster), nodeName, err))
 		// Continue - the node might not exist in K8s yet
 	} else {
@@ -432,30 +479,53 @@ func (t *TalosManager) DeleteWorkerNode(
 	return result, nil
 }
 
-// deleteK8sNodeFromWorkloadCluster cordons, drains, and deletes a Kubernetes node from the workload cluster's API.
+// ErrDrainIncomplete marks a node operation held because the node is not
+// drained yet: pods are still being evicted, or a PodDisruptionBudget keeps
+// rejecting their eviction. The NodeDrain condition on the KubernetesCluster
+// names the pods. drainservice.RetryAfter(err) says when to try again.
+var ErrDrainIncomplete = drainservice.ErrIncomplete
+
+// drainOptionsFor returns the drain options for a cluster; a variable so tests
+// can set the clock and timeout.
+var drainOptionsFor = drainservice.OptionsForCluster
+
+// deleteK8sNodeFromWorkloadCluster drains a node and deletes it from the workload cluster's API.
+// The drain is non-blocking: until it completes, an error wrapping ErrDrainIncomplete is
+// returned, the node stays cordoned, and callers must not go on to remove the machine.
+// A plain error means there is nothing to drain through (no kubeconfig yet, or force-drain
+// let an unreachable cluster pass) and the caller may continue.
 func (t *TalosManager) deleteK8sNodeFromWorkloadCluster(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
-	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
+	clientset, err := t.drainClient(ctx, cluster, nodeName, drainservice.PurposeScaleDown)
+	if err != nil {
+		return err
+	}
+	return t.drainAndDeleteNode(ctx, clientset, cluster, nodeName)
+}
+
+func (t *TalosManager) drainAndDeleteNode(ctx context.Context, clientset kubernetes.Interface, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	// Step 1: Cordon and drain through the Eviction API, honouring PDBs
+	if err := t.drainNode(ctx, clientset, cluster, nodeName, drainservice.PurposeScaleDown); err != nil {
+		return err
+	}
+
+	// Step 2: Delete the node from the workload cluster
+	return deleteNodeObject(ctx, clientset, cluster, nodeName)
+}
+
+// deleteWorkloadNode deletes an already drained node from the workload cluster.
+func (t *TalosManager) deleteWorkloadNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	clientset, err := t.workloadClientset(ctx, cluster)
 	if err != nil {
 		return err
 	}
 	if clientset == nil {
 		return fmt.Errorf("kubeconfig not available for cluster %s", cluster.Name)
 	}
+	return deleteNodeObject(ctx, clientset, cluster, nodeName)
+}
 
-	// Step 1: Cordon the node (mark as unschedulable)
-	if err := t.cordonNode(ctx, clientset, nodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to cordon node %s/%s: %v", clusterLogTag(cluster), nodeName, err))
-		// Continue even if cordon fails - node might not exist yet in K8s
-	}
-
-	// Step 2: Drain the node (evict pods)
-	if err := t.drainNode(ctx, clientset, nodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Failed to drain node %s/%s: %v", clusterLogTag(cluster), nodeName, err))
-		// Continue with deletion even if drain fails
-	}
-
-	// Step 3: Delete the node from the workload cluster
-	err = clientset.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+func deleteNodeObject(ctx context.Context, clientset kubernetes.Interface, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	err := clientset.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			vlog.Info(fmt.Sprintf("Kubernetes node %s already deleted from workload cluster %s", nodeName, clusterLogTag(cluster)))
@@ -468,61 +538,94 @@ func (t *TalosManager) deleteK8sNodeFromWorkloadCluster(ctx context.Context, clu
 	return nil
 }
 
+// drainClient returns a workload-cluster client for draining nodeName. When
+// the cluster cannot be reached it reports NodeDrain=Failed and returns an
+// error wrapping ErrDrainIncomplete, so the operation is held rather than
+// carried out without a drain (unless force-drain is set). A plain error means
+// there is nothing to drain through: the cluster has no kubeconfig yet (so no
+// workloads), or force-drain let an unreachable cluster pass.
+func (t *TalosManager) drainClient(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string, purpose drainservice.Purpose) (kubernetes.Interface, error) {
+	clientset, err := t.workloadClientset(ctx, cluster)
+	if err != nil {
+		opts := drainOptionsFor(cluster, purpose)
+		if holdErr := drainservice.ReportUnavailable(ctx, t.drainConditions(), cluster, nodeName, opts, err); holdErr != nil {
+			return nil, holdErr
+		}
+		return nil, fmt.Errorf("workload cluster unreachable, continuing without drain because of force-drain: %w", err)
+	}
+	if clientset == nil {
+		return nil, fmt.Errorf("kubeconfig not available for cluster %s", cluster.Name)
+	}
+	return clientset, nil
+}
+
 // CordonAndDrainNode cordons and drains a node in preparation for maintenance (like upgrades).
-// It does NOT delete the node from Kubernetes.
+// It does NOT delete the node from Kubernetes. It makes one non-blocking drain pass: an error
+// wrapping ErrDrainIncomplete means the node is not drained yet and the maintenance must wait.
 func (t *TalosManager) CordonAndDrainNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
-	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
+	clientset, err := t.drainClient(ctx, cluster, nodeName, drainservice.PurposeUpgrade)
+	if err != nil {
+		return err
+	}
+	return t.drainNode(ctx, clientset, cluster, nodeName, drainservice.PurposeUpgrade)
+}
+
+// drainNode makes one pass of the shared PDB-respecting drain and reports it
+// as the NodeDrain condition on the cluster.
+func (t *TalosManager) drainNode(ctx context.Context, clientset kubernetes.Interface, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string, purpose drainservice.Purpose) error {
+	return drainservice.Run(ctx, clientset, t.drainConditions(), cluster, nodeName, drainOptionsFor(cluster, purpose))
+}
+
+// drainConditions returns the status manager as a condition setter, or a nil
+// interface when there is none.
+func (t *TalosManager) drainConditions() drainservice.ConditionSetter {
+	if t.statusManager == nil {
+		return nil
+	}
+	return t.statusManager
+}
+
+// UncordonNode marks a node as schedulable again after maintenance and clears its drain markers.
+func (t *TalosManager) UncordonNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
+	clientset, err := t.workloadClientset(ctx, cluster)
 	if err != nil {
 		return fmt.Errorf("failed to get workload cluster client: %w", err)
 	}
 	if clientset == nil {
 		return fmt.Errorf("kubeconfig not available for cluster %s", cluster.Name)
 	}
-
-	// Step 1: Cordon the node (mark as unschedulable)
-	if err := t.cordonNode(ctx, clientset, nodeName); err != nil {
-		return fmt.Errorf("failed to cordon node %s: %w", nodeName, err)
+	if err := drainservice.Uncordon(ctx, clientset, nodeName); err != nil {
+		return err
 	}
-
-	// Step 2: Drain the node (evict pods)
-	if err := t.drainNode(ctx, clientset, nodeName); err != nil {
-		// Log but don't fail - drain timeout shouldn't block upgrade
-		vlog.Warn(fmt.Sprintf("Drain completed with warnings for node %s %s: %v", nodeName, clusterLogTag(cluster), err))
-	}
-
+	vlog.Info(fmt.Sprintf("Uncordoned node: %s %s", nodeName, clusterLogTag(cluster)))
 	return nil
 }
 
-// UncordonNode marks a node as schedulable again after maintenance.
-func (t *TalosManager) UncordonNode(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName string) error {
-	clientset, err := t.getWorkloadClusterClient(ctx, cluster)
-	if err != nil {
-		return fmt.Errorf("failed to get workload cluster client: %w", err)
-	}
-	if clientset == nil {
-		return fmt.Errorf("kubeconfig not available for cluster %s", cluster.Name)
-	}
-
-	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // Node doesn't exist
-		}
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
-	}
-
-	if !node.Spec.Unschedulable {
-		vlog.Debug(fmt.Sprintf("Node %s %s is already schedulable", nodeName, clusterLogTag(cluster)))
+// ReleaseAbandonedDrains uncordons workload nodes still cordoned by a drain
+// for one of purposes, then reports NodeDrain=True/Idle once every purpose has
+// been released. The caller passes only the purposes no operation is using
+// (no scale-down pending, no upgrade plan), so such a node was left by an
+// operation that was called off: a scale-down reverted, an upgrade reset.
+// The node label is the source of truth; the lookup is one label-filtered
+// Node list, next to the full Node list a settled cluster makes every pass.
+func (t *TalosManager) ReleaseAbandonedDrains(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, purposes ...drainservice.Purpose) error {
+	if len(purposes) == 0 {
 		return nil
 	}
-
-	node.Spec.Unschedulable = false
-	_, err = clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to uncordon node %s: %w", nodeName, err)
+	clientset, err := t.workloadClientset(ctx, cluster)
+	if err != nil || clientset == nil {
+		return err
 	}
+	return t.releaseAbandonedDrains(ctx, clientset, cluster, purposes...)
+}
 
-	vlog.Info(fmt.Sprintf("Uncordoned node: %s %s", nodeName, clusterLogTag(cluster)))
+func (t *TalosManager) releaseAbandonedDrains(ctx context.Context, clientset kubernetes.Interface, cluster *vitistackv1alpha1.KubernetesCluster, purposes ...drainservice.Purpose) error {
+	if _, err := drainservice.ReleaseAbandoned(ctx, clientset, purposes...); err != nil {
+		return err
+	}
+	if slices.Contains(purposes, drainservice.PurposeScaleDown) && slices.Contains(purposes, drainservice.PurposeUpgrade) {
+		drainservice.ReportIdle(ctx, t.drainConditions(), cluster)
+	}
 	return nil
 }
 
@@ -548,194 +651,17 @@ func (t *TalosManager) IsNodeSchedulable(ctx context.Context, cluster *vitistack
 	return !node.Spec.Unschedulable, nil
 }
 
-// cordonNode marks a node as unschedulable
-func (t *TalosManager) cordonNode(ctx context.Context, clientset *kubernetes.Clientset, nodeName string) error {
-	node, err := clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // Node doesn't exist, nothing to cordon
-		}
-		return fmt.Errorf("failed to get node %s: %w", nodeName, err)
+// workloadClientset returns a client for the workload cluster used by drains,
+// or a nil interface when no kubeconfig exists yet.
+func (t *TalosManager) workloadClientset(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) (kubernetes.Interface, error) {
+	if t.workloadClient != nil {
+		return t.workloadClient(ctx, cluster)
 	}
-
-	if node.Spec.Unschedulable {
-		vlog.Debug(fmt.Sprintf("Node %s is already cordoned", nodeName))
-		return nil
+	cs, err := t.getWorkloadClusterClient(ctx, cluster)
+	if err != nil || cs == nil {
+		return nil, err
 	}
-
-	node.Spec.Unschedulable = true
-	_, err = clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to cordon node %s: %w", nodeName, err)
-	}
-
-	vlog.Info(fmt.Sprintf("Cordoned node: %s", nodeName))
-	return nil
-}
-
-// drainNode evicts all pods from a node (except DaemonSet pods and mirror pods)
-func (t *TalosManager) drainNode(ctx context.Context, clientset *kubernetes.Clientset, nodeName string) error {
-	// List all pods on the node
-	podList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
-		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to list pods on node %s: %w", nodeName, err)
-	}
-
-	podsToEvict := make([]*corev1.Pod, 0, len(podList.Items))
-	for i := range podList.Items {
-		pod := &podList.Items[i]
-		// Skip DaemonSet pods
-		if isDaemonSetPod(pod) {
-			vlog.Debug(fmt.Sprintf("Skipping DaemonSet pod %s/%s during drain", pod.Namespace, pod.Name))
-			continue
-		}
-
-		// Skip mirror pods (static pods)
-		if isMirrorPod(pod) {
-			vlog.Debug(fmt.Sprintf("Skipping mirror pod %s/%s during drain", pod.Namespace, pod.Name))
-			continue
-		}
-
-		// Skip pods that are already terminating
-		if pod.DeletionTimestamp != nil {
-			continue
-		}
-
-		podsToEvict = append(podsToEvict, pod)
-	}
-
-	if len(podsToEvict) == 0 {
-		vlog.Info(fmt.Sprintf("No pods to evict from node %s", nodeName))
-		return nil
-	}
-
-	vlog.Info(fmt.Sprintf("Draining node %s: evicting %d pods", nodeName, len(podsToEvict)))
-
-	// Evict pods
-	for _, pod := range podsToEvict {
-		if err := t.evictPod(ctx, clientset, pod); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to evict pod %s/%s: %v", pod.Namespace, pod.Name, err))
-			// Continue evicting other pods
-		}
-	}
-
-	// Wait for pods to be terminated
-	if err := t.waitForPodsToTerminate(ctx, clientset, nodeName, podsToEvict); err != nil {
-		vlog.Warn(fmt.Sprintf("Timeout waiting for pods to terminate on node %s: %v", nodeName, err))
-		// Continue with deletion even if some pods haven't terminated
-	}
-
-	return nil
-}
-
-// waitForPodsToTerminate waits for the evicted pods to be fully terminated
-func (t *TalosManager) waitForPodsToTerminate(ctx context.Context, clientset *kubernetes.Clientset, nodeName string, podsToEvict []*corev1.Pod) error {
-	timeout := 2 * time.Minute
-	pollInterval := 5 * time.Second
-	deadline := time.Now().Add(timeout)
-
-	// Build a set of pod keys to track
-	pendingPods := make(map[string]bool)
-	for _, pod := range podsToEvict {
-		pendingPods[fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)] = true
-	}
-
-	vlog.Info(fmt.Sprintf("Waiting for %d pods to terminate on node %s (timeout: %v)", len(pendingPods), nodeName, timeout))
-
-	for time.Now().Before(deadline) {
-		// Check if context is cancelled
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// List remaining pods on the node
-		podList, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
-			FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
-		})
-		if err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to list pods during drain wait: %v", err))
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		// Check which pods from our eviction list are still present
-		stillRunning := 0
-		for i := range podList.Items {
-			pod := &podList.Items[i]
-			podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-			if pendingPods[podKey] {
-				// Skip pods that are terminating but allow some grace
-				if pod.DeletionTimestamp != nil {
-					continue
-				}
-				// Skip DaemonSet and mirror pods (we didn't evict them)
-				if isDaemonSetPod(pod) || isMirrorPod(pod) {
-					continue
-				}
-				stillRunning++
-			}
-		}
-
-		if stillRunning == 0 {
-			vlog.Info(fmt.Sprintf("All evicted pods have terminated on node %s", nodeName))
-			return nil
-		}
-
-		vlog.Debug(fmt.Sprintf("Waiting for %d pods to terminate on node %s", stillRunning, nodeName))
-		time.Sleep(pollInterval)
-	}
-
-	return fmt.Errorf("timeout waiting for pods to terminate on node %s", nodeName)
-}
-
-// evictPod evicts a single pod using the Eviction API
-func (t *TalosManager) evictPod(ctx context.Context, clientset *kubernetes.Clientset, pod *corev1.Pod) error {
-	eviction := &policyv1.Eviction{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pod.Name,
-			Namespace: pod.Namespace,
-		},
-	}
-
-	err := clientset.CoreV1().Pods(pod.Namespace).EvictV1(ctx, eviction)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // Pod already gone
-		}
-		if apierrors.IsTooManyRequests(err) {
-			// PodDisruptionBudget is preventing eviction - log and continue
-			vlog.Warn(fmt.Sprintf("PDB blocking eviction of pod %s/%s, deleting directly", pod.Namespace, pod.Name))
-			// Fallback to direct delete with grace period
-			gracePeriod := int64(30)
-			return clientset.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
-				GracePeriodSeconds: &gracePeriod,
-			})
-		}
-		return err
-	}
-
-	vlog.Debug(fmt.Sprintf("Evicted pod %s/%s", pod.Namespace, pod.Name))
-	return nil
-}
-
-// isDaemonSetPod checks if a pod is managed by a DaemonSet
-func isDaemonSetPod(pod *corev1.Pod) bool {
-	for _, ownerRef := range pod.OwnerReferences {
-		if ownerRef.Kind == "DaemonSet" {
-			return true
-		}
-	}
-	return false
-}
-
-// isMirrorPod checks if a pod is a mirror pod (static pod)
-func isMirrorPod(pod *corev1.Pod) bool {
-	_, exists := pod.Annotations["kubernetes.io/config.mirror"]
-	return exists
+	return cs, nil
 }
 
 // getWorkloadClusterClient creates a Kubernetes client for the workload cluster
