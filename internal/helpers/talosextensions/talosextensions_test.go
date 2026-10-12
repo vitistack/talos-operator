@@ -42,7 +42,7 @@ func TestMissing(t *testing.T) {
 			want:      nil,
 		},
 		{
-			// The v1.13.10 schematic added nfs-utils; clusters pinned to the
+			// The v1.13.11 schematic added nfs-utils; clusters pinned to the
 			// previous schematic lack it.
 			name:      "extension added to the schematic later",
 			installed: []string{"iscsi-tools", "qemu-guest-agent", "trident-iscsi-tools", "util-linux-tools", "schematic"},

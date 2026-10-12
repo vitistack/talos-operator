@@ -110,7 +110,7 @@ func (s *TalosClientService) ApplyConfigToNode(
 	// - Applies it (which triggers install and reboot)
 	//
 	// See: https://github.com/siderolabs/talos/blob/main/internal/app/maintenance/server.go
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
 	resp, err := nodeClient.ApplyConfiguration(nodeCtx, &machineapi.ApplyConfigurationRequest{
 		Data:   configData,
 		Mode:   machineapi.ApplyConfigurationRequest_AUTO,
@@ -227,7 +227,7 @@ func (s *TalosClientService) IsNodeInMaintenanceMode(nodeIP string) bool {
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
 	_, err = tClient.Version(nodeCtx)
 	// A successful insecure (no-cert) call means the node is still in maintenance
 	// mode; a secured node would have rejected it with a TLS certificate error.
@@ -337,7 +337,7 @@ func (s *TalosClientService) BootstrapTalosControlPlane(
 	ctx context.Context,
 	tClient *talosclient.Client,
 	controlPlaneIP string) error {
-	ctx = talosclient.WithNodes(ctx, controlPlaneIP)
+	ctx = talosclient.WithNode(ctx, controlPlaneIP)
 	if err := tClient.Bootstrap(ctx, &machineapi.BootstrapRequest{}); err != nil {
 		return fmt.Errorf("talos bootstrap failed: %w", err)
 	}
@@ -399,7 +399,7 @@ func (s *TalosClientService) GetKubeconfigWithRetry(
 		}
 
 		// Use endpoint IP for node context as well when using VIP/load balancer
-		ctxWithNode := talosclient.WithNodes(ctx, nodesIp)
+		ctxWithNode := talosclient.WithNode(ctx, nodesIp)
 
 		kubeconfig, err := tClient.Kubeconfig(ctxWithNode)
 		if err == nil && len(kubeconfig) > 0 {
@@ -599,7 +599,7 @@ func (s *TalosClientService) checkNodeReady(
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
 
 	// Query NodeStatus resource from the k8s namespace
 	// safe.StateListAll uses the default namespace from the resource definition
@@ -690,7 +690,7 @@ func (s *TalosClientService) upgradeNodeLegacy(
 	nodeIP string,
 	installerImage string,
 ) error {
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
 
 	// Parameters: image, stage (false = immediate), force (false = normal).
 	//nolint:staticcheck // SA1019: legacy API retained for nodes running Talos < v1.13
@@ -923,10 +923,7 @@ func (s *TalosClientService) upgradeNodeKubernetes(
 	var configAlreadyCurrent bool
 	// Inspect current config without modifying it
 	_, _ = provider.PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
-		if cfg.MachineConfig != nil && cfg.MachineConfig.MachineKubelet != nil &&
-			cfg.MachineConfig.MachineKubelet.KubeletImage == expectedKubeletImage {
-			configAlreadyCurrent = true
-		}
+		configAlreadyCurrent = v1alpha1KubeletImage(cfg) == expectedKubeletImage
 		return nil
 	})
 	if configAlreadyCurrent {
@@ -986,16 +983,33 @@ func (s *TalosClientService) NodeHasKubeletImage(
 
 	var matches bool
 	_, _ = mc.Provider().PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
-		if cfg.MachineConfig != nil && cfg.MachineConfig.MachineKubelet != nil &&
-			cfg.MachineConfig.MachineKubelet.KubeletImage == expectedImage {
-			matches = true
-		}
+		matches = v1alpha1KubeletImage(cfg) == expectedImage
 		return nil
 	})
 	return matches
 }
 
-// patchKubernetesImages patches the config with Kubernetes component images
+// v1alpha1KubeletImage returns machine.kubelet.image from a v1alpha1 config, or "".
+//
+// The fleet runs Talos 1.13, whose machine config carries the kubelet image in the
+// v1alpha1 document. The 1.14 multi-document replacement (KubeletConfig) is not
+// understood by 1.13 nodes, so the deprecated v1alpha1 field is used on purpose.
+//
+//nolint:staticcheck // SA1019: v1alpha1 fields required for Talos 1.13 nodes, see above.
+func v1alpha1KubeletImage(cfg *v1alpha1config.Config) string {
+	if cfg.MachineConfig == nil || cfg.MachineConfig.MachineKubelet == nil {
+		return ""
+	}
+	return cfg.MachineConfig.MachineKubelet.KubeletImage
+}
+
+// patchKubernetesImages patches the config with Kubernetes component images.
+//
+// It writes the v1alpha1 machine.kubelet / cluster.* image fields rather than the
+// Talos 1.14 multi-document configs (KubeletConfig, KubeAPIServerConfig, ...) because
+// the fleet runs Talos 1.13, which does not understand those documents.
+//
+//nolint:staticcheck // SA1019: v1alpha1 fields required for Talos 1.13 nodes, see above.
 func (s *TalosClientService) patchKubernetesImages(cfg *v1alpha1config.Config, targetVersion string, isControlPlane bool) error {
 	// Ensure machine config exists
 	if cfg.MachineConfig == nil {
@@ -1050,7 +1064,7 @@ func (s *TalosClientService) GetTalosVersion(
 	tClient *talosclient.Client,
 	nodeIP string,
 ) (string, error) {
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
 
 	resp, err := tClient.Version(nodeCtx)
 	if err != nil {
@@ -1073,7 +1087,7 @@ func (s *TalosClientService) GetKubernetesVersion(
 	tClient *talosclient.Client,
 	nodeIP string,
 ) (string, error) {
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
 
 	// The Version API returns both Talos and Kubernetes versions
 	resp, err := tClient.Version(nodeCtx)
@@ -1096,7 +1110,7 @@ func (s *TalosClientService) IsEtcdHealthy(
 	tClient *talosclient.Client,
 	nodeIP string,
 ) (bool, error) {
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	nodeCtx := talosclient.WithNode(ctx, nodeIP)
 
 	// Use the ServiceInfo API to check etcd health
 	services, err := tClient.ServiceInfo(nodeCtx, "etcd")
@@ -1170,6 +1184,9 @@ func (s *TalosClientService) GetMachineInstallImage(
 
 	var image string
 	_, _ = mc.Provider().PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
+		// machine.install lives in the v1alpha1 document on Talos 1.13 nodes; the 1.14
+		// UnattendedInstall document does not exist there.
+		//nolint:staticcheck // SA1019: v1alpha1 field required for Talos 1.13 nodes.
 		if cfg.MachineConfig != nil && cfg.MachineConfig.MachineInstall != nil {
 			image = cfg.MachineConfig.MachineInstall.InstallImage
 		}

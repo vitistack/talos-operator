@@ -168,7 +168,7 @@ installer in the secret's `install_image`; upgrades keep the pinned schematic
 and change only the version tag.
 
 When the operator's configured image (`TALOS_VM_INSTALL_IMAGE_*`) moves to a
-schematic with more extensions (the schematic shipped with v1.13.10 added
+schematic with more extensions (the schematic shipped with v1.13.11 added
 `siderolabs/nfs-utils`), clusters pinned earlier would keep the old set
 forever. The operator therefore moves the pin to the configured schematic when
 a node reports a `TALOS_REQUIRED_EXTENSIONS` entry missing. It checks this on

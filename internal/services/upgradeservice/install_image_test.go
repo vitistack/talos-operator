@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	// Schematic pinned on most clusters before v1.13.10: four extensions.
+	// Schematic pinned on most clusters before v1.13.11: four extensions.
 	oldSchematicRef = testFactoryRef
-	// Schematic the operator ships since v1.13.10: the same four plus nfs-utils.
+	// Schematic the operator ships since v1.13.11: the same four plus nfs-utils.
 	newSchematicRef = "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e"
 
 	requiredExtensions = "siderolabs/iscsi-tools,siderolabs/qemu-guest-agent,siderolabs/trident-iscsi-tools,siderolabs/util-linux-tools,siderolabs/nfs-utils"
@@ -43,8 +43,8 @@ func setViper(t *testing.T, key, value string) {
 func operatorShipsNewSchematic(t *testing.T) {
 	t.Helper()
 	setViper(t, consts.TALOS_REQUIRED_EXTENSIONS, requiredExtensions)
-	setViper(t, consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, newSchematicRef+":v1.13.10")
-	setViper(t, consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, newSchematicRef+":v1.13.10")
+	setViper(t, consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, newSchematicRef+":v1.13.11")
+	setViper(t, consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, newSchematicRef+":v1.13.11")
 }
 
 func clusterMachine(name, role string, provider vitistackv1alpha1.MachineProviderType) *vitistackv1alpha1.Machine {
@@ -92,19 +92,19 @@ func newInstallImageFixture(t *testing.T, pinned string, provider vitistackv1alp
 	return f, stub
 }
 
-// d-amk-003 was upgraded to v1.13.10 on the four-extension schematic it was
+// d-amk-003 was upgraded to v1.13.11 on the four-extension schematic it was
 // pinned to, although the operator had moved to a schematic that also carries
 // nfs-utils. The pin must follow the required extension set.
 func TestReconcileInstallImageSchematic_NodesMissingRequiredExtensionMovesToConfiguredSchematic(t *testing.T) {
 	operatorShipsNewSchematic(t)
-	f, _ := newInstallImageFixture(t, oldSchematicRef+":v1.13.10", vitistackv1alpha1.MachineProviderTypeKubevirt, oldSchematicExtensions)
+	f, _ := newInstallImageFixture(t, oldSchematicRef+":v1.13.11", vitistackv1alpha1.MachineProviderTypeKubevirt, oldSchematicExtensions)
 
 	got, err := f.service.ReconcileInstallImageSchematic(context.Background(), f.cluster(t), nil)
 	if err != nil {
 		t.Fatalf("ReconcileInstallImageSchematic: %v", err)
 	}
 
-	want := newSchematicRef + ":v1.13.10"
+	want := newSchematicRef + ":v1.13.11"
 	if got != want {
 		t.Errorf("returned %q, want %q", got, want)
 	}
@@ -142,7 +142,7 @@ func TestReconcileInstallImageSchematic_LeavesPinAlone(t *testing.T) {
 			// A deliberately different schematic that already carries every
 			// required extension (plus its own) must not lose its extras.
 			name:      "custom schematic with every required extension",
-			pinned:    customRef + ":v1.13.10",
+			pinned:    customRef + ":v1.13.11",
 			required:  requiredExtensions,
 			provider:  vitistackv1alpha1.MachineProviderTypeKubevirt,
 			installed: append([]string{"nvidia-container-toolkit"}, newSchematicExtensions...),
@@ -152,7 +152,7 @@ func TestReconcileInstallImageSchematic_LeavesPinAlone(t *testing.T) {
 			// Extras beyond the required list mean the schematic was built
 			// for this cluster; replacing it would drop them.
 			name:      "custom schematic with extra extensions",
-			pinned:    customRef + ":v1.13.10",
+			pinned:    customRef + ":v1.13.11",
 			required:  requiredExtensions,
 			provider:  vitistackv1alpha1.MachineProviderTypeKubevirt,
 			installed: append([]string{"nvidia-container-toolkit"}, oldSchematicExtensions...),
@@ -170,7 +170,7 @@ func TestReconcileInstallImageSchematic_LeavesPinAlone(t *testing.T) {
 		},
 		{
 			name:      "already on the configured schematic",
-			pinned:    newSchematicRef + ":v1.13.10",
+			pinned:    newSchematicRef + ":v1.13.11",
 			required:  requiredExtensions,
 			provider:  vitistackv1alpha1.MachineProviderTypeKubevirt,
 			installed: oldSchematicExtensions,
@@ -178,7 +178,7 @@ func TestReconcileInstallImageSchematic_LeavesPinAlone(t *testing.T) {
 		},
 		{
 			name:      "no required extensions configured",
-			pinned:    oldSchematicRef + ":v1.13.10",
+			pinned:    oldSchematicRef + ":v1.13.11",
 			required:  "",
 			provider:  vitistackv1alpha1.MachineProviderTypeKubevirt,
 			installed: oldSchematicExtensions,
@@ -187,7 +187,7 @@ func TestReconcileInstallImageSchematic_LeavesPinAlone(t *testing.T) {
 		{
 			// Without evidence from a node the pin is not changed.
 			name:      "no node reachable",
-			pinned:    oldSchematicRef + ":v1.13.10",
+			pinned:    oldSchematicRef + ":v1.13.11",
 			required:  requiredExtensions,
 			provider:  vitistackv1alpha1.MachineProviderTypeKubevirt,
 			installed: nil,
@@ -197,7 +197,7 @@ func TestReconcileInstallImageSchematic_LeavesPinAlone(t *testing.T) {
 			// The configured images are VM (nocloud) installers; a bare-metal
 			// cluster's pin is not theirs to replace.
 			name:      "not a virtual machine cluster",
-			pinned:    oldSchematicRef + ":v1.13.10",
+			pinned:    oldSchematicRef + ":v1.13.11",
 			required:  requiredExtensions,
 			provider:  "baremetal",
 			installed: oldSchematicExtensions,
@@ -258,14 +258,14 @@ func TestReconcileInstallImageSchematic_LeavesPinAloneDuringUpgrade(t *testing.T
 func TestReconcileInstallImageSchematic_KeepsRegistryAndPlatform(t *testing.T) {
 	operatorShipsNewSchematic(t)
 	metalRef := "factory.talos.dev/metal-installer/b0f2a8b575460a3dcb1234cc081c73c88e795aaef36eda9b88a6f4dddbd49365"
-	f, _ := newInstallImageFixture(t, metalRef+":v1.13.10", vitistackv1alpha1.MachineProviderTypeKubevirt, oldSchematicExtensions)
+	f, _ := newInstallImageFixture(t, metalRef+":v1.13.11", vitistackv1alpha1.MachineProviderTypeKubevirt, oldSchematicExtensions)
 
 	got, err := f.service.ReconcileInstallImageSchematic(context.Background(), f.cluster(t), nil)
 	if err != nil {
 		t.Fatalf("ReconcileInstallImageSchematic: %v", err)
 	}
 
-	want := "factory.talos.dev/metal-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.10"
+	want := "factory.talos.dev/metal-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.11"
 	if got != want {
 		t.Errorf("returned %q, want %q", got, want)
 	}
@@ -278,7 +278,7 @@ func TestReconcileInstallImageSchematic_KeepsRegistryAndPlatform(t *testing.T) {
 // every drift pass (every 90s, for the life of the cluster).
 func TestReconcileInstallImageSchematic_DoesNotReprobeAnUnchangedPin(t *testing.T) {
 	operatorShipsNewSchematic(t)
-	pinned := "factory.talos.dev/nocloud-installer/0000aaaa:v1.13.10"
+	pinned := "factory.talos.dev/nocloud-installer/0000aaaa:v1.13.11"
 	f, stub := newInstallImageFixture(t, pinned, vitistackv1alpha1.MachineProviderTypeKubevirt,
 		append([]string{"nvidia-container-toolkit"}, newSchematicExtensions...))
 
@@ -302,12 +302,12 @@ func TestBuildTalosInstallerImage_UsesConfiguredSchematicWhenNodesLackExtensions
 	operatorShipsNewSchematic(t)
 	f, _ := newInstallImageFixture(t, oldSchematicRef+":v1.13.2", vitistackv1alpha1.MachineProviderTypeKubevirt, oldSchematicExtensions)
 
-	got, err := f.service.BuildTalosInstallerImage(context.Background(), f.cluster(t), nil, "v1.13.10")
+	got, err := f.service.BuildTalosInstallerImage(context.Background(), f.cluster(t), nil, "v1.13.11")
 	if err != nil {
 		t.Fatalf("BuildTalosInstallerImage: %v", err)
 	}
 
-	if want := newSchematicRef + ":v1.13.10"; got != want {
+	if want := newSchematicRef + ":v1.13.11"; got != want {
 		t.Errorf("installer image = %q, want %q", got, want)
 	}
 }
@@ -316,12 +316,12 @@ func TestBuildTalosInstallerImage_KeepsPinnedSchematicWhenNodesHaveExtensions(t 
 	operatorShipsNewSchematic(t)
 	f, _ := newInstallImageFixture(t, oldSchematicRef+":v1.13.2", vitistackv1alpha1.MachineProviderTypeKubevirt, newSchematicExtensions)
 
-	got, err := f.service.BuildTalosInstallerImage(context.Background(), f.cluster(t), nil, "v1.13.10")
+	got, err := f.service.BuildTalosInstallerImage(context.Background(), f.cluster(t), nil, "v1.13.11")
 	if err != nil {
 		t.Fatalf("BuildTalosInstallerImage: %v", err)
 	}
 
-	if want := oldSchematicRef + ":v1.13.10"; got != want {
+	if want := oldSchematicRef + ":v1.13.11"; got != want {
 		t.Errorf("installer image = %q, want %q", got, want)
 	}
 }
@@ -334,11 +334,11 @@ func TestImageRepositoryAndTag(t *testing.T) {
 		wantRepo string
 		wantTag  string
 	}{
-		{ref: newSchematicRef + ":v1.13.10", wantRepo: newSchematicRef, wantTag: "v1.13.10"},
+		{ref: newSchematicRef + ":v1.13.11", wantRepo: newSchematicRef, wantTag: "v1.13.11"},
 		{ref: "ghcr.io/siderolabs/installer", wantRepo: "ghcr.io/siderolabs/installer", wantTag: ""},
 		{ref: "localhost:5000/foo:v1", wantRepo: "localhost:5000/foo", wantTag: "v1"},
 		{ref: "localhost:5000/foo", wantRepo: "localhost:5000/foo", wantTag: ""},
-		{ref: "ghcr.io/siderolabs/installer:v1.13.10@sha256:abc", wantRepo: "ghcr.io/siderolabs/installer", wantTag: "v1.13.10"},
+		{ref: "ghcr.io/siderolabs/installer:v1.13.11@sha256:abc", wantRepo: "ghcr.io/siderolabs/installer", wantTag: "v1.13.11"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ref, func(t *testing.T) {
