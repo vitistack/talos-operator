@@ -274,7 +274,8 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= latest
-GOSEC_VERSION ?= latest
+# Pinned to gosec main: v2.29.0 bundles golang.org/x/tools v0.49.0, which cannot read Go 1.27.2 export data. Switch back to latest once v2.29.1+ is released.
+GOSEC_VERSION ?= master
 
 ## VitiStack CRDs (download/install)
 # Override VITISTACK_CRDS_REF to pin a branch, tag, or commit (default: main)
@@ -398,3 +399,45 @@ require-curl-jq: ## Verify curl and jq are installed
 require-kubectl: ## Verify kubectl is installed
 	@command -v $(KUBECTL) >/dev/null 2>&1 || { echo "Error: $(KUBECTL) is required (see https://kubernetes.io/docs/tasks/tools/)."; exit 1; }
 
+##@ Pre-commit
+
+# Make targets precheck runs, in order (mirrors what CI runs on push).
+PRECHECK_TARGETS ?= build lint test gosec govulncheck
+# Helm charts precheck lints (skipped when helm is not installed).
+PRECHECK_HELM_CHARTS ?= $(wildcard charts/*/)
+
+# Snapshot of the working tree (tracked diff + untracked files) used to detect
+# files rewritten by go mod tidy / code generation / go fmt during precheck.
+PRECHECK_TREE_STATE = { git diff HEAD; git ls-files --others --exclude-standard; } | git hash-object --stdin
+
+.PHONY: precheck
+precheck: ## Run every check CI runs (tidy, build, lint, test, security scans, helm lint) before commit/push.
+	@set -e; \
+	before=$$($(PRECHECK_TREE_STATE)); \
+	if [ -f go.mod ]; then \
+		printf '%b\n' "\033[0;36m==> go mod tidy + verify\033[0m"; \
+		go mod tidy; \
+		go mod verify; \
+	fi; \
+	for t in $(PRECHECK_TARGETS); do \
+		printf '%b\n' "\033[0;36m==> make $$t\033[0m"; \
+		$(MAKE) --no-print-directory $$t; \
+	done; \
+	if [ -n "$(strip $(PRECHECK_HELM_CHARTS))" ]; then \
+		if command -v helm >/dev/null 2>&1; then \
+			for c in $(PRECHECK_HELM_CHARTS); do \
+				printf '%b\n' "\033[0;36m==> helm lint $$c\033[0m"; \
+				helm lint $$c; \
+			done; \
+		else \
+			printf '%b\n' "\033[0;33mhelm not installed, skipping helm lint\033[0m"; \
+		fi; \
+	fi; \
+	after=$$($(PRECHECK_TREE_STATE)); \
+	if [ "$$before" != "$$after" ]; then \
+		printf '%b\n' "\033[0;33m\033[1mprecheck modified files (go.mod/go.sum, generated code, CRDs/RBAC or formatting).\033[0m"; \
+		printf '%b\n' "\033[0;33mReview and stage them before committing:\033[0m"; \
+		git status --short; \
+		exit 1; \
+	fi; \
+	printf '%b\n' "\033[0;32m\033[1mAll prechecks passed - ready to commit and push.\033[0m"

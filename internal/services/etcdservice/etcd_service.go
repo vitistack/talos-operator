@@ -50,7 +50,7 @@ func (s *EtcdService) MemberList(
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(timeoutCtx, controlPlaneIP)
+	nodeCtx := talosclient.WithNode(timeoutCtx, controlPlaneIP)
 
 	resp, err := tClient.EtcdMemberList(nodeCtx, &machineapi.EtcdMemberListRequest{
 		QueryLocal: false, // Query the actual etcd cluster, not just local
@@ -92,7 +92,7 @@ func (s *EtcdService) ForfeitLeadership(
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(timeoutCtx, nodeIP)
+	nodeCtx := talosclient.WithNode(timeoutCtx, nodeIP)
 
 	_, err = tClient.EtcdForfeitLeadership(nodeCtx, &machineapi.EtcdForfeitLeadershipRequest{})
 	if err != nil {
@@ -125,7 +125,7 @@ func (s *EtcdService) RemoveMemberByID(
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(timeoutCtx, controlPlaneIP)
+	nodeCtx := talosclient.WithNode(timeoutCtx, controlPlaneIP)
 
 	err = tClient.EtcdRemoveMemberByID(nodeCtx, &machineapi.EtcdRemoveMemberByIDRequest{
 		MemberId: memberID,
@@ -154,7 +154,7 @@ func (s *EtcdService) LeaveCluster(
 	}
 	defer func() { _ = tClient.Close() }()
 
-	nodeCtx := talosclient.WithNodes(timeoutCtx, nodeIP)
+	nodeCtx := talosclient.WithNode(timeoutCtx, nodeIP)
 
 	err = tClient.EtcdLeaveCluster(nodeCtx, &machineapi.EtcdLeaveClusterRequest{})
 	if err != nil {

@@ -50,7 +50,7 @@ func (s *UpgradeService) ReconcileInstallImageSchematic(
 //
 // The pin is written once and then only replaced by the upgrade flow, which
 // keeps its repository — the schematic — and changes the tag. So when the
-// operator's configured schematic gains an extension (v1.13.10 added
+// operator's configured schematic gains an extension (v1.13.11 added
 // nfs-utils), every cluster pinned earlier keeps the old set: its upgrades and
 // its new nodes install without the extension. When a reachable node lacks a
 // required extension, the pin moves to the configured image's schematic and

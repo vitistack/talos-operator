@@ -9,15 +9,15 @@ import (
 	"github.com/vitistack/talos-operator/pkg/consts"
 )
 
-// d-amk-003 after its upgrade to v1.13.10 finished but the operator could not
+// d-amk-003 after its upgrade to v1.13.11 finished but the operator could not
 // clear talos-target: the target equals the running version, the status says
 // failed and the user asked to resume.
 func finishedUpgradeStuckAsFailed() *vitistackv1alpha1.KubernetesCluster {
 	kc := legacyCluster(map[string]string{
-		consts.TalosCurrentAnnotation:  "v1.13.10",
-		consts.TalosTargetAnnotation:   "v1.13.10",
+		consts.TalosCurrentAnnotation:  "v1.13.11",
+		consts.TalosTargetAnnotation:   "v1.13.11",
 		consts.TalosStatusAnnotation:   string(consts.UpgradeStatusFailed),
-		consts.TalosMessageAnnotation:  "Talos upgrade failed: target version v1.13.10 must be greater than current version v1.13.10",
+		consts.TalosMessageAnnotation:  "Talos upgrade failed: target version v1.13.11 must be greater than current version v1.13.11",
 		consts.ResumeUpgradeAnnotation: "true",
 	})
 	kc.Status.Phase = status.PhaseUpgradeFailed
@@ -25,14 +25,14 @@ func finishedUpgradeStuckAsFailed() *vitistackv1alpha1.KubernetesCluster {
 		Type:    "TalosUpgrade",
 		Status:  "False",
 		Reason:  "Failed",
-		Message: "Talos upgrade to v1.13.10 failed: target version v1.13.10 must be greater than current version v1.13.10",
+		Message: "Talos upgrade to v1.13.11 failed: target version v1.13.11 must be greater than current version v1.13.11",
 	}}
 	return kc
 }
 
 func upgradedSecret() map[string]string {
 	return map[string]string{
-		"talos_version":       "v1.13.10",
+		"talos_version":       "v1.13.11",
 		"upgrade_in_progress": "false",
 	}
 }
@@ -75,8 +75,8 @@ func TestHandleUpgrade_TargetEqualToCurrentKeepsAFailedUpgradeVisible(t *testing
 	kc := finishedUpgradeStuckAsFailed()
 	delete(kc.Annotations, consts.ResumeUpgradeAnnotation)
 	f := newFixture(t, kc, fixtureSecret(map[string]string{
-		"talos_version": "v1.13.10",
-		"upgrade_state": `{"upgradeType":"talos","targetVersion":"v1.13.10","phase":"failed","failedNodeName":"d-amk-003-gsax-wrk4","failedReason":"node did not come back online"}`,
+		"talos_version": "v1.13.11",
+		"upgrade_state": `{"upgradeType":"talos","targetVersion":"v1.13.11","phase":"failed","failedNodeName":"d-amk-003-gsax-wrk4","failedReason":"node did not come back online"}`,
 	}))
 
 	if _, handled, err := f.controller.HandleUpgrade(context.Background(), f.cluster(t), nil, nil); err != nil || handled {
@@ -87,7 +87,7 @@ func TestHandleUpgrade_TargetEqualToCurrentKeepsAFailedUpgradeVisible(t *testing
 	if got := consts.UpgradeStatus(stored.Annotations[consts.TalosStatusAnnotation]); got != consts.UpgradeStatusFailed {
 		t.Errorf("talos-status = %q, want it still %q", got, consts.UpgradeStatusFailed)
 	}
-	if got := stored.Annotations[consts.TalosTargetAnnotation]; got != "v1.13.10" {
+	if got := stored.Annotations[consts.TalosTargetAnnotation]; got != "v1.13.11" {
 		t.Errorf("talos-target = %q, want it kept so resume still applies", got)
 	}
 	if data := f.secretData(t); data["upgrade_state"] == "" {
@@ -99,7 +99,7 @@ func TestHandleUpgrade_TargetEqualToCurrentKeepsAFailedUpgradeVisible(t *testing
 // state (the operator fills it in on the same pass), not a bad request.
 func TestHandleUpgrade_TargetKeptWhileCurrentVersionUnknown(t *testing.T) {
 	kc := legacyCluster(map[string]string{
-		consts.TalosTargetAnnotation: "v1.13.10",
+		consts.TalosTargetAnnotation: "v1.13.11",
 	})
 	kc.Status.Phase = status.PhaseReady
 	f := newFixture(t, kc, fixtureSecret(upgradedSecret()))
@@ -109,7 +109,7 @@ func TestHandleUpgrade_TargetKeptWhileCurrentVersionUnknown(t *testing.T) {
 	}
 
 	stored := f.cluster(t)
-	if got := stored.Annotations[consts.TalosTargetAnnotation]; got != "v1.13.10" {
+	if got := stored.Annotations[consts.TalosTargetAnnotation]; got != "v1.13.11" {
 		t.Errorf("talos-target = %q, want the request kept", got)
 	}
 	if got := consts.UpgradeStatus(stored.Annotations[consts.TalosStatusAnnotation]); got == consts.UpgradeStatusFailed {
@@ -121,7 +121,7 @@ func TestHandleUpgrade_TargetKeptWhileCurrentVersionUnknown(t *testing.T) {
 // and then dropped, instead of being re-validated and re-failed every 30s.
 func TestHandleUpgrade_InvalidTalosTargetFailsOnce(t *testing.T) {
 	kc := legacyCluster(map[string]string{
-		consts.TalosCurrentAnnotation: "v1.13.10",
+		consts.TalosCurrentAnnotation: "v1.13.11",
 		consts.TalosTargetAnnotation:  "v1.13.2",
 		consts.TalosStatusAnnotation:  string(consts.UpgradeStatusIdle),
 	})
@@ -148,7 +148,7 @@ func TestHandleUpgrade_InvalidTalosTargetFailsOnce(t *testing.T) {
 
 func TestHandleUpgrade_InvalidKubernetesTargetFailsOnce(t *testing.T) {
 	kc := legacyCluster(map[string]string{
-		consts.TalosCurrentAnnotation:      "v1.13.10",
+		consts.TalosCurrentAnnotation:      "v1.13.11",
 		consts.KubernetesCurrentAnnotation: "1.36.1",
 		consts.KubernetesTargetAnnotation:  "1.35.0",
 		consts.KubernetesStatusAnnotation:  string(consts.UpgradeStatusIdle),
