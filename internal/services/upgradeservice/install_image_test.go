@@ -2,6 +2,7 @@ package upgradeservice
 
 import (
 	"context"
+	"github.com/vitistack/talos-operator/internal/helpers/imageref"
 	"testing"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -346,8 +347,8 @@ func TestImageRepositoryAndTag(t *testing.T) {
 			if got := imageRepository(tt.ref); got != tt.wantRepo {
 				t.Errorf("imageRepository(%q) = %q, want %q", tt.ref, got, tt.wantRepo)
 			}
-			if got := imageTag(tt.ref); got != tt.wantTag {
-				t.Errorf("imageTag(%q) = %q, want %q", tt.ref, got, tt.wantTag)
+			if got := imageref.Tag(tt.ref); got != tt.wantTag {
+				t.Errorf("imageref.Tag(%q) = %q, want %q", tt.ref, got, tt.wantTag)
 			}
 		})
 	}

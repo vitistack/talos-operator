@@ -90,13 +90,12 @@ talos:
     - siderolabs/trident-iscsi-tools
     - siderolabs/util-linux-tools
     - siderolabs/nfs-utils
-  # Extension reconciliation reinstalls a node from vmInstallImage.<provider>,
-  # which ALSO moves it to that image's Talos version — so it can upgrade
-  # clusters fleet-wide whenever the image tag differs from the running version.
-  # Disabled by default so it never auto-upgrades datacenters that have not
-  # opted in; while false no node is touched even if requiredExtensions are
-  # listed/missing. Enable per environment to enforce extensions, ideally with
-  # vmInstallImage tagged at the cluster's current Talos version.
+  # Extension reconciliation reinstalls a node missing requiredExtensions with
+  # the schematic of vmInstallImage.<provider>, at the Talos version the node
+  # already runs (the image is re-tagged), so it never changes a node's version
+  # but does reboot it. Disabled by default; while false no node is touched
+  # even if requiredExtensions are listed/missing. Enable per environment to
+  # enforce extensions.
   extensionEnforceEnabled: false
   # Minutes between Talos upgrade triggers on the same node + image. Must be
   # long enough to cover a Talos reboot + extension unpack + API recovery; once
@@ -117,6 +116,12 @@ talos:
   # recovery; once it elapses with the node still on the wrong version the
   # operator re-triggers (likely the previous upgrade failed). Min: 1.
   versionEnforceCooldownMinutes: 5
+  # Extra entries for the operator's table of the latest patch release of each
+  # Talos minor, which defines the supported upgrade path (latest patch of
+  # every minor in between). Comma-separated, e.g. "v1.13.12,v1.14.3". Entries
+  # can add a minor or raise a patch, never lower one. Use it to pick up a new
+  # patch release without an operator release. Empty uses the built-in table.
+  latestPatchVersions: ""
 
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:

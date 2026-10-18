@@ -138,9 +138,26 @@ The upgrade state is stored in the cluster's Kubernetes secret in the supervisor
 
 When an upgrade starts, the operator:
 
-1. **Validates the target** - A Talos target must be newer than the running
-   version; a Kubernetes target may equal it (a re-apply that pulls lagging
-   nodes up). Neither may skip more than one minor version.
+1. **Validates the target** - A Kubernetes target may equal the running
+   version (a re-apply that pulls lagging nodes up) and may not skip a minor
+   version. A Talos target is planned from the lowest version the nodes
+   actually run, read from every node's Talos API when the upgrade starts,
+   not from the `talos-current` annotation, along the
+   [supported upgrade path](#talos-upgrade-path): a target further than one
+   step is walked one rolling upgrade per step, and `talos-target` is kept
+   until it is reached.
+   - If a node with an address does not answer (or reports a version that
+     does not parse), the upgrade does not start: the request is kept,
+     `talos-message` names the node, and the check is retried. Set
+     `upgrade.vitistack.io/skip-failed-nodes: "true"` to start without it;
+     machines without an address are not part of the upgrade and are ignored.
+   - If `talos-current` does not match what the nodes run, it is corrected
+     first.
+   - A target no step can reach is rejected with the reason: one that is not
+     newer, a path through a minor whose latest patch is unknown, a step
+     older than a node that is already ahead (the rolling upgrade would
+     reinstall it at the step), or a step that cannot run the cluster's
+     Kubernetes version.
    - A Talos target equal to the running version closes the request as
      `completed` without touching any node. That is what a finished upgrade
      whose target annotation could not be cleared looks like. The exception
@@ -148,9 +165,10 @@ When an upgrade starts, the operator:
      untouched for `resume` or for the reset annotation, because
      `talos-current` is the lowest version among the nodes that *answer* and
      a failed, unreachable node may still be behind.
-   - Any other rejected target (a downgrade, an unparseable version, too big
-     a version jump) is reported once in `*-status`/`*-message` and the
-     `*-target` annotation is removed, so it is not re-evaluated every pass.
+   - Any other rejected target (a downgrade, an unparseable version, a
+     Kubernetes target that skips a minor) is reported once in
+     `*-status`/`*-message` and the `*-target` annotation is removed, so it is
+     not re-evaluated every pass.
    - A target set before the operator has read the running version is kept
      and acted on once that version is known.
 2. **Records cluster health** - etcd health on the first control plane and
@@ -159,6 +177,41 @@ When an upgrade starts, the operator:
    `health_nodes_ready`, `health_controlplane_ready`,
    `health_check_message`). The check is informational: a failure is logged
    and recorded but does not stop the upgrade.
+
+#### Talos upgrade path
+
+Sidero only tests the configuration migration between adjacent Talos minor
+releases, so the
+[supported path](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/lifecycle-management/upgrading-talos#supported-upgrade-paths)
+goes through the latest patch of the running minor and of every minor in
+between before the final hop. A cluster on 1.12.7 reaches 1.14.2 as:
+
+```
+1.12.7 -> 1.12.12 -> 1.13.11 -> 1.14.2
+```
+
+The operator follows this path everywhere it moves a cluster's Talos version:
+
+| Where | Behaviour |
+| ----- | --------- |
+| `talos-available` | Advertises the next step from `talos-current` towards the operator's `TALOS_VERSION`, not `TALOS_VERSION` itself. After each upgrade the following step is offered. A step the cluster's Kubernetes version cannot run on is not offered; `talos-message` says to upgrade Kubernetes first. |
+| Annotation-driven upgrade | Rolls the next step from what the nodes run; a farther `talos-target` is walked step by step and kept until reached (see pre-flight checks). |
+| Version enforcement (`TALOS_VERSION_ENFORCE_ENABLED`) | Moves every node to the next step before any node goes further, towards `talos-target`. Never downgrades a node that is already ahead of a step. |
+| Version enforcement | Waits while any node with an address has not reported its version, so a rebooting or rolled-back node is never left a minor behind. |
+| Extension reconciliation (`TALOS_EXTENSION_ENFORCE_ENABLED`) | Reinstalls a node missing extensions with the configured install image's schematic at the Talos version the node already runs, so it never changes a node's version. Version changes are left to the paths above. |
+
+The latest patch of each minor comes from a table in the operator
+(`internal/services/talosversion/upgrade_path.go`), updated when
+`TALOS_VERSION` moves to a new minor. To pick up a newer patch release without
+an operator release, list it in `TALOS_LATEST_PATCH_VERSIONS` (Helm:
+`talos.latestPatchVersions`), e.g. `v1.13.12,v1.14.3`. Entries can add a minor
+or raise a patch, never lower one. If the latest patch of a minor on the path
+is unknown, no upgrade out of that minor is offered, requested or enforced,
+and `talos-message` says which minor to add.
+
+Each step must also run the cluster's Kubernetes version. The supported range
+per Talos release comes from Sidero's `machinery/compatibility` package; Talos
+releases newer than the vendored machinery are not checked.
 
 ### Installer Image and System Extensions
 
@@ -343,7 +396,7 @@ This ensures compatibility between control plane and kubelet versions.
 
 | Annotation                                        | Set By   | Description                                                                              |
 | ------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------- |
-| `upgrade.vitistack.io/talos-available`            | Operator | New Talos version available for upgrade                                                  |
+| `upgrade.vitistack.io/talos-available`            | Operator | Next Talos version on the [supported upgrade path](#talos-upgrade-path); may be an intermediate version |
 | `upgrade.vitistack.io/talos-current`              | Operator | Current running Talos version                                                            |
 | `upgrade.vitistack.io/talos-target`               | **User** | Target version to upgrade to (triggers upgrade)                                          |
 | `upgrade.vitistack.io/talos-status`               | Operator | Current status: `idle`, `in-progress`, `completed`, `failed`                             |
@@ -621,7 +674,7 @@ state machine still advances, prefer the retry recipe above instead.
 ### Version Constraints
 
 - **Kubernetes**: Can only upgrade one minor version at a time (e.g., 1.30 → 1.31 → 1.32)
-- **Talos**: Check the [Talos support matrix](https://www.talos.dev/docs/support-matrix/) for compatible Kubernetes versions
+- **Talos**: Goes through the latest patch of every minor in between, one step at a time (see [Talos upgrade path](#talos-upgrade-path)); each step must support the cluster's Kubernetes version
 
 ### Pre-upgrade Checklist
 

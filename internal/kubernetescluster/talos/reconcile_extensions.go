@@ -3,8 +3,12 @@ package talos
 import (
 	"context"
 	"fmt"
+	"github.com/vitistack/talos-operator/internal/helpers/imageref"
+	"strings"
 	"time"
 
+	semver "github.com/Masterminds/semver/v3"
+	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/spf13/viper"
 	"github.com/vitistack/common/pkg/loggers/vlog"
@@ -39,8 +43,10 @@ func extensionUpgradeCooldown() time.Duration {
 //
 // Talos extensions are baked into the OS image — the operator cannot pull
 // them onto a node post-install. The recovery path is therefore a Talos
-// upgrade to the per-provider TALOS_VM_INSTALL_IMAGE_* image (DEFAULT as
-// fallback), whose schematic must already contain the required extensions.
+// upgrade using the schematic of the per-provider TALOS_VM_INSTALL_IMAGE_*
+// image (DEFAULT as fallback), which must already contain the required
+// extensions. The node is reinstalled at the Talos version it already runs
+// (the image re-tagged), so this never moves a node to another version.
 // Keeping TALOS_REQUIRED_EXTENSIONS in sync with the schematic baked into
 // TALOS_VM_INSTALL_IMAGE_* is the developer's responsibility.
 //
@@ -61,10 +67,9 @@ func extensionUpgradeCooldown() time.Duration {
 // before control planes so the API server stays available longest. A cluster
 // with TALOS_REQUIRED_EXTENSIONS unset (the default) is a no-op.
 func (t *TalosManager) reconcileExtensions(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	// Reinstalling a node for extensions also moves it to the install image's
-	// Talos version, so this pass can upgrade clusters fleet-wide. Gate it
-	// behind an explicit opt-in (default false) so it never auto-upgrades
-	// datacenters that haven't enabled it.
+	// Reinstalling a node reboots it, so gate this behind an explicit opt-in
+	// (default false). The node keeps its Talos version (see
+	// extensionInstallImage); only its schematic changes.
 	if !viper.GetBool(consts.TALOS_EXTENSION_ENFORCE_ENABLED) {
 		return nil
 	}
@@ -274,6 +279,14 @@ func (t *TalosManager) processMachineExtensions(
 		return extOutcomeCompliant, nil
 	}
 
+	// Reinstall at the version the node already runs: the configured image
+	// provides the schematic, not a version change.
+	installImage, running, err := t.extensionImageForNode(ctx, tClient, nodeIP, image)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Not reinstalling %s/%s for missing extensions %v: %v", clusterTag, m.Name, missing, err))
+		return extOutcomeSkipped, nil
+	}
+
 	// Cooldown elapsed and extensions still missing — log the re-trigger
 	// distinctly so it's clear we're not stuck looping on the same node.
 	if !record.TriggeredAt.IsZero() && record.Image == image {
@@ -285,12 +298,14 @@ func (t *TalosManager) processMachineExtensions(
 	// missing but it's right there" debugging round has the data on hand —
 	// most often the cause is a name-format mismatch (factory display path
 	// vs Talos manifest name) and seeing both lists makes it obvious.
-	vlog.Info(fmt.Sprintf("Node %s/%s ip=%s missing extensions %v (installed: %v) — triggering Talos upgrade with image %s",
-		clusterTag, m.Name, nodeIP, missing, installed, image))
-	if uerr := t.clientService.UpgradeNode(ctx, tClient, nodeIP, image); uerr != nil {
+	vlog.Info(fmt.Sprintf("Node %s/%s ip=%s running=%s missing extensions %v (installed: %v) — triggering Talos upgrade with image %s",
+		clusterTag, m.Name, nodeIP, running, missing, installed, installImage))
+	if uerr := t.clientService.UpgradeNode(ctx, tClient, nodeIP, installImage); uerr != nil {
 		vlog.Error(fmt.Sprintf("Failed to trigger extension upgrade %s node=%s ip=%s", clusterTag, m.Name, nodeIP), uerr)
 		return extOutcomeSkipped, nil
 	}
+	// The record keeps the configured image, which the cooldown checks
+	// compare against, not the re-tagged one actually installed.
 	if serr := t.stateService.SetExtensionUpgradeState(ctx, cluster, m.Name, image); serr != nil {
 		// Logging only — the Upgrade RPC already went out, and the worst case
 		// is we re-trigger on the next reconcile (the cooldown protection is
@@ -299,7 +314,7 @@ func (t *TalosManager) processMachineExtensions(
 	}
 	// Pin the new install image so any future scale-up uses the same
 	// schematic. Best-effort; failure is non-fatal.
-	t.persistInstallImageIfMissing(ctx, cluster, image)
+	t.persistInstallImageIfMissing(ctx, cluster, installImage)
 	return extOutcomeTriggered, nil
 }
 
@@ -430,4 +445,31 @@ func (t *TalosManager) resolveProviderInstallImage(m *vitistackv1alpha1.Machine)
 		}
 	}
 	return viper.GetString(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT)
+}
+
+// extensionImageForNode reads the Talos version a node runs and returns the
+// image to reinstall it with (see extensionInstallImage) along with that
+// version.
+func (t *TalosManager) extensionImageForNode(ctx context.Context, tClient *talosclient.Client, nodeIP, image string) (installImage, running string, err error) {
+	versionCtx, cancel := context.WithTimeout(ctx, talosNodeProbeTimeout)
+	running, err = t.clientService.GetTalosVersion(versionCtx, tClient, nodeIP)
+	cancel()
+	if err != nil {
+		return "", "", fmt.Errorf("cannot read the node's Talos version: %w", err)
+	}
+	installImage, err = extensionInstallImage(image, running)
+	return installImage, running, err
+}
+
+// extensionInstallImage returns the image to reinstall a node running running
+// with to get its missing extensions: the configured image's schematic, tagged
+// with the version the node already runs. A reinstall never changes the
+// node's Talos version, so it can neither skip a minor nor downgrade; version
+// changes are left to the upgrade paths, which follow the supported path for
+// the whole cluster.
+func extensionInstallImage(image, running string) (string, error) {
+	if _, err := semver.NewVersion(consts.StripVersionPrefix(strings.TrimSpace(running))); err != nil {
+		return "", fmt.Errorf("node reports Talos version %q, which does not parse: %w", running, err)
+	}
+	return imageref.WithTag(image, consts.NormalizeTalosVersion(strings.TrimSpace(running))), nil
 }

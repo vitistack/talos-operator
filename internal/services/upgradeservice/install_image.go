@@ -3,6 +3,7 @@ package upgradeservice
 import (
 	"context"
 	"fmt"
+	"github.com/vitistack/talos-operator/internal/helpers/imageref"
 	"slices"
 	"strings"
 	"time"
@@ -136,7 +137,7 @@ func (s *UpgradeService) movePinToConfiguredSchematic(
 		return pinned, nil
 	}
 
-	tag := imageTag(pinned)
+	tag := imageref.Tag(pinned)
 	if tag == "" {
 		vlog.Warn(fmt.Sprintf("Cannot move pinned install image %s: %s has no version tag to keep", clusterlog.Tag(cluster), pinned))
 		return pinned, nil
@@ -277,14 +278,4 @@ func imageRepository(ref string) string {
 		return ref[:colon]
 	}
 	return ref
-}
-
-// imageTag returns ref's tag, or "" when it has none. As in swapImageTag, a
-// colon before the last "/" is a registry port, not a tag separator.
-func imageTag(ref string) string {
-	ref, _, _ = strings.Cut(ref, "@")
-	if colon := strings.LastIndexByte(ref, ':'); colon > strings.LastIndexByte(ref, '/') {
-		return ref[colon+1:]
-	}
-	return ""
 }

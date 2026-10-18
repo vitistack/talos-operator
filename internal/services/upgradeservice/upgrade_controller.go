@@ -15,6 +15,7 @@ import (
 	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
+	"github.com/vitistack/talos-operator/internal/services/talosversion"
 	"github.com/vitistack/talos-operator/pkg/consts"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -34,6 +35,10 @@ type UpgradeController struct {
 	secretService      *secretservice.SecretService
 	statusManager      *status.StatusManager
 	upgradeService     *UpgradeService
+	// probeTalosVersions returns the Talos version each machine runs, keyed
+	// by machine name; machines that do not answer are missing. Replaceable
+	// in tests.
+	probeTalosVersions func(ctx context.Context, clientConfig *clientconfig.Config, machines []vitistackv1alpha1.Machine) map[string]string
 }
 
 // NewUpgradeController creates a new UpgradeController
@@ -51,7 +56,7 @@ func NewUpgradeController(
 	readinessChecker := NewNodeReadinessChecker(c, secretAdapter)
 	rollingUpgrade := NewRollingUpgradeExecutor(stateManager, readinessChecker, talosClientService, upgradeService)
 
-	return &UpgradeController{
+	uc := &UpgradeController{
 		Client:             c,
 		stateManager:       stateManager,
 		readinessChecker:   readinessChecker,
@@ -61,6 +66,130 @@ func NewUpgradeController(
 		statusManager:      statusManager,
 		upgradeService:     upgradeService,
 	}
+	uc.probeTalosVersions = uc.probeMachineTalosVersions
+	return uc
+}
+
+// readRunningTalosVersions asks the machines which Talos version they run and
+// brings upgState.TalosCurrent (and the talos-current annotation) in line with
+// the lowest. It returns the answers, and hold=true when a machine did not
+// answer: the upgrade must not start on a partial view (a node that comes back
+// on an older version could be taken across minors), so the request is kept
+// and talos-message names the machines. skip-failed-nodes=true starts anyway.
+func (c *UpgradeController) readRunningTalosVersions(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	machines []vitistackv1alpha1.Machine,
+	upgState *UpgradeState,
+) (versions map[string]string, hold bool) {
+	versions, unreachable := c.runningTalosVersions(ctx, clientConfig, machines)
+	if len(unreachable) > 0 && upgState.SkipFailedNodes {
+		vlog.Warn(fmt.Sprintf("Starting Talos upgrade without the versions of %s (%s=true) %s",
+			strings.Join(unreachable, ", "), consts.SkipFailedNodesAnnotation, clusterlog.Tag(cluster)))
+	} else if len(unreachable) > 0 {
+		msg := fmt.Sprintf("Waiting to start Talos upgrade to %s: cannot read the running Talos version from %s",
+			upgState.TalosTarget, strings.Join(unreachable, ", "))
+		if cluster.GetAnnotations()[consts.TalosMessageAnnotation] != msg {
+			_ = c.upgradeService.SetAnnotation(ctx, cluster, consts.TalosMessageAnnotation, msg)
+		}
+		vlog.Info(msg + " " + clusterlog.Tag(cluster))
+		return nil, true
+	}
+	running := talosversion.LowestVersion(versions)
+	if running != "" && !sameVersion(running, upgState.TalosCurrent) {
+		vlog.Info(fmt.Sprintf("talos-current %q does not match the nodes (%s), correcting it %s",
+			upgState.TalosCurrent, running, clusterlog.Tag(cluster)))
+		if err := c.upgradeService.ReconcileTalosCurrentVersion(ctx, cluster, running); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to correct talos-current %s: %v", clusterlog.Tag(cluster), err))
+		}
+		upgState.TalosCurrent = running
+	}
+	return versions, false
+}
+
+// planTalosUpgrade returns the Talos version to roll the cluster to on this
+// pass towards talos-target: the next step on the supported upgrade path from
+// the lowest version the nodes run, which is the target itself once it is one
+// step away. A far target is walked one rolling upgrade per step, keeping
+// talos-target as the goal until it is reached (see handleCompletedUpgrade).
+//
+// It refuses what no step can reach: a target that is not newer, a path
+// through a minor whose latest patch is unknown, a step older than a node that
+// is already ahead (the rolling upgrade reinstalls every node at the step, so
+// that node would be downgraded), and a step whose Talos cannot run the
+// cluster's Kubernetes version.
+func (c *UpgradeController) planTalosUpgrade(upgState *UpgradeState, versions map[string]string) (string, error) {
+	current, target := upgState.TalosCurrent, upgState.TalosTarget
+	if !talosversion.IsOlder(current, target) {
+		return "", fmt.Errorf("target Talos version %s must be greater than the version the nodes run (%s)", target, current)
+	}
+	step, err := talosversion.NextUpgradeStep(current, target)
+	if err != nil {
+		return "", err
+	}
+	if node, newer := nodeAheadOf(versions, step); node != "" {
+		return "", fmt.Errorf("the next step towards %s is Talos %s, older than the %s node %s runs; refusing to downgrade it", target, step, newer, node)
+	}
+	if ok, reason := talosversion.SupportsKubernetesVersion(step, upgState.KubernetesCurrent); !ok {
+		return "", fmt.Errorf("talos %s, the next step towards %s, cannot run the cluster's Kubernetes %s (%s); upgrade Kubernetes first",
+			step, target, upgState.KubernetesCurrent, reason)
+	}
+	return consts.NormalizeTalosVersion(step), nil
+}
+
+// runningTalosVersions asks the machines which Talos version they run and
+// returns the answers (by machine name) and the machines that did not answer
+// with a readable version.
+// Machines without an IPv4 address are left out, as the rolling upgrade plan
+// leaves them out. With no machines to ask it returns nil, nil and callers
+// fall back to talos-current.
+func (c *UpgradeController) runningTalosVersions(ctx context.Context, clientConfig *clientconfig.Config, machines []vitistackv1alpha1.Machine) (map[string]string, []string) {
+	addressed := make([]vitistackv1alpha1.Machine, 0, len(machines))
+	for i := range machines {
+		if nodehelper.GetFirstIPv4(&machines[i]) != "" {
+			addressed = append(addressed, machines[i])
+		}
+	}
+	if len(addressed) == 0 || c.probeTalosVersions == nil {
+		return nil, nil
+	}
+	versions := c.probeTalosVersions(ctx, clientConfig, addressed)
+	answered := make(map[string]string, len(versions))
+	var unreachable []string
+	for i := range addressed {
+		// A version that does not parse is no answer: ignoring it could hide
+		// the least-upgraded node.
+		if v, ok := versions[addressed[i].Name]; ok && talosversion.Valid(v) {
+			answered[addressed[i].Name] = v
+		} else {
+			unreachable = append(unreachable, addressed[i].Name)
+		}
+	}
+	return answered, unreachable
+}
+
+// nodeAheadOf returns a node running a newer Talos version than target, and
+// that version, or "" when there is none.
+func nodeAheadOf(versions map[string]string, target string) (node, version string) {
+	for name, v := range versions {
+		if !talosversion.Valid(v) || !talosversion.Valid(target) {
+			continue
+		}
+		if talosversion.IsOlder(target, v) && (version == "" || talosversion.IsOlder(version, v)) {
+			node, version = name, v
+		}
+	}
+	return node, version
+}
+
+// probeMachineTalosVersions asks every machine's Talos API which version it runs.
+func (c *UpgradeController) probeMachineTalosVersions(ctx context.Context, clientConfig *clientconfig.Config, machines []vitistackv1alpha1.Machine) map[string]string {
+	nodes := make([]talosclientservice.NodeEndpoint, 0, len(machines))
+	for i := range machines {
+		nodes = append(nodes, talosclientservice.NodeEndpoint{Name: machines[i].Name, IP: nodehelper.GetFirstIPv4(&machines[i])})
+	}
+	return c.talosClientService.ProbeTalosVersions(ctx, clientConfig, nodes, talosclientservice.VersionProbeTimeout)
 }
 
 // secretServiceAdapter adapts secretservice.SecretService to the SecretGetter and SecretUpdater interfaces
@@ -207,7 +336,13 @@ func (c *UpgradeController) handleCompletedUpgrade(
 
 	// Mark upgrade as complete and regenerate configs
 	if state.UpgradeType == UpgradeTypeTalos {
-		_ = c.upgradeService.CompleteTalosUpgrade(ctx, cluster, state.TargetVersion, state.InstallerImage)
+		// A step towards a farther talos-target keeps the target, so the next
+		// pass plans the following step (see planTalosUpgrade).
+		continueTowards := ""
+		if goal := c.upgradeService.GetUpgradeState(cluster).TalosTarget; goal != "" && talosversion.IsOlder(state.TargetVersion, goal) {
+			continueTowards = goal
+		}
+		_ = c.upgradeService.CompleteTalosUpgrade(ctx, cluster, state.TargetVersion, state.InstallerImage, continueTowards)
 
 		// Regenerate machine configs after Talos upgrade. Pass the
 		// cluster's CURRENT Kubernetes version as override so a prior
@@ -276,6 +411,14 @@ func (c *UpgradeController) startTalosUpgrade(
 	machines []vitistackv1alpha1.Machine,
 	upgState *UpgradeState,
 ) (time.Duration, bool, error) {
+	// Decide from what the nodes run, not from talos-current: the annotation
+	// has been seen naming a version that was never installed, which let a
+	// request skip a minor and closed others as "already running".
+	versions, hold := c.readRunningTalosVersions(ctx, cluster, clientConfig, machines, upgState)
+	if hold {
+		return 30 * time.Second, true, nil
+	}
+
 	if upgState.TalosCurrent == "" {
 		// The running version has not been read yet (a cluster whose
 		// annotations are still being initialised). Keep the request and let
@@ -296,20 +439,25 @@ func (c *UpgradeController) startTalosUpgrade(
 		return 10 * time.Second, true, nil
 	}
 
-	vlog.Info(fmt.Sprintf("Starting Talos upgrade: %s current=%s target=%s",
-		clusterlog.Tag(cluster), upgState.TalosCurrent, upgState.TalosTarget))
-
-	// Validate upgrade
-	if err := c.upgradeService.ValidateUpgradeTarget(upgState.TalosCurrent, upgState.TalosTarget); err != nil {
+	// Plan the step to roll on this pass
+	step, err := c.planTalosUpgrade(upgState, versions)
+	if err != nil {
 		vlog.Errorf("Invalid Talos upgrade target %s: %v", clusterlog.Tag(cluster), err)
+		// Refresh the offer for what the cluster can take; the failure
+		// message written next explains the rejection.
+		if aerr := c.upgradeService.CheckForAvailableUpgrades(ctx, cluster); aerr != nil {
+			vlog.Warn(fmt.Sprintf("Failed to refresh talos-available %s: %v", clusterlog.Tag(cluster), aerr))
+		}
 		_ = c.upgradeService.FailTalosUpgrade(ctx, cluster, err.Error())
 		c.upgradeService.DropRejectedTarget(ctx, cluster, consts.TalosTargetAnnotation)
 		return 30 * time.Second, true, nil
 	}
+	vlog.Info(fmt.Sprintf("Starting Talos upgrade: %s current=%s step=%s target=%s",
+		clusterlog.Tag(cluster), upgState.TalosCurrent, step, upgState.TalosTarget))
 
 	// Build installer image (preserves the cluster's pinned image base + any
 	// factory schematic so system extensions survive the upgrade).
-	installerImage, err := c.upgradeService.BuildTalosInstallerImage(ctx, cluster, clientConfig, upgState.TalosTarget)
+	installerImage, err := c.upgradeService.BuildTalosInstallerImage(ctx, cluster, clientConfig, step)
 	if err != nil {
 		vlog.Error(fmt.Sprintf("Cannot determine Talos installer image for %s", clusterlog.Tag(cluster)), err)
 		_ = c.upgradeService.FailTalosUpgrade(ctx, cluster, err.Error())
@@ -326,7 +474,7 @@ func (c *UpgradeController) startTalosUpgrade(
 	_, err = c.stateManager.InitializeUpgradeState(
 		ctx, cluster,
 		UpgradeTypeTalos,
-		upgState.TalosTarget,
+		step,
 		installerImage,
 		controlPlanes,
 		workers,
@@ -337,7 +485,7 @@ func (c *UpgradeController) startTalosUpgrade(
 
 	// Update status
 	_ = c.statusManager.SetPhase(ctx, cluster, status.PhaseUpgradingTalos)
-	_ = c.upgradeService.StartTalosUpgrade(ctx, cluster, len(machines))
+	_ = c.upgradeService.StartTalosUpgrade(ctx, cluster, step, len(machines))
 
 	// Continue with upgrade
 	result := c.rollingUpgrade.ExecuteTalosUpgradeStep(ctx, cluster, clientConfig)

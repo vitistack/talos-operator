@@ -36,12 +36,12 @@ var (
 	TALOS_REQUIRED_EXTENSIONS = "TALOS_REQUIRED_EXTENSIONS" //nolint:revive,stylecheck // consistent with other env var constants
 
 	// TALOS_EXTENSION_ENFORCE_ENABLED toggles the extension-reconciliation
-	// pass. Because reinstalling a node from TALOS_VM_INSTALL_IMAGE_* also
-	// moves it to that image's Talos version, this pass can effectively
-	// upgrade clusters fleet-wide whenever the image tag differs from the
-	// running version. It is therefore OFF by default and must be explicitly
-	// enabled per environment; even with TALOS_REQUIRED_EXTENSIONS set, no
-	// node is touched while this is false. Default: false.
+	// pass. A node missing extensions is reinstalled with the schematic of
+	// TALOS_VM_INSTALL_IMAGE_* at the Talos version it already runs, so the
+	// pass never changes a node's version, but each reinstall reboots a node.
+	// It is therefore OFF by default and must be explicitly enabled per
+	// environment; even with TALOS_REQUIRED_EXTENSIONS set, no node is touched
+	// while this is false. Default: false.
 	TALOS_EXTENSION_ENFORCE_ENABLED = "TALOS_EXTENSION_ENFORCE_ENABLED" //nolint:revive,stylecheck // consistent with other env var constants
 
 	// TALOS_EXTENSION_COOLDOWN_MINUTES is how long the operator waits after
@@ -72,6 +72,15 @@ var (
 	// if the node is still on the wrong version the operator re-triggers
 	// (likely the previous upgrade failed). Default: 5. Min: 1.
 	TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES = "TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
+
+	// TALOS_LATEST_PATCH_VERSIONS adds to the operator's built-in table of the
+	// latest patch release of each Talos minor, which defines the supported
+	// upgrade path (latest patch of every minor in between, see
+	// internal/services/talosversion). Comma-separated versions, e.g.
+	// "v1.13.12,v1.14.3". An entry can add a minor or raise a patch, never lower
+	// one. Use it to pick up a new patch release without an operator release.
+	// Default: empty.
+	TALOS_LATEST_PATCH_VERSIONS = "TALOS_LATEST_PATCH_VERSIONS" //nolint:revive,stylecheck // consistent with other env var constants
 
 	VITISTACK_NAME           = "VITISTACK_NAME"
 	NAME_KUBERNETES_PROVIDER = "NAME_KUBERNETES_PROVIDER"

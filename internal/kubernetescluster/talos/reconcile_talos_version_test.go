@@ -2,6 +2,7 @@ package talos
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
@@ -95,6 +96,17 @@ func TestSelectEnforcementTarget(t *testing.T) {
 			want:    testNameWrk0,
 		},
 		{
+			// While the cluster steps through an intermediate version, a node
+			// already past that step must not be "upgraded" back down to it.
+			name: "node ahead of the step is never picked",
+			actual: map[string]string{
+				testNameCP0: "v1.13.11", testNameCP1: "v1.12.12",
+				testNameWrk0: "v1.12.12", testNameWrk1: "v1.12.7",
+			},
+			desired: "v1.12.12",
+			want:    testNameWrk1,
+		},
+		{
 			name:    "empty actual map returns nil",
 			actual:  map[string]string{},
 			desired: testVerNew,
@@ -117,52 +129,6 @@ func TestSelectEnforcementTarget(t *testing.T) {
 			}
 			if got.Name != tt.want {
 				t.Fatalf("expected %s, got %s", tt.want, got.Name)
-			}
-		})
-	}
-}
-
-func TestSwapImageTagForEnforcement(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		ref  string
-		tag  string
-		want string
-	}{
-		{
-			name: "factory image with version tag rewrites tag",
-			ref:  "factory.talos.dev/nocloud-installer/abc123:" + testVerOld,
-			tag:  testVerNew,
-			want: "factory.talos.dev/nocloud-installer/abc123:" + testVerNew,
-		},
-		{
-			name: "image without tag appends tag",
-			ref:  "ghcr.io/siderolabs/installer",
-			tag:  testVerNew,
-			want: "ghcr.io/siderolabs/installer:" + testVerNew,
-		},
-		{
-			name: "registry port is not mistaken for tag",
-			ref:  "localhost:5000/foo:v1.0.0",
-			tag:  "v2.0.0",
-			want: "localhost:5000/foo:v2.0.0",
-		},
-		{
-			name: "registry port without image tag",
-			ref:  "localhost:5000/foo",
-			tag:  "v1.0.0",
-			want: "localhost:5000/foo:v1.0.0",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := swapImageTagForEnforcement(tt.ref, tt.tag)
-			if got != tt.want {
-				t.Fatalf("swapImageTagForEnforcement(%q, %q) = %q, want %q", tt.ref, tt.tag, got, tt.want)
 			}
 		})
 	}
@@ -311,4 +277,68 @@ func newStatusTestTalosManager(t *testing.T, objs ...client.Object) (*TalosManag
 		Build()
 	secretSvc := secretservice.NewSecretService(c)
 	return NewTalosManager(c, status.NewManager(c, secretSvc, talosstateservice.NewTalosStateService(secretSvc))), c
+}
+
+func TestEnforcementStepWalksTheClusterThroughEachMinor(t *testing.T) {
+	t.Parallel()
+	machines := []*vitistackv1alpha1.Machine{
+		makeMachine(testNameCP0, "control-plane", "10.0.0.1"),
+		makeMachine(testNameWrk0, "worker", "10.0.0.3"),
+	}
+	tests := []struct {
+		name   string
+		actual map[string]string
+		want   string
+	}{
+		{"patch up the running minor first", map[string]string{testNameCP0: "v1.12.7", testNameWrk0: "v1.12.7"}, "v1.12.12"},
+		{"the least-upgraded node decides the step", map[string]string{testNameCP0: "v1.13.11", testNameWrk0: "v1.12.12"}, "v1.13.11"},
+		{"final hop to the target", map[string]string{testNameCP0: "v1.13.11", testNameWrk0: "v1.13.11"}, "v1.14.2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, reason, msg := enforcementStep(machines, tt.actual, "v1.14.2", "")
+			if reason != "" || got != tt.want {
+				t.Fatalf("enforcementStep() = (%q, %q, %q), want %q", got, reason, msg, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnforcementStepStopsWhenThePathOrKubernetesForbidsIt(t *testing.T) {
+	t.Parallel()
+	machines := []*vitistackv1alpha1.Machine{makeMachine(testNameCP0, "control-plane", "10.0.0.1")}
+	if _, reason, msg := enforcementStep(machines, map[string]string{testNameCP0: "v1.10.3"}, "v1.12.12", ""); reason != "PathUnknown" || msg == "" {
+		t.Errorf("unknown latest 1.10 patch: got reason %q msg %q, want PathUnknown", reason, msg)
+	}
+	if _, reason, msg := enforcementStep(machines, map[string]string{testNameCP0: "v1.12.12"}, "v1.13.11", "1.30.5"); reason != "KubernetesIncompatible" || msg == "" {
+		t.Errorf("Talos 1.13 with Kubernetes 1.30: got reason %q msg %q, want KubernetesIncompatible", reason, msg)
+	}
+}
+
+func TestEnforcementStepWaitsForEveryNodeToAnswer(t *testing.T) {
+	t.Parallel()
+	// wrk0 is rebooting into the current step (or rolled back to an older
+	// version): stepping on from the others could leave it a minor behind.
+	machines := []*vitistackv1alpha1.Machine{
+		makeMachine(testNameCP0, "control-plane", "10.0.0.1"),
+		makeMachine(testNameWrk0, "worker", "10.0.0.3"),
+		makeMachine("new0", "worker", ""), // no address yet: not part of any upgrade
+	}
+	_, reason, msg := enforcementStep(machines, map[string]string{testNameCP0: "v1.12.12"}, "v1.14.2", "")
+	if reason != "WaitingForNodes" || !strings.Contains(msg, testNameWrk0) || strings.Contains(msg, "new0") {
+		t.Errorf("got reason %q msg %q, want WaitingForNodes naming only %s", reason, msg, testNameWrk0)
+	}
+}
+
+func TestEnforcementStepTreatsAnUnreadableVersionAsSilent(t *testing.T) {
+	t.Parallel()
+	machines := []*vitistackv1alpha1.Machine{
+		makeMachine(testNameCP0, "control-plane", "10.0.0.1"),
+		makeMachine(testNameWrk0, "worker", "10.0.0.3"),
+	}
+	_, reason, msg := enforcementStep(machines, map[string]string{testNameCP0: "v1.12.12", testNameWrk0: ""}, "v1.14.2", "")
+	if reason != "WaitingForNodes" || !strings.Contains(msg, testNameWrk0) {
+		t.Errorf("got reason %q msg %q, want WaitingForNodes naming %s", reason, msg, testNameWrk0)
+	}
 }
