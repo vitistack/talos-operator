@@ -123,7 +123,7 @@ govulncheck: install-govulncheck ## Run govulncheck vulnerability scan (fails on
 .PHONY: go-security-scan-docker
 go-security-scan-docker: ## Run gosec scan using official container (alternative if local install fails)
 	@echo "Running gosec via Docker container..."; \
-	$(CONTAINER_TOOL) run --rm -v $(PWD):/workspace -w /workspace securego/gosec/gosec:latest ./...
+	$(CONTAINER_TOOL) run --rm -v $(PWD):/workspace -w /workspace securego/gosec/gosec:master ./...
 
 ##@ SBOM (Software Bill of Materials)
 SYFT ?= $(LOCALBIN)/syft
@@ -274,7 +274,7 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= latest
-GOSEC_VERSION ?= latest
+GOSEC_VERSION ?= master
 
 ## VitiStack CRDs (download/install)
 # Override VITISTACK_CRDS_REF to pin a branch, tag, or commit (default: main)
