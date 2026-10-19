@@ -79,6 +79,10 @@ func initializeTalosCluster(ctx context.Context, t *TalosManager, cluster *vitis
 				if err := t.reconcileNodeAnnotations(ctx, cluster, nodes); err != nil {
 					vlog.Warn(fmt.Sprintf("Error during node annotation reconciliation %s: %v", clusterLogTag(cluster), err))
 				}
+
+				if err := t.reconcileNodeLabelsAndTaints(ctx, cluster, nodes); err != nil {
+					vlog.Warn(fmt.Sprintf("Error during node label/taint reconciliation %s: %v", clusterLogTag(cluster), err))
+				}
 			}
 
 			// Talos-version enforcement and extension reconciliation are
