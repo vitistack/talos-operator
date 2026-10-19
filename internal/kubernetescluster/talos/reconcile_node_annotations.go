@@ -82,10 +82,13 @@ func (t *TalosManager) reconcileNodeAnnotations(ctx context.Context, cluster *vi
 		}
 		updated, removed := countPatchOps(patch)
 
-		if _, err := nodes.client.CoreV1().Nodes().Patch(ctx, node.Name, k8stypes.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		patched, err := nodes.client.CoreV1().Nodes().Patch(ctx, node.Name, k8stypes.MergePatchType, patchBytes, metav1.PatchOptions{})
+		if err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to patch annotations on node %s: %v", node.Name, err))
 			continue
 		}
+		// Later checks in this pass reuse nodes.items and need the new resourceVersion.
+		nodes.items[i] = *patched
 
 		vlog.Info(fmt.Sprintf("Reconciled annotations on node %s: %d updated, %d removed", node.Name, updated, removed))
 	}

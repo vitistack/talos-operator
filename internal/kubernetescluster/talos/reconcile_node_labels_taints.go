@@ -52,10 +52,12 @@ func (t *TalosManager) reconcileNodeLabelsAndTaints(ctx context.Context, cluster
 			vlog.Warn(fmt.Sprintf("Failed to marshal label/taint patch for node %s: %v", node.Name, err))
 			continue
 		}
-		if _, err := nodes.client.CoreV1().Nodes().Patch(ctx, node.Name, k8stypes.MergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		patched, err := nodes.client.CoreV1().Nodes().Patch(ctx, node.Name, k8stypes.MergePatchType, patchBytes, metav1.PatchOptions{})
+		if err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to patch labels/taints on node %s: %v", node.Name, err))
 			continue
 		}
+		nodes.items[i] = *patched
 		vlog.Info(fmt.Sprintf("Reconciled labels/taints on node %s %s", node.Name, clusterLogTag(cluster)))
 	}
 	return nil
