@@ -107,6 +107,36 @@ func computeLabelTaintPatch(node *corev1.Node, desiredLabels map[string]string, 
 	metadata := map[string]any{}
 	spec := map[string]any{}
 
+	labelPatch, managedLabels := computeLabelChanges(node, desiredLabels)
+	if len(labelPatch) > 0 {
+		metadata["labels"] = labelPatch
+	}
+
+	newTaints, managedTaints := computeTaints(node, desiredTaints, registeredTaints)
+	if !taintSetsEqual(node.Spec.Taints, newTaints) {
+		spec["taints"] = newTaints
+	}
+
+	annPatch := map[string]any{}
+	setManagedKeysAnnotation(annPatch, node.Annotations, managedNodeLabelsAnnotation, managedLabels)
+	setManagedKeysAnnotation(annPatch, node.Annotations, managedNodeTaintsAnnotation, managedTaints)
+	if len(annPatch) > 0 {
+		metadata["annotations"] = annPatch
+	}
+
+	if len(metadata) == 0 && len(spec) == 0 {
+		return nil
+	}
+	metadata["resourceVersion"] = node.ResourceVersion
+	patch := map[string]any{"metadata": metadata}
+	if len(spec) > 0 {
+		patch["spec"] = spec
+	}
+	return patch
+}
+
+// computeLabelChanges returns the label merge patch and the label keys this reconciler now owns.
+func computeLabelChanges(node *corev1.Node, desiredLabels map[string]string) (map[string]any, []string) {
 	// Labels Talos owns via machine config nodeLabels would be reverted by Talos.
 	talosOwned := parseTalosOwnedAnnotations(node.Annotations[talosOwnedLabelsKey])
 	labelPatch := map[string]any{}
@@ -128,10 +158,11 @@ func computeLabelTaintPatch(node *corev1.Node, desiredLabels map[string]string, 
 			labelPatch[k] = nil
 		}
 	}
-	if len(labelPatch) > 0 {
-		metadata["labels"] = labelPatch
-	}
+	return labelPatch, managedLabels
+}
 
+// computeTaints returns the Node's full desired taint list and the taint IDs this reconciler now owns.
+func computeTaints(node *corev1.Node, desiredTaints []corev1.Taint, registeredTaints []string) ([]corev1.Taint, []string) {
 	managedTaints := make([]string, 0, len(desiredTaints))
 	for _, t := range desiredTaints {
 		managedTaints = append(managedTaints, taintID(t))
@@ -145,27 +176,7 @@ func computeLabelTaintPatch(node *corev1.Node, desiredLabels map[string]string, 
 		}
 		newTaints = append(newTaints, t)
 	}
-	newTaints = append(newTaints, desiredTaints...)
-	if !taintSetsEqual(node.Spec.Taints, newTaints) {
-		spec["taints"] = newTaints
-	}
-
-	annPatch := map[string]any{}
-	setManagedKeysAnnotation(annPatch, node.Annotations, managedNodeLabelsAnnotation, managedLabels)
-	setManagedKeysAnnotation(annPatch, node.Annotations, managedNodeTaintsAnnotation, managedTaints)
-	if len(annPatch) > 0 {
-		metadata["annotations"] = annPatch
-	}
-
-	if len(metadata) == 0 && len(spec) == 0 {
-		return nil
-	}
-	metadata["resourceVersion"] = node.ResourceVersion
-	patch := map[string]any{"metadata": metadata}
-	if len(spec) > 0 {
-		patch["spec"] = spec
-	}
-	return patch
+	return append(newTaints, desiredTaints...), managedTaints
 }
 
 // taintID identifies a taint the way the API server does: by key and effect.
