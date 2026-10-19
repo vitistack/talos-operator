@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -121,5 +122,65 @@ func TestNodeReconcilersShareFreshResourceVersion(t *testing.T) {
 	}
 	if got.Annotations[vitistackv1alpha1.ClusterIdAnnotation] != "cid" {
 		t.Errorf("annotations lost: %v", got.Annotations)
+	}
+}
+
+func TestRecordRegisteredTaintsAccumulates(t *testing.T) {
+	machine := &vitistackv1alpha1.Machine{ObjectMeta: metav1.ObjectMeta{Name: testNameWrk0, Namespace: "ns"}}
+	tm, c := newStatusTestTalosManager(t, machine)
+	ctx := context.Background()
+
+	if err := tm.recordRegisteredTaints(ctx, machine, []corev1.Taint{{Key: "gpu", Effect: corev1.TaintEffectNoSchedule}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.recordRegisteredTaints(ctx, machine, []corev1.Taint{{Key: "gpu", Effect: corev1.TaintEffectNoExecute}}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := &vitistackv1alpha1.Machine{}
+	if err := c.Get(ctx, k8stypes.NamespacedName{Name: testNameWrk0, Namespace: "ns"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if want := `["gpu:NoExecute","gpu:NoSchedule"]`; got.Annotations[registeredNodeTaintsAnnotation] != want {
+		t.Errorf("registered taints = %q, want %q", got.Annotations[registeredNodeTaintsAnnotation], want)
+	}
+}
+
+// A Node that re-registers from its original kubelet config after a day-2 taint removal
+// has no managed-taints annotation; the Machine's record must still drive the prune.
+func TestReconcileNodeLabelsAndTaints_PrunesTaintAfterReRegistration(t *testing.T) {
+	cluster := &vitistackv1alpha1.KubernetesCluster{ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"}}
+	cluster.Spec.Cluster.ClusterId = "cid"
+	cluster.Spec.Topology.Workers.NodePools = []vitistackv1alpha1.KubernetesClusterNodePool{{Name: "gpu"}}
+
+	machine := &vitistackv1alpha1.Machine{ObjectMeta: metav1.ObjectMeta{
+		Name:      testNameWrk0,
+		Namespace: "ns",
+		Labels:    map[string]string{vitistackv1alpha1.ClusterIdAnnotation: "cid", vitistackv1alpha1.NodeRoleAnnotation: "worker"},
+		Annotations: map[string]string{
+			vitistackv1alpha1.NodePoolAnnotation: "gpu",
+			registeredNodeTaintsAnnotation:       `["gpu:NoSchedule"]`,
+		},
+	}}
+	tm, _ := newStatusTestTalosManager(t, machine)
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: testNameWrk0, ResourceVersion: "1"},
+		Spec:       corev1.NodeSpec{Taints: []corev1.Taint{{Key: "gpu", Value: "true", Effect: corev1.TaintEffectNoSchedule}}},
+	}
+	clientset := kubefake.NewClientset(node)
+	enforceNodeResourceVersion(t, clientset)
+	ctx := context.Background()
+	nodes := &workloadNodes{client: clientset, items: []corev1.Node{*node}}
+
+	if err := tm.reconcileNodeLabelsAndTaints(ctx, cluster, nodes); err != nil {
+		t.Fatal(err)
+	}
+	got, err := clientset.CoreV1().Nodes().Get(ctx, testNameWrk0, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Spec.Taints) != 0 {
+		t.Errorf("obsolete registered taint still present: %v", got.Spec.Taints)
 	}
 }

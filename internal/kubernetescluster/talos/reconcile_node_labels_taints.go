@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Record which labels/taints came from the KubernetesCluster spec, so removing
@@ -21,6 +22,10 @@ const (
 	managedNodeTaintsAnnotation = "vitistack.io/managed-node-taints"
 	talosOwnedLabelsKey         = "talos.dev/owned-labels"
 )
+
+// registeredNodeTaintsAnnotation lives on the Machine and lists every taint ever written
+// to the node's kubelet registerWithTaints; the kubelet re-adds them if the Node re-registers.
+const registeredNodeTaintsAnnotation = "vitistack.io/registered-node-taints"
 
 // reconcileNodeLabelsAndTaints propagates spec.topology controlPlane/nodePool
 // metadata.labels and nodePool taints to the workload cluster's Nodes.
@@ -42,7 +47,8 @@ func (t *TalosManager) reconcileNodeLabelsAndTaints(ctx context.Context, cluster
 		}
 
 		labels, taints := talosconfigservice.DesiredNodeLabelsAndTaints(cluster, m)
-		patch := computeLabelTaintPatch(node, labels, taints)
+		registered := parseKeyList(m.Annotations[registeredNodeTaintsAnnotation])
+		patch := computeLabelTaintPatch(node, labels, taints, registered)
 		if patch == nil {
 			continue
 		}
@@ -63,9 +69,41 @@ func (t *TalosManager) reconcileNodeLabelsAndTaints(ctx context.Context, cluster
 	return nil
 }
 
+// recordRegisteredTaints adds the taints' IDs to the Machine's registration record.
+// Entries are never removed: the kubelet config on the node keeps them until it is replaced.
+func (t *TalosManager) recordRegisteredTaints(ctx context.Context, m *vitistackv1alpha1.Machine, taints []corev1.Taint) error {
+	fresh := &vitistackv1alpha1.Machine{}
+	if err := t.Get(ctx, k8stypes.NamespacedName{Name: m.Name, Namespace: m.Namespace}, fresh); err != nil {
+		return err
+	}
+	ids := parseKeyList(fresh.Annotations[registeredNodeTaintsAnnotation])
+	for _, taint := range taints {
+		if id := taintID(taint); !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	if fresh.Annotations[registeredNodeTaintsAnnotation] == string(encoded) {
+		return nil
+	}
+
+	patch := client.MergeFromWithOptions(fresh.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	if fresh.Annotations == nil {
+		fresh.Annotations = map[string]string{}
+	}
+	fresh.Annotations[registeredNodeTaintsAnnotation] = string(encoded)
+	return t.Patch(ctx, fresh, patch)
+}
+
 // computeLabelTaintPatch returns a JSON merge patch for the Node, or nil when it is in sync.
+// registeredTaints are taint IDs from the Machine's kubelet registration record and are
+// pruned like previously managed taints when no longer desired.
 // The patch carries the Node's resourceVersion because spec.taints is replaced as a whole.
-func computeLabelTaintPatch(node *corev1.Node, desiredLabels map[string]string, desiredTaints []corev1.Taint) map[string]any {
+func computeLabelTaintPatch(node *corev1.Node, desiredLabels map[string]string, desiredTaints []corev1.Taint, registeredTaints []string) map[string]any {
 	metadata := map[string]any{}
 	spec := map[string]any{}
 
@@ -98,7 +136,7 @@ func computeLabelTaintPatch(node *corev1.Node, desiredLabels map[string]string, 
 	for _, t := range desiredTaints {
 		managedTaints = append(managedTaints, taintID(t))
 	}
-	previous := parseKeyList(node.Annotations[managedNodeTaintsAnnotation])
+	previous := append(parseKeyList(node.Annotations[managedNodeTaintsAnnotation]), registeredTaints...)
 	newTaints := make([]corev1.Taint, 0, len(node.Spec.Taints)+len(desiredTaints))
 	for _, t := range node.Spec.Taints {
 		id := taintID(t)
