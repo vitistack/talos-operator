@@ -1,6 +1,6 @@
 module github.com/vitistack/talos-operator
 
-go 1.27.1
+go 1.27.2
 
 godebug default=go1.26
 
