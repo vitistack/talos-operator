@@ -365,6 +365,10 @@ func (s *TalosConfigService) PrepareNodeConfig(
 		patches = append(patches, annotationsPatch)
 	}
 
+	if _, taints := DesiredNodeLabelsAndTaints(cluster, m); len(taints) > 0 {
+		patches = append(patches, buildRegisterWithTaintsPatch(taints))
+	}
+
 	// NOTE: tenantOverrides are intentionally NOT applied here.
 	// They are already applied during bundle generation in GenerateTalosConfigBundle()
 	// via bundle.WithPatch(). Applying them again here would cause duplicate list entries
@@ -672,30 +676,6 @@ func (s *TalosConfigService) PatchVirtualMachineCustomization(in []byte, install
 	}
 
 	patches, err := configpatcher.LoadPatches([]string{vmPatch})
-	if err != nil {
-		return nil, err
-	}
-
-	patched, err := configpatcher.Apply(configpatcher.WithBytes(in), patches)
-	if err != nil {
-		return nil, err
-	}
-	return patched.Bytes()
-}
-
-// PatchNodeAnnotations patches node annotations using configpatcher.
-//
-// Deprecated: Use PrepareNodeConfig which handles this internally.
-func (s *TalosConfigService) PatchNodeAnnotations(
-	cluster *vitistackv1alpha1.KubernetesCluster,
-	in []byte,
-	m *vitistackv1alpha1.Machine) ([]byte, error) {
-	annotationsPatch := s.buildNodeAnnotationsPatch(cluster, m)
-	if annotationsPatch == "" {
-		return in, nil
-	}
-
-	patches, err := configpatcher.LoadPatches([]string{annotationsPatch})
 	if err != nil {
 		return nil, err
 	}

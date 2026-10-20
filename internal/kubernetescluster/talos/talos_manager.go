@@ -464,6 +464,13 @@ func (t *TalosManager) applySingleNodeConfig(
 		return fmt.Errorf("failed to patch config for node %s with endpoint IPs: %w", m.Name, err)
 	}
 
+	// Record before applying so ownership is never missing for a config the node may hold.
+	if _, taints := talosconfigservice.DesiredNodeLabelsAndTaints(cluster, m); len(taints) > 0 {
+		if err := t.recordRegisteredTaints(ctx, m, taints); err != nil {
+			return fmt.Errorf("failed to record registered taints for node %s: %w", m.Name, err)
+		}
+	}
+
 	if err := t.clientService.ApplyConfigToNode(ctx, insecure, clientConfig, ip, nodeConfig); err != nil {
 		return fmt.Errorf("failed to apply config to node %s: %w", ip, err)
 	}
