@@ -14,7 +14,7 @@ import (
 // it must be dropped rather than returned as an error on every pass.
 func TestHandleUpgrade_ResumeWithoutPersistedStateIsDropped(t *testing.T) {
 	kc := legacyCluster(map[string]string{
-		consts.TalosCurrentAnnotation:  "v1.13.10",
+		consts.TalosCurrentAnnotation:  "v1.13.12",
 		consts.TalosStatusAnnotation:   string(consts.UpgradeStatusFailed),
 		consts.ResumeUpgradeAnnotation: "true",
 	})
@@ -70,7 +70,7 @@ func TestHandleTalosResetUpgradeState_ClearsControlFlagsAndCondition(t *testing.
 // condition must stop claiming one is.
 func TestHandleUpgrade_RetiresInProgressConditionWhenNothingRuns(t *testing.T) {
 	kc := legacyCluster(map[string]string{
-		consts.TalosCurrentAnnotation:      "v1.13.10",
+		consts.TalosCurrentAnnotation:      "v1.13.12",
 		consts.TalosStatusAnnotation:       string(consts.UpgradeStatusIdle),
 		consts.KubernetesCurrentAnnotation: "1.36.1",
 		consts.KubernetesStatusAnnotation:  string(consts.UpgradeStatusIdle),
@@ -106,7 +106,7 @@ func TestHandleUpgrade_ClearsAFailureThatNoLongerApplies(t *testing.T) {
 	kc := legacyCluster(map[string]string{
 		consts.TalosCurrentAnnotation: "1.13.2",
 		consts.TalosStatusAnnotation:  string(consts.UpgradeStatusIdle),
-		consts.TalosMessageAnnotation: "Upgrade available: 1.13.2 → 1.13.10",
+		consts.TalosMessageAnnotation: "Upgrade available: 1.13.2 → 1.13.12",
 	})
 	kc.Status.Phase = status.PhaseReady
 	kc.Status.Conditions = []vitistackv1alpha1.KubernetesClusterCondition{{
@@ -145,7 +145,7 @@ func TestHandleUpgrade_KeepsAFailureThatStillApplies(t *testing.T) {
 		Type:    "TalosUpgrade",
 		Status:  "False",
 		Reason:  "Failed",
-		Message: "Talos upgrade to 1.13.10 failed: node wrk4 did not come back online",
+		Message: "Talos upgrade to 1.13.12 failed: node wrk4 did not come back online",
 	}}
 	f := newFixture(t, kc, fixtureSecret(upgradedSecret()))
 

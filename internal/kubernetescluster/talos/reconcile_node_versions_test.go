@@ -17,7 +17,7 @@ func kubeletNode(name, version string) corev1.Node {
 	}
 }
 
-// Seen on cephtest-060 while it moved from 1.35.0 to 1.36.3: the desired
+// Seen on cephtest-060 while it moved from 1.35.0 to 1.36.5: the desired
 // version only advances when the rolling upgrade completes, so every pass
 // during the upgrade called the already-upgraded control plane "newer than
 // desired" and would have acted on the nodes the upgrade was handling.
@@ -40,7 +40,7 @@ func TestReconcileNodeVersions_LeavesNodesToTheRollingUpgrade(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "cephtest-060", Namespace: "cephtest5"},
 				Spec: vitistackv1alpha1.KubernetesClusterSpec{
 					Cluster:  vitistackv1alpha1.KubernetesClusterSpecData{ClusterId: "ab60"},
-					Topology: vitistackv1alpha1.KubernetesClusterSpecTopology{Version: "1.36.3"},
+					Topology: vitistackv1alpha1.KubernetesClusterSpecTopology{Version: "1.36.5"},
 				},
 			}
 			// No talosconfig: acting on a stale node stops when loading the
@@ -59,7 +59,7 @@ func TestReconcileNodeVersions_LeavesNodesToTheRollingUpgrade(t *testing.T) {
 			}
 			tm, _ := newStatusTestTalosManager(t, cluster, secret, worker)
 			nodes := []corev1.Node{
-				kubeletNode("cephtest-060-ab60-ctp0", "v1.36.3"),
+				kubeletNode("cephtest-060-ab60-ctp0", "v1.36.5"),
 				kubeletNode("cephtest-060-ab60-wrk1", "v1.35.0"),
 			}
 

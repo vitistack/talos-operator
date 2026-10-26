@@ -27,7 +27,7 @@ When a machine's `status.provider` field indicates it's running on a virtual pla
    ```yaml
    machine:
      install:
-       image: factory.talos.dev/openstack-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.11.5
+       image: factory.talos.dev/openstack-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.13.12
    ```
 
 ## Configuration
@@ -38,28 +38,28 @@ Configure platform-specific Talos install images using environment variables:
 
 ```bash
 # Proxmox
-TALOS_VM_INSTALL_IMAGE_PROXMOX="factory.talos.dev/openstack-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.11.5"
+TALOS_VM_INSTALL_IMAGE_PROXMOX="factory.talos.dev/openstack-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.13.12"
 
 # KubeVirt
-TALOS_VM_INSTALL_IMAGE_KUBEVIRT="factory.talos.dev/kubevirt-installer/abc123...:v1.11.5"
+TALOS_VM_INSTALL_IMAGE_KUBEVIRT="factory.talos.dev/kubevirt-installer/abc123...:v1.13.12"
 
 # libvirt
-TALOS_VM_INSTALL_IMAGE_LIBVIRT="factory.talos.dev/libvirt-installer/def456...:v1.11.5"
+TALOS_VM_INSTALL_IMAGE_LIBVIRT="factory.talos.dev/libvirt-installer/def456...:v1.13.12"
 
 # KVM
-TALOS_VM_INSTALL_IMAGE_KVM="factory.talos.dev/kvm-installer/ghi789...:v1.11.5"
+TALOS_VM_INSTALL_IMAGE_KVM="factory.talos.dev/kvm-installer/ghi789...:v1.13.12"
 
 # VMware
-TALOS_VM_INSTALL_IMAGE_VMWARE="factory.talos.dev/vmware-installer/jkl012...:v1.11.5"
+TALOS_VM_INSTALL_IMAGE_VMWARE="factory.talos.dev/vmware-installer/jkl012...:v1.13.12"
 
 # VirtualBox
-TALOS_VM_INSTALL_IMAGE_VIRTUALBOX="factory.talos.dev/virtualbox-installer/mno345...:v1.11.5"
+TALOS_VM_INSTALL_IMAGE_VIRTUALBOX="factory.talos.dev/virtualbox-installer/mno345...:v1.13.12"
 
 # Hyper-V
-TALOS_VM_INSTALL_IMAGE_HYPERV="factory.talos.dev/hyperv-installer/pqr678...:v1.11.5"
+TALOS_VM_INSTALL_IMAGE_HYPERV="factory.talos.dev/hyperv-installer/pqr678...:v1.13.12"
 
 # Default fallback for any unmatched virtual provider
-TALOS_VM_INSTALL_IMAGE_DEFAULT="factory.talos.dev/nocloud-installer/b027a2d9dddfa5c0752c249cf3194bb5c62294dc7cba591f3bec8119ab578aea:v1.11.5"
+TALOS_VM_INSTALL_IMAGE_DEFAULT="factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.12"
 ```
 
 ### Image Selection Logic
@@ -126,7 +126,7 @@ You can generate custom Talos install images with specific extensions using the 
 Example for OpenStack/NoCloud with QEMU guest agent:
 
 ```
-factory.talos.dev/openstack-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.11.5
+factory.talos.dev/openstack-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515:v1.13.12
 ```
 
 ## Logging
@@ -134,7 +134,7 @@ factory.talos.dev/openstack-installer/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe
 When VM customizations are applied, the operator logs:
 
 ```
-Detected virtual machine provider proxmox for node cluster-control-plane-0, applying VM customizations with install image: factory.talos.dev/openstack-installer/...:v1.11.5
+Detected virtual machine provider proxmox for node cluster-control-plane-0, applying VM customizations with install image: factory.talos.dev/openstack-installer/...:v1.13.12
 ```
 
 Or without a custom image:

@@ -20,7 +20,7 @@ func TestKubernetesClusterEventFilter(t *testing.T) {
 				Name:        "p-bgo-ek-viti",
 				Namespace:   "vitistack-ek-prod",
 				Generation:  3,
-				Annotations: map[string]string{"upgrade.vitistack.io/talos-current": "1.13.10"},
+				Annotations: map[string]string{"upgrade.vitistack.io/talos-current": "1.13.11"},
 				Labels:      map[string]string{"team": "ek"},
 			},
 			Status: vitistackv1alpha1.KubernetesClusterStatus{Phase: "Ready"},
@@ -53,7 +53,7 @@ func TestKubernetesClusterEventFilter(t *testing.T) {
 			// Upgrades are requested through annotations, not spec.
 			name: "user requests a talos upgrade",
 			mutate: func(c *vitistackv1alpha1.KubernetesCluster) {
-				c.Annotations["upgrade.vitistack.io/talos-target"] = "1.13.11"
+				c.Annotations["upgrade.vitistack.io/talos-target"] = "1.13.12"
 			},
 			want: true,
 		},

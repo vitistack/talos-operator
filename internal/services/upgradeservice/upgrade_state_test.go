@@ -78,7 +78,7 @@ func controlPlanesSettledState(t *testing.T) []byte {
 	t.Helper()
 	raw, err := json.Marshal(ClusterUpgradeState{
 		UpgradeType:       UpgradeTypeTalos,
-		TargetVersion:     "v1.13.10",
+		TargetVersion:     "v1.13.12",
 		Phase:             UpgradePhaseControlPlanesWait,
 		CurrentNodeIndex:  0,
 		ControlPlaneCount: 1,
@@ -137,7 +137,7 @@ func TestSaveUpgradeState_RetriesStaleReadAndKeepsOtherKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	completed := &ClusterUpgradeState{UpgradeType: UpgradeTypeTalos, TargetVersion: "v1.13.10", Phase: UpgradePhaseCompleted}
+	completed := &ClusterUpgradeState{UpgradeType: UpgradeTypeTalos, TargetVersion: "v1.13.12", Phase: UpgradePhaseCompleted}
 	if err := m.SaveUpgradeState(ctx, testUpgradeCluster, completed); err != nil {
 		t.Fatalf("SaveUpgradeState: %v", err)
 	}
