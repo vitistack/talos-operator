@@ -56,6 +56,9 @@ func Init() {
 	// API recovery so the 5s reconcile loop doesn't hammer a node that's
 	// already mid-upgrade. Drain is the long pole; 5 minutes is comfortable.
 	viper.SetDefault(consts.TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES, 5)
+	// How long a node drain may wait on PodDisruptionBudgets before it is
+	// reported as blocked. The upgrade or removal stays on hold either way.
+	viper.SetDefault(consts.DRAIN_TIMEOUT_MINUTES, 10)
 
 	// Endpoint mode configuration
 	// Valid values: "none", "networkconfiguration", "talosvip", "custom"

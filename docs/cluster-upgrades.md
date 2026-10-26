@@ -101,6 +101,69 @@ The operator performs upgrades **one node at a time** to maintain cluster availa
    └── worker-2  ──► cordon/drain ──► upgrade ──► wait for ready ──► uncordon ──► ✓
 ```
 
+#### Draining and PodDisruptionBudgets
+
+Before a node is upgraded, and before a node is removed on scale-down, the
+operator cordons it and drains it the way `kubectl drain --ignore-daemonsets`
+does: every pod except DaemonSet and static (mirror) pods is evicted through
+the `policy/v1` Eviction API, so PodDisruptionBudgets are honoured. A pod is
+never deleted because a PDB rejected its eviction.
+
+The drain never blocks a reconcile. Each pass evicts what it can and requeues,
+backing off from 5 seconds to 60 seconds while a PDB keeps rejecting
+evictions. The node records the drain, so it survives operator restarts and is
+visible with `kubectl describe node`:
+
+| Node metadata                   | Meaning                                      |
+| ------------------------------- | -------------------------------------------- |
+| label `vitistack.io/drain`      | `upgrade` or `scale-down`: why it is drained |
+| annotation `vitistack.io/drain-started-at` | When the drain began (RFC 3339)   |
+| annotation `vitistack.io/drain-node-was-cordoned` | The node was already cordoned before the drain; it stays cordoned afterwards |
+
+Progress is reported as the `NodeDrain` condition on the `KubernetesCluster`:
+
+| Status  | Reason     | Meaning                                                                                     |
+| ------- | ---------- | ------------------------------------------------------------------------------------------- |
+| `False` | `Draining` | Drain in progress; the message lists the pods still on the node and their PDBs               |
+| `False` | `Blocked`  | Not finished after `DRAIN_TIMEOUT_MINUTES` (default 10). The upgrade or removal is on hold    |
+| `False` | `Failed`   | The workload cluster's API could not be reached, or the Node is missing before an upgrade; held and retried |
+| `False` | `Cordoned` | A node was cordoned without a drain (Kubernetes upgrade); uncordoned when that ends          |
+| `True`  | `Drained`  | The node was drained without bypassing any PDB                                               |
+| `True`  | `Forced`   | `vitistack.io/force-drain` let a timed-out or failing drain proceed; the message says what was skipped |
+| `True`  | `Idle`     | No drain in progress                                                                         |
+
+While a scale-down waits on its drain, the rest of the reconcile keeps
+running (machines, Talos configuration), but no upgrade is started until the
+node is gone.
+
+When a drain becomes `Blocked`, every pod whose eviction is still rejected
+also gets a `Warning` event with reason `EvictionBlocked` in its own namespace,
+so the application owner sees it in `kubectl get events`. The operator keeps
+retrying, and the upgrade or removal continues by itself once the PDB allows
+the eviction (for example after the owner scales up or fixes an unhealthy
+replica).
+
+To bypass PDBs anyway, set `vitistack.io/force-drain: "true"` on the
+`KubernetesCluster`. Pods whose eviction is rejected are then deleted directly,
+and a drain that is unfinished after the timeout, or cannot reach the workload
+cluster's API at all, no longer holds the operation. Remove the annotation
+afterwards.
+
+If the operation a node was drained for is called off (a scale-down reverted
+by raising the replica count again, an upgrade reset with
+`upgrade.vitistack.io/talos-reset-upgrade-state`), the operator uncordons the
+node again. Scale-down drains are released as soon as there is nothing left to
+scale down; upgrade drains only once no upgrade plan is stored, so a failed
+upgrade keeps its node cordoned until it is resumed or reset. A node that was
+already cordoned by someone else when the drain began stays cordoned; only the
+operator's markers are removed. Nodes the operator never drained are never
+touched.
+
+```bash
+kubectl get kubernetescluster <name> -n <namespace> \
+  -o jsonpath='{.status.conditions[?(@.type=="NodeDrain")]}'
+```
+
 #### State Persistence
 
 The upgrade state is stored in the cluster's Kubernetes secret in the supervisor cluster. This allows:
@@ -350,6 +413,7 @@ This ensures compatibility between control plane and kubelet versions.
 | `upgrade.vitistack.io/talos-message`              | Operator | Human-readable status message                                                            |
 | `upgrade.vitistack.io/talos-progress`             | Operator | Progress indicator (e.g., "2/5" nodes upgraded)                                          |
 | `upgrade.vitistack.io/talos-reset-upgrade-state` | **User** | Set to `"true"` to clear stuck Talos upgrade bookkeeping. See [Resetting stuck upgrade state](#resetting-stuck-upgrade-state). One-shot — operator removes it after processing. |
+| `vitistack.io/force-drain`                       | **User** | Set to `"true"` to let drains bypass PodDisruptionBudgets and proceed after the drain timeout. See [Draining and PodDisruptionBudgets](#draining-and-poddisruptionbudgets). Not removed by the operator. |
 
 ### Kubernetes Upgrade Annotations
 
