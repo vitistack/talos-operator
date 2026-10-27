@@ -38,10 +38,12 @@ type NodeUpgradeState struct {
 	NodeName         string    `json:"nodeName"`
 	Role             string    `json:"role"` // "control-plane" or "worker"
 	IP               string    `json:"ip"`
-	UpgradeInitiated bool      `json:"upgradeInitiated"` // Upgrade API called
-	UpgradeCompleted bool      `json:"upgradeCompleted"` // Version verified
-	NodeReady        bool      `json:"nodeReady"`        // Kubernetes Ready condition
-	Error            string    `json:"error,omitempty"`  // Error message if failed
+	UpgradeInitiated bool      `json:"upgradeInitiated"`       // Upgrade API called
+	UpgradeCompleted bool      `json:"upgradeCompleted"`       // Version verified
+	NodeReady        bool      `json:"nodeReady"`              // Kubernetes Ready condition
+	Error            string    `json:"error,omitempty"`        // Error message if failed
+	StartedAt        time.Time `json:"startedAt"`              // Operator started on the node (before drain); the node timeout counts from here
+	BootIDBefore     string    `json:"bootIdBefore,omitempty"` // Boot ID before the Talos upgrade; a new one proves the node rebooted
 	InitiatedAt      time.Time `json:"initiatedAt"`
 	CompletedAt      time.Time `json:"completedAt"`
 }
@@ -70,6 +72,12 @@ type ClusterUpgradeState struct {
 
 	// Settling time tracking (wait after all CPs ready before workers)
 	ControlPlanesReadyAt time.Time `json:"controlPlanesReadyAt"`
+	// LastNodeDoneAt is when the previous node finished; the next one starts
+	// UPGRADE_NODE_SETTLE_SECONDS later.
+	LastNodeDoneAt time.Time `json:"lastNodeDoneAt"`
+	// EtcdUnhealthySince is when the check before taking down a control plane
+	// first found etcd unhealthy; zero while it is healthy.
+	EtcdUnhealthySince time.Time `json:"etcdUnhealthySince"`
 
 	// Error tracking
 	FailedNodeName string `json:"failedNodeName,omitempty"`
@@ -164,6 +172,15 @@ func (m *UpgradeStateManager) writeUpgradeState(
 	cluster *vitistackv1alpha1.KubernetesCluster,
 	build func(secret *corev1.Secret) (*ClusterUpgradeState, error),
 ) error {
+	return retryOnConflict(ctx, cluster, func() error {
+		return m.tryWriteUpgradeState(ctx, cluster, build)
+	})
+}
+
+// retryOnConflict runs write until it succeeds, fails with anything other
+// than a conflict, or runs out of attempts. write must read the secret afresh
+// on every call so a retry sees what the cache has caught up on.
+func retryOnConflict(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, write func() error) error {
 	var err error
 	for attempt := range upgradeStateWriteAttempts {
 		if attempt > 0 {
@@ -173,7 +190,7 @@ func (m *UpgradeStateManager) writeUpgradeState(
 			case <-time.After(upgradeStateRetryBackoff * time.Duration(attempt)):
 			}
 		}
-		err = m.tryWriteUpgradeState(ctx, cluster, build)
+		err = write()
 		if !apierrors.IsConflict(err) {
 			return err
 		}
@@ -219,23 +236,29 @@ func (m *UpgradeStateManager) tryWriteUpgradeState(
 	return nil
 }
 
-// ClearUpgradeState removes the upgrade state from the cluster secret
+// ClearUpgradeState removes the upgrade state from the cluster secret. It runs
+// right after the completion path has written the secret several times, so a
+// stale cached read is expected and retried rather than failing the pass.
 func (m *UpgradeStateManager) ClearUpgradeState(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
-	secret, err := m.secretGetter.GetTalosSecret(ctx, cluster)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil // Nothing to clear
+	return retryOnConflict(ctx, cluster, func() error {
+		secret, err := m.secretGetter.GetTalosSecret(ctx, cluster)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil // Nothing to clear
+			}
+			return fmt.Errorf("failed to get cluster secret: %w", err)
 		}
-		return fmt.Errorf("failed to get cluster secret: %w", err)
-	}
 
-	delete(secret.Data, "upgrade_state")
+		if _, ok := secret.Data["upgrade_state"]; !ok {
+			return nil // Already cleared
+		}
+		delete(secret.Data, "upgrade_state")
 
-	if err := m.secretUpdater.UpdateTalosSecret(ctx, secret); err != nil {
-		return fmt.Errorf("failed to clear upgrade state: %w", err)
-	}
-
-	return nil
+		if err := m.secretUpdater.UpdateTalosSecret(ctx, secret); err != nil {
+			return fmt.Errorf("failed to clear upgrade state: %w", err)
+		}
+		return nil
+	})
 }
 
 // InitializeUpgradeState creates a new upgrade state for starting an upgrade
@@ -279,6 +302,33 @@ func (m *UpgradeStateManager) InitializeUpgradeState(
 		cluster.Name, upgradeType, targetVersion, len(nodes), len(controlPlanes), len(workers)))
 
 	return state, nil
+}
+
+// MarkNodeUpgradeStarted records that the operator started on a node and the
+// node's boot ID at that point. A re-driven upgrade keeps the first values, so
+// the node timeout keeps counting and the boot ID still predates the upgrade.
+func (m *UpgradeStateManager) MarkNodeUpgradeStarted(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, nodeName, bootID string) error {
+	return m.updateUpgradeState(ctx, cluster, func(state *ClusterUpgradeState) {
+		for i := range state.Nodes {
+			if state.Nodes[i].NodeName == nodeName {
+				if state.Nodes[i].StartedAt.IsZero() {
+					state.Nodes[i].StartedAt = time.Now().UTC()
+				}
+				if state.Nodes[i].BootIDBefore == "" {
+					state.Nodes[i].BootIDBefore = bootID
+				}
+				break
+			}
+		}
+	})
+}
+
+// SetEtcdUnhealthySince records when etcd was first found unhealthy before
+// taking down a control plane; a zero time clears it.
+func (m *UpgradeStateManager) SetEtcdUnhealthySince(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, since time.Time) error {
+	return m.updateUpgradeState(ctx, cluster, func(state *ClusterUpgradeState) {
+		state.EtcdUnhealthySince = since
+	})
 }
 
 // MarkNodeUpgradeInitiated marks that an upgrade has been initiated on a node
@@ -325,6 +375,7 @@ func (m *UpgradeStateManager) AdvanceToNextNode(ctx context.Context, cluster *vi
 	err := m.updateUpgradeState(ctx, cluster, func(state *ClusterUpgradeState) {
 		logMsg = ""
 		nextIndex := state.CurrentNodeIndex + 1
+		state.LastNodeDoneAt = time.Now().UTC()
 
 		// Check if we're done with control planes and need to wait
 		switch {
@@ -395,6 +446,36 @@ func (m *UpgradeStateManager) MarkUpgradeFailed(ctx context.Context, cluster *vi
 	})
 }
 
+// settleRemaining is how long the next node still has to wait after the
+// previous one finished.
+func (state *ClusterUpgradeState) settleRemaining(now time.Time, settle time.Duration) time.Duration {
+	if state.LastNodeDoneAt.IsZero() {
+		return 0
+	}
+	if remaining := settle - now.Sub(state.LastNodeDoneAt); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+// resetFailedNodeForResume clears a failed node so resume retries it in full
+// time. A node that had not finished its upgrade starts again from the drain,
+// with a fresh boot ID and timeout; one that had only to become Ready gets a
+// fresh timeout for that.
+func (state *ClusterUpgradeState) resetFailedNodeForResume(index int, now time.Time) {
+	node := &state.Nodes[index]
+	node.Error = ""
+	if node.UpgradeCompleted {
+		node.StartedAt = now
+	} else {
+		node.UpgradeInitiated = false
+		node.StartedAt = time.Time{}
+		node.InitiatedAt = time.Time{}
+		node.BootIDBefore = ""
+	}
+	state.EtcdUnhealthySince = time.Time{}
+}
+
 // GetCurrentNode returns the current node being upgraded
 func (state *ClusterUpgradeState) GetCurrentNode() *NodeUpgradeState {
 	if state.CurrentNodeIndex < 0 || state.CurrentNodeIndex >= len(state.Nodes) {
@@ -423,8 +504,8 @@ func (state *ClusterUpgradeState) IsInProgress() bool {
 // GetProgress returns upgrade progress as "completed/total"
 func (state *ClusterUpgradeState) GetProgress() string {
 	completed := 0
-	for _, node := range state.Nodes {
-		if node.UpgradeCompleted && node.NodeReady {
+	for i := range state.Nodes {
+		if state.Nodes[i].UpgradeCompleted && state.Nodes[i].NodeReady {
 			completed++
 		}
 	}

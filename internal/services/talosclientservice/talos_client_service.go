@@ -1,6 +1,7 @@
 package talosclientservice
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
+	talosconfig "github.com/siderolabs/talos/pkg/machinery/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/encoder"
 	v1alpha1config "github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
@@ -26,6 +28,33 @@ import (
 )
 
 type TalosClientService struct{}
+
+// Upper bounds for the Talos calls of a node upgrade. None of them has a
+// deadline of its own, and the reconcile context has none either, so a node
+// that accepts the call and never answers would hold the reconcile worker.
+const (
+	// installerPullTimeout bounds pulling the installer image into the node's
+	// containerd store (also the legacy Upgrade call, which pulls it itself).
+	installerPullTimeout = 5 * time.Minute
+	// installerRunTimeout bounds LifecycleService.Upgrade running the installer.
+	installerRunTimeout = 5 * time.Minute
+	// rebootCallTimeout bounds the Reboot call; the node answers it right away
+	// and reboots afterwards.
+	rebootCallTimeout = time.Minute
+)
+
+// ErrUpgradeStepTimedOut marks an upgrade call that ran out of time before the
+// node finished it. Unlike a dropped connection, it does not mean the node is
+// rebooting: the pull or the install hung.
+var ErrUpgradeStepTimedOut = errors.New("upgrade step timed out")
+
+// stepTimedOut wraps err with ErrUpgradeStepTimedOut when ctx ran out of time.
+func stepTimedOut(ctx context.Context, err error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", ErrUpgradeStepTimedOut, err)
+	}
+	return err
+}
 
 // RequeueError signals that the reconciler should requeue without treating it as a failure.
 // This allows non-blocking waits by returning early and letting the controller retry.
@@ -690,13 +719,15 @@ func (s *TalosClientService) upgradeNodeLegacy(
 	nodeIP string,
 	installerImage string,
 ) error {
-	nodeCtx := talosclient.WithNodes(ctx, nodeIP)
+	// The node pulls and validates the installer image before it answers.
+	nodeCtx, cancel := context.WithTimeout(talosclient.WithNodes(ctx, nodeIP), installerPullTimeout)
+	defer cancel()
 
 	// Parameters: image, stage (false = immediate), force (false = normal).
 	//nolint:staticcheck // SA1019: legacy API retained for nodes running Talos < v1.13
 	resp, err := tClient.Upgrade(nodeCtx, installerImage, false, false)
 	if err != nil {
-		return fmt.Errorf("upgrade API call failed for node %s: %w", nodeIP, err)
+		return stepTimedOut(nodeCtx, fmt.Errorf("upgrade API call failed for node %s: %w", nodeIP, err))
 	}
 
 	for _, msg := range resp.Messages {
@@ -729,7 +760,11 @@ func (s *TalosClientService) upgradeNodeViaLifecycle(
 	// the node's containerd store (unlike the legacy MachineService.Upgrade, which
 	// pulled it itself). Pre-pull it first, mirroring talosctl's lifecycle flow,
 	// otherwise the upgrade fails with "not found in containerd store".
-	if err := s.pullInstallerImage(nodeCtx, tClient, nodeIP, installerImage, containerdInstance); err != nil {
+	pullCtx, cancelPull := context.WithTimeout(nodeCtx, installerPullTimeout)
+	err := s.pullInstallerImage(pullCtx, tClient, nodeIP, installerImage, containerdInstance)
+	err = stepTimedOut(pullCtx, err)
+	cancelPull()
+	if err != nil {
 		return err
 	}
 
@@ -740,9 +775,42 @@ func (s *TalosClientService) upgradeNodeViaLifecycle(
 		},
 	}
 
-	stream, err := tClient.LifecycleClient.Upgrade(nodeCtx, req)
+	if err := s.runLifecycleInstaller(nodeCtx, tClient, nodeIP, req); err != nil {
+		return err
+	}
+
+	// Talos v1.13 LifecycleService.Upgrade installs the new version to disk but
+	// does NOT reboot (unlike the legacy MachineService.Upgrade, which rebooted
+	// as part of its sequence). The node keeps running the old version until it
+	// reboots into the freshly-installed one, so issue the reboot explicitly —
+	// mirroring talosctl's pull→upgrade→reboot flow. A dropped connection here
+	// means the node is already going down to reboot, which the caller treats as
+	// a successful initiation (see isConnectionError handling in the rolling
+	// upgrade executor).
+	vlog.Info(fmt.Sprintf("Rebooting node to boot into upgraded Talos: node=%s", nodeIP))
+	rebootCtx, cancelReboot := context.WithTimeout(nodeCtx, rebootCallTimeout)
+	defer cancelReboot()
+	if rerr := tClient.Reboot(rebootCtx); rerr != nil {
+		return fmt.Errorf("reboot after lifecycle upgrade failed for node %s: %w", nodeIP, rerr)
+	}
+
+	return nil
+}
+
+// runLifecycleInstaller runs the installer through LifecycleService.Upgrade and
+// follows its progress stream until the installer exits.
+func (s *TalosClientService) runLifecycleInstaller(
+	nodeCtx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+	req *machineapi.LifecycleServiceUpgradeRequest,
+) error {
+	ctx, cancel := context.WithTimeout(nodeCtx, installerRunTimeout)
+	defer cancel()
+
+	stream, err := tClient.LifecycleClient.Upgrade(ctx, req)
 	if err != nil {
-		return fmt.Errorf("lifecycle upgrade API call failed for node %s: %w", nodeIP, err)
+		return stepTimedOut(ctx, fmt.Errorf("lifecycle upgrade API call failed for node %s: %w", nodeIP, err))
 	}
 
 	for {
@@ -751,7 +819,7 @@ func (s *TalosClientService) upgradeNodeViaLifecycle(
 			break
 		}
 		if rerr != nil {
-			return fmt.Errorf("lifecycle upgrade stream error for node %s: %w", nodeIP, rerr)
+			return stepTimedOut(ctx, fmt.Errorf("lifecycle upgrade stream error for node %s: %w", nodeIP, rerr))
 		}
 
 		progress := resp.GetProgress()
@@ -771,19 +839,6 @@ func (s *TalosClientService) upgradeNodeViaLifecycle(
 			}
 			vlog.Info(fmt.Sprintf("Talos lifecycle upgrade completed: node=%s exitCode=0", nodeIP))
 		}
-	}
-
-	// Talos v1.13 LifecycleService.Upgrade installs the new version to disk but
-	// does NOT reboot (unlike the legacy MachineService.Upgrade, which rebooted
-	// as part of its sequence). The node keeps running the old version until it
-	// reboots into the freshly-installed one, so issue the reboot explicitly —
-	// mirroring talosctl's pull→upgrade→reboot flow. A dropped connection here
-	// means the node is already going down to reboot, which the caller treats as
-	// a successful initiation (see isConnectionError handling in the rolling
-	// upgrade executor).
-	vlog.Info(fmt.Sprintf("Rebooting node to boot into upgraded Talos: node=%s", nodeIP))
-	if rerr := tClient.Reboot(nodeCtx); rerr != nil {
-		return fmt.Errorf("reboot after lifecycle upgrade failed for node %s: %w", nodeIP, rerr)
 	}
 
 	return nil
@@ -914,38 +969,13 @@ func (s *TalosClientService) upgradeNodeKubernetes(
 		return fmt.Errorf("failed to fetch current machine config from node %s: %w", nodeIP, err)
 	}
 
-	provider := mc.Provider()
-
-	// Check if the machine config already specifies the target kubelet version.
-	// The kubelet may not have restarted yet, so the K8s API still reports the old
-	// version, but the config is already correct — no need to re-apply.
-	expectedKubeletImage := fmt.Sprintf("ghcr.io/siderolabs/kubelet:%s", targetVersion)
-	var configAlreadyCurrent bool
-	// Inspect current config without modifying it
-	_, _ = provider.PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
-		if cfg.MachineConfig != nil && cfg.MachineConfig.MachineKubelet != nil &&
-			cfg.MachineConfig.MachineKubelet.KubeletImage == expectedKubeletImage {
-			configAlreadyCurrent = true
-		}
-		return nil
-	})
-	if configAlreadyCurrent {
-		vlog.Info(fmt.Sprintf("Node %s machine config already has kubelet %s, waiting for kubelet restart", nodeIP, targetVersion))
-		return nil
-	}
-
-	// Patch the config with new Kubernetes image versions
-	newProvider, err := provider.PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
-		return s.patchKubernetesImages(cfg, targetVersion, isControlPlane)
-	})
+	cfgBytes, changed, err := s.kubernetesImagesConfig(mc.Provider(), targetVersion, isControlPlane)
 	if err != nil {
-		return fmt.Errorf("failed to patch machine config: %w", err)
+		return err
 	}
-
-	// Serialize the full patched config
-	cfgBytes, err := newProvider.EncodeBytes(encoder.WithComments(encoder.CommentsDisabled))
-	if err != nil {
-		return fmt.Errorf("failed to serialize patched config: %w", err)
+	if !changed {
+		vlog.Info(fmt.Sprintf("Node %s machine config already has Kubernetes %s images, waiting for the components to restart", nodeIP, targetVersion))
+		return nil
 	}
 
 	// Apply the patched config with NO_REBOOT mode
@@ -967,6 +997,36 @@ func (s *TalosClientService) upgradeNodeKubernetes(
 	}
 
 	return nil
+}
+
+// kubernetesImagesConfig returns the node's config with the Kubernetes images
+// for targetVersion set, and whether that differs from the config it has.
+// When every image is already set there is nothing to apply: the components
+// may not have restarted yet, but the config is right. Comparing the whole
+// config, not just the kubelet image, keeps a control plane whose kubelet was
+// patched earlier from skipping its apiserver, controller-manager, scheduler
+// and proxy images.
+func (s *TalosClientService) kubernetesImagesConfig(
+	provider talosconfig.Provider,
+	targetVersion string,
+	isControlPlane bool,
+) ([]byte, bool, error) {
+	newProvider, err := provider.PatchV1Alpha1(func(cfg *v1alpha1config.Config) error {
+		return s.patchKubernetesImages(cfg, targetVersion, isControlPlane)
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to patch machine config: %w", err)
+	}
+
+	cfgBytes, err := newProvider.EncodeBytes(encoder.WithComments(encoder.CommentsDisabled))
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to serialize patched config: %w", err)
+	}
+	currentBytes, err := provider.EncodeBytes(encoder.WithComments(encoder.CommentsDisabled))
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to serialize current config: %w", err)
+	}
+	return cfgBytes, !bytes.Equal(currentBytes, cfgBytes), nil
 }
 
 // NodeHasKubeletImage checks if a node's active machine config already specifies
@@ -1064,6 +1124,64 @@ func (s *TalosClientService) GetTalosVersion(
 	}
 
 	return "", fmt.Errorf("no version information returned from node %s", nodeIP)
+}
+
+// bootIDPath holds the kernel's random ID for the current boot; it changes on
+// every boot, kexec included.
+const bootIDPath = "/proc/sys/kernel/random/boot_id"
+
+// GetBootID returns the node's current boot ID, the way talosctl tells that a
+// node it asked to reboot really did.
+func (s *TalosClientService) GetBootID(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+) (string, error) {
+	r, err := tClient.Read(talosclient.WithNode(ctx, nodeIP), bootIDPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read boot ID from node %s: %w", nodeIP, err)
+	}
+	defer func() { _ = r.Close() }()
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", fmt.Errorf("failed to read boot ID from node %s: %w", nodeIP, err)
+	}
+	bootID := strings.TrimSpace(string(data))
+	if bootID == "" {
+		return "", fmt.Errorf("empty boot ID from node %s", nodeIP)
+	}
+	return bootID, nil
+}
+
+// IsMachineRunning reports whether Talos on the node has finished booting:
+// machine stage Running with every readiness condition met, the state
+// talosctl waits for after a reboot. When it is not, the second return value
+// says what Talos is still waiting for.
+func (s *TalosClientService) IsMachineRunning(
+	ctx context.Context,
+	tClient *talosclient.Client,
+	nodeIP string,
+) (bool, string, error) {
+	ms, err := safe.StateGetByID[*runtime.MachineStatus](talosclient.WithNode(ctx, nodeIP), tClient.COSI, runtime.MachineStatusID)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to get machine status from node %s: %w", nodeIP, err)
+	}
+
+	spec := ms.TypedSpec()
+	if spec.Stage == runtime.MachineStageRunning && spec.Status.Ready {
+		return true, "", nil
+	}
+
+	unmet := make([]string, 0, len(spec.Status.UnmetConditions))
+	for _, c := range spec.Status.UnmetConditions {
+		unmet = append(unmet, c.Name)
+	}
+	detail := "stage " + spec.Stage.String()
+	if len(unmet) > 0 {
+		detail += ", waiting for " + strings.Join(unmet, ", ")
+	}
+	return false, detail, nil
 }
 
 // GetKubernetesVersion retrieves the current Kubernetes version from a node.

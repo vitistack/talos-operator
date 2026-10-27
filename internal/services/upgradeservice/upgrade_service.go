@@ -314,6 +314,10 @@ func (s *UpgradeService) ReconcileTalosCurrentVersion(ctx context.Context, clust
 		updates[consts.TalosCurrentAnnotation] = running
 	}
 
+	if err := s.syncSecretTalosVersion(ctx, cluster, running); err != nil {
+		return err
+	}
+
 	// Clear "available" once the running version has reached or passed it
 	// (e.g. an enforced upgrade completed). Leave it when a genuinely newer
 	// version is still available.
@@ -345,6 +349,25 @@ func (s *UpgradeService) ReconcileTalosCurrentVersion(ctx context.Context, clust
 	}
 
 	vlog.Info(fmt.Sprintf("Refreshed Talos current version: %s current=%s clearedStaleAvailable=%t", clusterlog.Tag(cluster), running, clearAvailable))
+	return nil
+}
+
+// syncSecretTalosVersion sets the secret's talos_version to running when it
+// differs. It is checked apart from the annotation: only a completed
+// orchestrated upgrade used to write it, so on clusters upgraded any other way
+// (or never upgraded) it was missing or stale while the annotation was right.
+func (s *UpgradeService) syncSecretTalosVersion(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, running string) error {
+	if s.stateService == nil {
+		return nil
+	}
+	v, err := s.stateService.GetClusterVersions(ctx, cluster)
+	if err != nil || v == nil || consts.NormalizeTalosVersion(v.TalosVersion) == running {
+		return nil
+	}
+	if err := s.stateService.SetClusterVersions(ctx, cluster, running, ""); err != nil {
+		return err
+	}
+	vlog.Info(fmt.Sprintf("Refreshed Talos version in secret: %s version=%s", clusterlog.Tag(cluster), running))
 	return nil
 }
 
@@ -438,6 +461,28 @@ func (s *UpgradeService) GetPersistedUpgradeState(ctx context.Context, cluster *
 		return nil, fmt.Errorf("state service not available")
 	}
 	return s.stateService.GetUpgradeState(ctx, cluster)
+}
+
+// ClearStaleUpgradeInProgress clears the secret's upgrade_in_progress flag when
+// it is still set although no upgrade is running. The caller only reaches here
+// with no running upgrade plan. A completion or failure whose secret write was
+// lost otherwise leaves the flag set for good, and the version catch-up,
+// version and extension enforcement and install-image pinning all skip the
+// cluster while it is.
+func (s *UpgradeService) ClearStaleUpgradeInProgress(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) {
+	if s.stateService == nil {
+		return
+	}
+	flags, err := s.stateService.GetUpgradeState(ctx, cluster)
+	if err != nil || flags == nil || !flags.InProgress {
+		return
+	}
+	if err := s.stateService.ClearUpgradeState(ctx, cluster); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to clear stale upgrade_in_progress %s: %v", clusterlog.Tag(cluster), err))
+		return
+	}
+	vlog.Info(fmt.Sprintf("Cleared stale upgrade_in_progress (no upgrade running): %s type=%s target=%s",
+		clusterlog.Tag(cluster), flags.UpgradeType, flags.Target))
 }
 
 // GetPersistedVersions retrieves the cluster versions from the secret.
@@ -851,7 +896,7 @@ func (s *UpgradeService) CompleteTalosUpgrade(ctx context.Context, cluster *viti
 	// Persist completed version to secret and clear upgrade tracking
 	if s.stateService != nil {
 		if err := s.stateService.CompleteUpgradeState(ctx, cluster, "talos", targetVersion); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to persist completed upgrade to secret: %v", err))
+			return fmt.Errorf("failed to persist completed upgrade to secret: %w", err)
 		}
 		// Pin the installer image used by this upgrade so new nodes added later
 		// install the same Talos version instead of inheriting the operator's
@@ -1189,13 +1234,13 @@ func (s *UpgradeService) ClearFailedNodesForRetry(ctx context.Context, cluster *
 }
 
 // StartKubernetesUpgrade marks the beginning of a Kubernetes upgrade
-func (s *UpgradeService) StartKubernetesUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster) error {
+func (s *UpgradeService) StartKubernetesUpgrade(ctx context.Context, cluster *vitistackv1alpha1.KubernetesCluster, totalNodes int) error {
 	state := s.GetUpgradeState(cluster)
 
 	updates := map[string]string{
 		consts.KubernetesStatusAnnotation:   string(consts.UpgradeStatusInProgress),
 		consts.KubernetesMessageAnnotation:  fmt.Sprintf("Starting Kubernetes upgrade: %s → %s", state.KubernetesCurrent, state.KubernetesTarget),
-		consts.KubernetesProgressAnnotation: "0/0", // Will be updated once we know total nodes
+		consts.KubernetesProgressAnnotation: fmt.Sprintf("0/%d", totalNodes),
 	}
 
 	if err := s.SetUpgradeAnnotations(ctx, cluster, updates); err != nil {
@@ -1204,8 +1249,7 @@ func (s *UpgradeService) StartKubernetesUpgrade(ctx context.Context, cluster *vi
 
 	// Persist upgrade state to secret for recovery
 	if s.stateService != nil {
-		// For K8s upgrade, totalNodes is 1 since it's applied cluster-wide via machine config
-		if err := s.stateService.StartUpgradeState(ctx, cluster, "kubernetes", state.KubernetesTarget, 1); err != nil {
+		if err := s.stateService.StartUpgradeState(ctx, cluster, "kubernetes", state.KubernetesTarget, totalNodes); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to persist upgrade state to secret: %v", err))
 		}
 	}
@@ -1231,6 +1275,13 @@ func (s *UpgradeService) UpdateKubernetesUpgradeProgress(ctx context.Context, cl
 
 	if err := s.SetUpgradeAnnotations(ctx, cluster, updates); err != nil {
 		return err
+	}
+
+	// Persist progress to secret for recovery
+	if s.stateService != nil {
+		if err := s.stateService.UpdateUpgradeProgress(ctx, cluster, nodeName, nodesUpgraded); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to persist upgrade progress to secret: %v", err))
+		}
 	}
 
 	// Update condition with progress
@@ -1259,7 +1310,7 @@ func (s *UpgradeService) CompleteKubernetesUpgrade(ctx context.Context, cluster 
 	// Persist completed version to secret
 	if s.stateService != nil {
 		if err := s.stateService.CompleteUpgradeState(ctx, cluster, "kubernetes", targetVersion); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to persist completed upgrade to secret: %v", err))
+			return fmt.Errorf("failed to persist completed upgrade to secret: %w", err)
 		}
 	}
 

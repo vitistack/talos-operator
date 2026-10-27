@@ -118,6 +118,19 @@ talos:
   # operator re-triggers (likely the previous upgrade failed). Min: 1.
   versionEnforceCooldownMinutes: 5
 
+# Orchestrated Talos/Kubernetes upgrades (talos-target / kubernetes-target
+# annotations). Nodes are upgraded one at a time, control planes first.
+upgrade:
+  # Minutes one node may take, from the operator starting on it until it is
+  # Ready again. A node that runs over fails the upgrade; it then waits for
+  # the resume or reset annotation. A healthy node takes 4-8 minutes. Min: 1.
+  nodeTimeoutMinutes: 15
+  # Minutes to wait for etcd to be healthy on every control plane before the
+  # next control plane is taken down. Runs out: the upgrade fails. Min: 1.
+  etcdHealthyTimeoutMinutes: 5
+  # Seconds to pause after a node is Ready before starting the next one.
+  nodeSettleSeconds: 60
+
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
   # Specifies whether a service account should be created

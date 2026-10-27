@@ -13,6 +13,7 @@ import (
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
+	"github.com/vitistack/talos-operator/pkg/consts"
 	yaml "gopkg.in/yaml.v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -327,7 +328,7 @@ func (s *TalosStateService) SetClusterVersions(ctx context.Context, cluster *vit
 		}
 
 		if talosVersion != "" {
-			secret.Data["talos_version"] = []byte(talosVersion)
+			secret.Data["talos_version"] = []byte(consts.NormalizeTalosVersion(talosVersion))
 		}
 		if kubernetesVersion != "" {
 			secret.Data["kubernetes_version"] = []byte(kubernetesVersion)
@@ -823,7 +824,7 @@ func (s *TalosStateService) CompleteUpgradeState(ctx context.Context, cluster *v
 		// Update the appropriate version field
 		switch upgradeType {
 		case "talos":
-			secret.Data["talos_version"] = []byte(newVersion)
+			secret.Data["talos_version"] = []byte(consts.NormalizeTalosVersion(newVersion))
 		case "kubernetes":
 			secret.Data["kubernetes_version"] = []byte(newVersion)
 		}

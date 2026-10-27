@@ -96,12 +96,12 @@ func (c *UpgradeController) HandleUpgrade(
 	upgState := c.upgradeService.GetUpgradeState(cluster)
 
 	// Check for Talos upgrade request
-	if c.upgradeService.IsTalosUpgradeRequested(cluster) && !failedPlanOwnsTarget(state, upgState) {
+	if c.upgradeService.IsTalosUpgradeRequested(cluster) && !failedPlanBlocksStart(state, UpgradeTypeTalos, upgState.TalosTarget) {
 		return c.startTalosUpgrade(ctx, cluster, clientConfig, machines, upgState)
 	}
 
 	// Check for Kubernetes upgrade request
-	if c.upgradeService.IsKubernetesUpgradeRequested(cluster) {
+	if c.upgradeService.IsKubernetesUpgradeRequested(cluster) && !failedPlanBlocksStart(state, UpgradeTypeKubernetes, upgState.KubernetesTarget) {
 		return c.startKubernetesUpgrade(ctx, cluster, clientConfig, machines, upgState)
 	}
 
@@ -114,18 +114,8 @@ func (c *UpgradeController) HandleUpgrade(
 	// Reached only when no persisted upgrade is running, so any condition
 	// still reporting progress is left over.
 	c.retireStaleUpgradeConditions(ctx, cluster, upgState)
+	c.upgradeService.ClearStaleUpgradeInProgress(ctx, cluster)
 	return 0, false, nil
-}
-
-// failedPlanOwnsTarget reports whether a failed Talos upgrade plan for this
-// same target is still stored. talos-current is the lowest version among the
-// nodes that ANSWER, so a node that failed and went unreachable can let it
-// reach the target while that node is still behind: closing the request as
-// completed would erase the failure. The plan is left for resume or reset.
-func failedPlanOwnsTarget(state *ClusterUpgradeState, upgState *UpgradeState) bool {
-	return state != nil && state.IsFailed() && state.UpgradeType == UpgradeTypeTalos &&
-		sameVersion(state.TargetVersion, upgState.TalosTarget) &&
-		sameVersion(upgState.TalosCurrent, upgState.TalosTarget)
 }
 
 // retireStaleUpgradeConditions ends an upgrade condition that no longer
@@ -205,9 +195,14 @@ func (c *UpgradeController) handleCompletedUpgrade(
 ) (time.Duration, bool, error) {
 	vlog.Info(fmt.Sprintf("Upgrade completed: %s type=%s targetVersion=%s", clusterlog.Tag(cluster), state.UpgradeType, state.TargetVersion))
 
-	// Mark upgrade as complete and regenerate configs
+	// Mark upgrade as complete and regenerate configs. The plan is only cleared
+	// once the completion is recorded: clearing it after a failed write left
+	// upgrade_in_progress set with nothing left to retry the write.
 	if state.UpgradeType == UpgradeTypeTalos {
-		_ = c.upgradeService.CompleteTalosUpgrade(ctx, cluster, state.TargetVersion, state.InstallerImage)
+		if err := c.upgradeService.CompleteTalosUpgrade(ctx, cluster, state.TargetVersion, state.InstallerImage); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to record completed Talos upgrade, retrying %s: %v", clusterlog.Tag(cluster), err))
+			return completionRetryDelay, true, nil
+		}
 
 		// Regenerate machine configs after Talos upgrade. Pass the
 		// cluster's CURRENT Kubernetes version as override so a prior
@@ -223,7 +218,10 @@ func (c *UpgradeController) handleCompletedUpgrade(
 			}
 		}
 	} else {
-		_ = c.upgradeService.CompleteKubernetesUpgrade(ctx, cluster, state.TargetVersion)
+		if err := c.upgradeService.CompleteKubernetesUpgrade(ctx, cluster, state.TargetVersion); err != nil {
+			vlog.Warn(fmt.Sprintf("Failed to record completed Kubernetes upgrade, retrying %s: %v", clusterlog.Tag(cluster), err))
+			return completionRetryDelay, true, nil
+		}
 
 		// Regenerate machine configs after Kubernetes upgrade
 		// Pass the current Talos version (for installer image) and the NEW K8s version (for config)
@@ -239,7 +237,10 @@ func (c *UpgradeController) handleCompletedUpgrade(
 	}
 
 	// Clear upgrade state from secret
-	_ = c.stateManager.ClearUpgradeState(ctx, cluster)
+	if err := c.stateManager.ClearUpgradeState(ctx, cluster); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to clear completed upgrade plan, retrying %s: %v", clusterlog.Tag(cluster), err))
+		return completionRetryDelay, true, nil
+	}
 
 	// Reset phase to ready
 	_ = c.statusManager.SetPhase(ctx, cluster, status.PhaseReady)
@@ -322,6 +323,10 @@ func (c *UpgradeController) startTalosUpgrade(
 	// Record the cluster's health as the upgrade starts (secret health_check_*).
 	c.upgradeService.RecordPreUpgradeHealth(ctx, cluster, clientConfig, controlPlanes, workers)
 
+	if c.etcdBlocksStart(ctx, cluster, clientConfig, controlPlanes, UpgradeTypeTalos, upgState) {
+		return etcdStartRecheckDelay, true, nil
+	}
+
 	// Initialize upgrade state
 	_, err = c.stateManager.InitializeUpgradeState(
 		ctx, cluster,
@@ -337,7 +342,7 @@ func (c *UpgradeController) startTalosUpgrade(
 
 	// Update status
 	_ = c.statusManager.SetPhase(ctx, cluster, status.PhaseUpgradingTalos)
-	_ = c.upgradeService.StartTalosUpgrade(ctx, cluster, len(machines))
+	_ = c.upgradeService.StartTalosUpgrade(ctx, cluster, len(controlPlanes)+len(workers))
 
 	// Continue with upgrade
 	result := c.rollingUpgrade.ExecuteTalosUpgradeStep(ctx, cluster, clientConfig)
@@ -374,6 +379,10 @@ func (c *UpgradeController) startKubernetesUpgrade(
 	// Record the cluster's health as the upgrade starts (secret health_check_*).
 	c.upgradeService.RecordPreUpgradeHealth(ctx, cluster, clientConfig, controlPlanes, workers)
 
+	if c.etcdBlocksStart(ctx, cluster, clientConfig, controlPlanes, UpgradeTypeKubernetes, upgState) {
+		return etcdStartRecheckDelay, true, nil
+	}
+
 	// Initialize upgrade state
 	_, err := c.stateManager.InitializeUpgradeState(
 		ctx, cluster,
@@ -389,11 +398,55 @@ func (c *UpgradeController) startKubernetesUpgrade(
 
 	// Update status
 	_ = c.statusManager.SetPhase(ctx, cluster, status.PhaseUpgradingKubernetes)
-	_ = c.upgradeService.StartKubernetesUpgrade(ctx, cluster)
+	_ = c.upgradeService.StartKubernetesUpgrade(ctx, cluster, len(controlPlanes)+len(workers))
 
 	// Continue with upgrade
 	result := c.rollingUpgrade.ExecuteKubernetesUpgradeStep(ctx, cluster, clientConfig)
 	return c.handleUpgradeResult(ctx, cluster, result, UpgradeTypeKubernetes)
+}
+
+// completionRetryDelay is how soon a completed upgrade whose completion could
+// not be recorded is tried again.
+const completionRetryDelay = 10 * time.Second
+
+// etcdStartRecheckDelay is how often an upgrade held back by unhealthy etcd
+// checks again whether it can start.
+const etcdStartRecheckDelay = 60 * time.Second
+
+// etcdBlocksStart checks etcd on every control plane before an upgrade starts.
+// When it is not healthy the upgrade is reported failed and no node is
+// touched. The request stays, so the upgrade starts on a later pass once etcd
+// is healthy again: nothing has changed on the cluster yet that would need a
+// person to look at it first.
+func (c *UpgradeController) etcdBlocksStart(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	controlPlanes []NodeUpgradeState,
+	upgradeType UpgradeType,
+	upgState *UpgradeState,
+) bool {
+	ips := make([]string, 0, len(controlPlanes))
+	for i := range controlPlanes {
+		ips = append(ips, controlPlanes[i].IP)
+	}
+	err := c.rollingUpgrade.etcdHealth(ctx, clientConfig, ips)
+	if err == nil {
+		return false
+	}
+
+	reason := fmt.Sprintf("not started: %v; it starts once etcd is healthy on every control plane", err)
+	vlog.Warn(fmt.Sprintf("Holding back %s upgrade: %s %s", upgradeType, clusterlog.Tag(cluster), reason))
+
+	// Rewrite the failure only when it changed, not on every recheck.
+	if upgradeType == UpgradeTypeTalos {
+		if upgState.TalosStatus != consts.UpgradeStatusFailed || upgState.TalosMessage != "Talos upgrade failed: "+reason {
+			_ = c.upgradeService.FailTalosUpgrade(ctx, cluster, reason)
+		}
+	} else if upgState.KubernetesStatus != consts.UpgradeStatusFailed || upgState.KubernetesMessage != "Kubernetes upgrade failed: "+reason {
+		_ = c.upgradeService.FailKubernetesUpgrade(ctx, cluster, reason)
+	}
+	return true
 }
 
 // resumeFailedUpgrade resumes a failed upgrade
@@ -424,8 +477,8 @@ func (c *UpgradeController) resumeFailedUpgrade(
 	if state.Phase == UpgradePhaseFailed {
 		// Determine which phase to resume from
 		failedNodeIndex := -1
-		for i, node := range state.Nodes {
-			if node.NodeName == state.FailedNodeName {
+		for i := range state.Nodes {
+			if state.Nodes[i].NodeName == state.FailedNodeName {
 				failedNodeIndex = i
 				break
 			}
@@ -433,7 +486,7 @@ func (c *UpgradeController) resumeFailedUpgrade(
 
 		if failedNodeIndex >= 0 {
 			// Reset the failed node state
-			state.Nodes[failedNodeIndex].Error = ""
+			state.resetFailedNodeForResume(failedNodeIndex, time.Now().UTC())
 			state.CurrentNodeIndex = failedNodeIndex
 			state.CurrentNodeName = state.Nodes[failedNodeIndex].NodeName
 

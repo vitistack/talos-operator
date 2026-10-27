@@ -37,11 +37,11 @@ func (s *UpgradeService) RecordPreUpgradeHealth(
 	controlPlanes, workers []NodeUpgradeState,
 ) *talosstateservice.HealthCheckState {
 	nodeIPs := make([]string, 0, len(controlPlanes)+len(workers))
-	for _, n := range controlPlanes {
-		nodeIPs = append(nodeIPs, n.IP)
+	for i := range controlPlanes {
+		nodeIPs = append(nodeIPs, controlPlanes[i].IP)
 	}
-	for _, n := range workers {
-		nodeIPs = append(nodeIPs, n.IP)
+	for i := range workers {
+		nodeIPs = append(nodeIPs, workers[i].IP)
 	}
 
 	var health preUpgradeHealth

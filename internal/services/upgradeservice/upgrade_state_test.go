@@ -166,3 +166,34 @@ func TestUpgradeStateWrite_GivesUpOnPersistentConflict(t *testing.T) {
 		t.Errorf("gave up after %d write attempt(s), want a retry", store.updates)
 	}
 }
+
+// The loop seen on test02-chsk: the completion path writes the secret
+// (version, install image, config templates) and ClearUpgradeState then read
+// it from a cache that had not seen those writes. The conflict failed the
+// pass, and the whole completion was redone until a read happened to be fresh.
+func TestClearUpgradeState_RetriesStaleReadAndKeepsOtherKeys(t *testing.T) {
+	t.Parallel()
+	store := newLaggingSecretStore(t, map[string][]byte{"upgrade_state": controlPlanesSettledState(t)})
+	m := NewUpgradeStateManager(store, store)
+	ctx := context.Background()
+
+	// CompleteTalosUpgrade writing the new version earlier in the same pass.
+	fresh, _ := store.GetTalosSecret(ctx, testUpgradeCluster)
+	fresh.Data["talos_version"] = []byte("v1.13.12")
+	if err := store.UpdateTalosSecret(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.ClearUpgradeState(ctx, testUpgradeCluster); err != nil {
+		t.Fatalf("ClearUpgradeState: %v", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, ok := store.live.Data["upgrade_state"]; ok {
+		t.Error("upgrade_state still present after clear")
+	}
+	if got := string(store.live.Data["talos_version"]); got != "v1.13.12" {
+		t.Errorf("talos_version = %q, want the value written before the clear", got)
+	}
+}

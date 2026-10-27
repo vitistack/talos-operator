@@ -1,0 +1,60 @@
+apiVersion: vitistack.io/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: team-roger-001-1337
+spec:
+  data:
+    clusterUid: "d9dc0751-4d52-474d-a16b-c738c0bfff78"
+    clusterId: "team-roger-001-1337"
+    provider: talos
+    environment: dev
+    datacenter: no-south-az1
+    project: simple-project
+    region: south
+    workorder: "simple-workorder"
+    zone: "az1"
+    workspace: "simple-workspace"
+    networkNamespaceName: team-roger
+  topology:
+    version: "1.36.1"
+    controlplane:
+      replicas: 3
+      version: "1.36.1"
+      machineClass: small # Should provide 4 vCPUs, 4 GiB RAM
+      provider: kubevirt
+      storage:
+        - class: "standard"
+          path: "/var/lib/vitistack/kubevirt"
+          size: "20Gi" # Talos recommended for production
+      metadata:
+        annotations:
+          environment: development
+          region: south
+        labels:
+          environment: development
+          region: south
+    workers:
+      nodePools:
+        - name: wp
+          taint: []
+          version: "1.36.1"
+          replicas: 3
+          machineClass: medium # Should provide 2 vCPUs, 2 GiB RAM
+          autoscaling:
+            enabled: false
+            minReplicas: 1
+            maxReplicas: 5
+            scalingRules:
+              - "cpu"
+          metadata:
+            annotations:
+              environment: development
+              region: south
+            labels:
+              environment: development
+              region: south
+          provider: kubevirt
+          storage:
+            - class: "standard"
+              path: "/var/lib/vitistack/kubevirt"
+              size: "20Gi" # Talos recommended for production

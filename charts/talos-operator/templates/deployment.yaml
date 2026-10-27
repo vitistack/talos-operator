@@ -113,6 +113,18 @@ spec:
             - name: TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.upgrade.nodeTimeoutMinutes }}
+            - name: UPGRADE_NODE_TIMEOUT_MINUTES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.upgrade.etcdHealthyTimeoutMinutes }}
+            - name: UPGRADE_ETCD_HEALTHY_TIMEOUT_MINUTES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if hasKey .Values.upgrade "nodeSettleSeconds" }}
+            - name: UPGRADE_NODE_SETTLE_SECONDS
+              value: {{ .Values.upgrade.nodeSettleSeconds | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -57,6 +57,15 @@ func Init() {
 	// already mid-upgrade. Drain is the long pole; 5 minutes is comfortable.
 	viper.SetDefault(consts.TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES, 5)
 
+	// Orchestrated upgrade pacing (talos-target / kubernetes-target). A node
+	// that is not Ready again within UPGRADE_NODE_TIMEOUT_MINUTES fails the
+	// upgrade; a control plane is only taken down once etcd is healthy on
+	// every control plane, waiting at most UPGRADE_ETCD_HEALTHY_TIMEOUT_MINUTES;
+	// and UPGRADE_NODE_SETTLE_SECONDS separates one node from the next.
+	viper.SetDefault(consts.UPGRADE_NODE_TIMEOUT_MINUTES, 15)
+	viper.SetDefault(consts.UPGRADE_ETCD_HEALTHY_TIMEOUT_MINUTES, 5)
+	viper.SetDefault(consts.UPGRADE_NODE_SETTLE_SECONDS, 60)
+
 	// Endpoint mode configuration
 	// Valid values: "none", "networkconfiguration", "talosvip", "custom"
 	// Default: "networkconfiguration" (uses ControlPlaneVirtualSharedIP from NetworkNamespace)

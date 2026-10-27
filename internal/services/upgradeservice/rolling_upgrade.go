@@ -3,6 +3,7 @@ package upgradeservice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -60,6 +61,9 @@ type RollingUpgradeExecutor struct {
 	readinessChecker   *NodeReadinessChecker
 	talosClientService *talosclientservice.TalosClientService
 	upgradeService     UpgradeAnnotationUpdater
+	// etcdHealth checks etcd on the control planes before one is taken down;
+	// a field so tests can stand in for the Talos API.
+	etcdHealth etcdHealthCheck
 }
 
 // UpgradeAnnotationUpdater interface for updating upgrade annotations
@@ -80,6 +84,98 @@ func NewRollingUpgradeExecutor(
 		readinessChecker:   readinessChecker,
 		talosClientService: talosClientService,
 		upgradeService:     upgradeService,
+		etcdHealth:         talosEtcdHealthCheck(talosClientService),
+	}
+}
+
+// guardNode runs before every step on a node. It fails a node that has run
+// past UPGRADE_NODE_TIMEOUT_MINUTES, and holds a node that has not started
+// yet until the settle pause after the previous node is over and, for a
+// control plane, until etcd is healthy on every control plane. A nil result
+// lets the step go ahead.
+func (e *RollingUpgradeExecutor) guardNode(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	state *ClusterUpgradeState,
+	node *NodeUpgradeState,
+) *RollingUpgradeResult {
+	now := time.Now()
+	timeout := nodeUpgradeTimeout()
+	if step, timedOut := nodeTimedOut(node, state.UpgradeType, now, timeout); timedOut {
+		reason := fmt.Sprintf("node %s did not finish its upgrade within %s (stuck %s); set the resume annotation to retry it",
+			node.NodeName, timeout, step)
+		_ = e.stateManager.MarkUpgradeFailed(ctx, cluster, node.NodeName, reason)
+		return &RollingUpgradeResult{
+			Error:   errors.New(reason),
+			Message: fmt.Sprintf("Node %s timed out", node.NodeName),
+		}
+	}
+
+	if !node.nodeStartedAt().IsZero() {
+		return nil // already under way
+	}
+
+	if wait := state.settleRemaining(now, nodeSettleDuration()); wait > 0 {
+		return &RollingUpgradeResult{
+			Continue:     true,
+			RequeueAfter: wait,
+			Message:      fmt.Sprintf("Pausing %s before upgrading %s", wait.Round(time.Second), node.NodeName),
+		}
+	}
+
+	if node.Role == controlPlaneRole {
+		return e.waitForEtcd(ctx, cluster, clientConfig, state, node)
+	}
+	return nil
+}
+
+// waitForEtcd lets a control plane go down only while etcd is healthy on every
+// control plane: the previous one's member may still be rejoining, and taking
+// a second member down then can cost quorum. It waits up to
+// UPGRADE_ETCD_HEALTHY_TIMEOUT_MINUTES, then fails the upgrade.
+func (e *RollingUpgradeExecutor) waitForEtcd(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	clientConfig *clientconfig.Config,
+	state *ClusterUpgradeState,
+	node *NodeUpgradeState,
+) *RollingUpgradeResult {
+	err := e.etcdHealth(ctx, clientConfig, state.controlPlaneIPs())
+	if err == nil {
+		if !state.EtcdUnhealthySince.IsZero() {
+			if serr := e.stateManager.SetEtcdUnhealthySince(ctx, cluster, time.Time{}); serr != nil {
+				vlog.Warn(fmt.Sprintf("Failed to clear etcd wait: %s error=%v", clusterlog.Tag(cluster), serr))
+			}
+		}
+		return nil
+	}
+
+	since := state.EtcdUnhealthySince
+	if since.IsZero() {
+		since = time.Now().UTC()
+		if serr := e.stateManager.SetEtcdUnhealthySince(ctx, cluster, since); serr != nil {
+			vlog.Warn(fmt.Sprintf("Failed to record etcd wait: %s error=%v", clusterlog.Tag(cluster), serr))
+		}
+	}
+
+	timeout := etcdHealthyTimeout()
+	if time.Since(since) > timeout {
+		reason := fmt.Sprintf("%v for more than %s, so control plane %s was not taken down; set the resume annotation to retry",
+			err, timeout, node.NodeName)
+		_ = e.stateManager.MarkUpgradeFailed(ctx, cluster, node.NodeName, reason)
+		return &RollingUpgradeResult{
+			Error:   errors.New(reason),
+			Message: "etcd is not healthy",
+		}
+	}
+
+	vlog.Info(fmt.Sprintf("Waiting for etcd before upgrading control plane: %s node=%s error=%v",
+		clusterlog.Tag(cluster), node.NodeName, err))
+	return &RollingUpgradeResult{
+		Continue:     true,
+		RequeueAfter: etcdHealthyRecheckInterval,
+		Message:      fmt.Sprintf("Waiting for etcd to be healthy before upgrading %s", node.NodeName),
 	}
 }
 
@@ -284,6 +380,10 @@ func (e *RollingUpgradeExecutor) processNode(
 	state *ClusterUpgradeState,
 	node *NodeUpgradeState,
 ) *RollingUpgradeResult {
+	if result := e.guardNode(ctx, cluster, clientConfig, state, node); result != nil {
+		return result
+	}
+
 	// Step 1: If upgrade not initiated, initiate it
 	if !node.UpgradeInitiated {
 		return e.initiateNodeUpgrade(ctx, cluster, clientConfig, state, node)
@@ -331,12 +431,6 @@ func (e *RollingUpgradeExecutor) initiateNodeUpgrade(
 	vlog.Info(fmt.Sprintf("Upgrading node: %s node=%s (%d/%d)",
 		clusterlog.Tag(cluster), node.NodeName, state.CurrentNodeIndex+1, len(state.Nodes)))
 
-	// Cordon and drain the node first
-	if err := e.readinessChecker.DrainNode(ctx, cluster, node.NodeName); err != nil {
-		vlog.Warn(fmt.Sprintf("Drain failed (continuing anyway): node=%s error=%v", node.NodeName, err))
-		// Don't fail on drain errors - the node will reboot anyway
-	}
-
 	// Create Talos client
 	client, err := e.talosClientService.CreateTalosClient(ctx, false, clientConfig, []string{node.IP})
 	if err != nil {
@@ -348,8 +442,36 @@ func (e *RollingUpgradeExecutor) initiateNodeUpgrade(
 	}
 	defer func() { _ = client.Close() }()
 
+	// Record the boot ID before anything happens to the node: a new one later
+	// is the proof that it rebooted. Without it, completion falls back to the
+	// version alone.
+	probeCtx, cancelProbe := context.WithTimeout(ctx, nodeProbeTimeout)
+	bootID, err := e.talosClientService.GetBootID(probeCtx, client, node.IP)
+	cancelProbe()
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Could not read boot ID, reboot will be judged by version only: node=%s error=%v", node.NodeName, err))
+	}
+	if err := e.stateManager.MarkNodeUpgradeStarted(ctx, cluster, node.NodeName, bootID); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to record node upgrade start: %v", err))
+	}
+
+	// Cordon and drain the node first
+	if err := e.readinessChecker.DrainNode(ctx, cluster, node.NodeName); err != nil {
+		vlog.Warn(fmt.Sprintf("Drain failed (continuing anyway): node=%s error=%v", node.NodeName, err))
+		// Don't fail on drain errors - the node will reboot anyway
+	}
+
 	// Call the upgrade API
 	if err := e.talosClientService.UpgradeNode(ctx, client, node.IP, state.InstallerImage); err != nil {
+		// A pull or install that ran out of time hung; the node is not rebooting.
+		if errors.Is(err, talosclientservice.ErrUpgradeStepTimedOut) {
+			_ = e.stateManager.MarkUpgradeFailed(ctx, cluster, node.NodeName, fmt.Sprintf("upgrade API timed out: %v", err))
+			return &RollingUpgradeResult{
+				Error:   fmt.Errorf("upgrade timed out: %w", err),
+				Message: fmt.Sprintf("Upgrade timed out on node %s", node.NodeName),
+			}
+		}
+
 		// Check if it's a "locked" error (upgrade already in progress)
 		if strings.Contains(err.Error(), "locked") {
 			vlog.Info(fmt.Sprintf("Upgrade already in progress on node %s", node.NodeName))
@@ -399,7 +521,9 @@ func (e *RollingUpgradeExecutor) initiateNodeUpgrade(
 	}
 }
 
-// checkNodeUpgradeCompletion checks if a node's upgrade has completed by verifying version
+// checkNodeUpgradeCompletion checks whether a node has rebooted into the
+// target version and finished booting, the way talosctl judges an upgrade:
+// a new boot ID, the target version, and Talos reporting Running and Ready.
 func (e *RollingUpgradeExecutor) checkNodeUpgradeCompletion(
 	ctx context.Context,
 	cluster *vitistackv1alpha1.KubernetesCluster,
@@ -407,8 +531,12 @@ func (e *RollingUpgradeExecutor) checkNodeUpgradeCompletion(
 	state *ClusterUpgradeState,
 	node *NodeUpgradeState,
 ) *RollingUpgradeResult {
+	// A rebooting node can accept a connection and not answer.
+	probeCtx, cancelProbe := context.WithTimeout(ctx, nodeProbeTimeout)
+	defer cancelProbe()
+
 	// Try to create a client to the node
-	client, err := e.talosClientService.CreateTalosClient(ctx, false, clientConfig, []string{node.IP})
+	client, err := e.talosClientService.CreateTalosClient(probeCtx, false, clientConfig, []string{node.IP})
 	if err != nil {
 		// Connection error - node is likely still rebooting
 		return &RollingUpgradeResult{
@@ -420,7 +548,7 @@ func (e *RollingUpgradeExecutor) checkNodeUpgradeCompletion(
 	defer func() { _ = client.Close() }()
 
 	// Get current version
-	currentVersion, err := e.talosClientService.GetTalosVersion(ctx, client, node.IP)
+	currentVersion, err := e.talosClientService.GetTalosVersion(probeCtx, client, node.IP)
 	if err != nil {
 		return &RollingUpgradeResult{
 			Continue:     true,
@@ -429,11 +557,34 @@ func (e *RollingUpgradeExecutor) checkNodeUpgradeCompletion(
 		}
 	}
 
-	// Compare versions (normalize by removing 'v' prefix)
-	normalizedCurrent := strings.TrimPrefix(currentVersion, "v")
-	normalizedTarget := strings.TrimPrefix(state.TargetVersion, "v")
+	bootID, err := e.talosClientService.GetBootID(probeCtx, client, node.IP)
+	if err != nil {
+		vlog.Debug(fmt.Sprintf("Could not read boot ID: node=%s error=%v", node.NodeName, err))
+		bootID = ""
+	}
 
-	if normalizedCurrent == normalizedTarget {
+	switch classifyTalosNode(node.BootIDBefore, bootID, currentVersion, state.TargetVersion) {
+	case talosNodeRolledBack:
+		reason := fmt.Sprintf("node %s rebooted but runs Talos %s instead of %s: the new version did not boot and Talos fell back to the previous one; "+
+			"check the node's console, then set the resume annotation to retry it", node.NodeName, currentVersion, state.TargetVersion)
+		_ = e.stateManager.MarkUpgradeFailed(ctx, cluster, node.NodeName, reason)
+		return &RollingUpgradeResult{
+			Error:   errors.New(reason),
+			Message: fmt.Sprintf("Node %s rolled back", node.NodeName),
+		}
+	case talosNodeOnTarget:
+		running, detail, err := e.talosClientService.IsMachineRunning(probeCtx, client, node.IP)
+		if err != nil || !running {
+			if err != nil {
+				detail = err.Error()
+			}
+			return &RollingUpgradeResult{
+				Continue:     true,
+				RequeueAfter: 15 * time.Second,
+				Message:      fmt.Sprintf("Node %s runs %s, waiting for Talos to finish booting (%s)", node.NodeName, currentVersion, detail),
+			}
+		}
+
 		vlog.Info(fmt.Sprintf("Node upgraded: %s node=%s version=%s", clusterlog.Tag(cluster), node.NodeName, currentVersion))
 		if err := e.stateManager.MarkNodeUpgradeCompleted(ctx, cluster, node.NodeName); err != nil {
 			vlog.Warn(fmt.Sprintf("Failed to mark node as completed: %v", err))
@@ -676,24 +827,19 @@ func (e *RollingUpgradeExecutor) processKubernetesNode(
 	state *ClusterUpgradeState,
 	node *NodeUpgradeState,
 ) *RollingUpgradeResult {
+	if result := e.guardNode(ctx, cluster, clientConfig, state, node); result != nil {
+		return result
+	}
+
 	// Step 1: If upgrade not initiated, initiate it
 	if !node.UpgradeInitiated {
 		return e.initiateKubernetesNodeUpgrade(ctx, cluster, clientConfig, state, node)
 	}
 
-	// Step 2: If upgrade initiated but not completed, mark as completed
-	// (Kubernetes config apply is synchronous, so once initiated it's effectively done)
+	// Step 2: The config is applied; the node is upgraded once its kubelet
+	// has restarted and reports the target version.
 	if !node.UpgradeCompleted {
-		if err := e.stateManager.MarkNodeUpgradeCompleted(ctx, cluster, node.NodeName); err != nil {
-			vlog.Warn(fmt.Sprintf("Failed to mark node upgrade completed: %v", err))
-		}
-		vlog.Info(fmt.Sprintf("Kubernetes config applied to node: %s node=%s version=%s",
-			clusterlog.Tag(cluster), node.NodeName, state.TargetVersion))
-		return &RollingUpgradeResult{
-			Continue:     true,
-			RequeueAfter: 5 * time.Second,
-			Message:      fmt.Sprintf("Kubernetes config applied to %s, waiting for node ready", node.NodeName),
-		}
+		return e.checkKubeletVersion(ctx, cluster, state, node)
 	}
 
 	// Step 3: If upgraded but not ready, wait for ready
@@ -754,6 +900,11 @@ func (e *RollingUpgradeExecutor) initiateKubernetesNodeUpgrade(
 		_ = e.upgradeService.UpdateKubernetesUpgradeProgress(ctx, cluster, node.NodeName, nodePosition-1, totalNodes)
 	}
 
+	// Start the node's timeout. No boot ID: a Kubernetes upgrade does not reboot.
+	if err := e.stateManager.MarkNodeUpgradeStarted(ctx, cluster, node.NodeName, ""); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to record node upgrade start: %v", err))
+	}
+
 	// Cordon node to prevent new workloads
 	if err := e.readinessChecker.CordonNode(ctx, cluster, node.NodeName); err != nil {
 		vlog.Warn(fmt.Sprintf("Cordon failed (continuing anyway): node=%s error=%v", node.NodeName, err))
@@ -800,6 +951,47 @@ func (e *RollingUpgradeExecutor) initiateKubernetesNodeUpgrade(
 		Continue:     true,
 		RequeueAfter: 10 * time.Second,
 		Message:      fmt.Sprintf("Kubernetes upgrade initiated on %s, waiting for completion", node.NodeName),
+	}
+}
+
+// checkKubeletVersion marks a node's Kubernetes upgrade completed once its
+// kubelet reports the target version. Applying the config only asks Talos to
+// restart the kubelet with the new image; until the node reports the version,
+// nothing shows it happened.
+func (e *RollingUpgradeExecutor) checkKubeletVersion(
+	ctx context.Context,
+	cluster *vitistackv1alpha1.KubernetesCluster,
+	state *ClusterUpgradeState,
+	node *NodeUpgradeState,
+) *RollingUpgradeResult {
+	status, err := e.readinessChecker.IsNodeReady(ctx, cluster, node.NodeName)
+	if err != nil {
+		vlog.Warn(fmt.Sprintf("Error checking kubelet version: node=%s error=%v", node.NodeName, err))
+		return &RollingUpgradeResult{
+			Continue:     true,
+			RequeueAfter: 30 * time.Second,
+			Message:      fmt.Sprintf("Waiting for node %s to register with Kubernetes", node.NodeName),
+		}
+	}
+
+	if !sameVersion(status.KubeletVersion, state.TargetVersion) {
+		return &RollingUpgradeResult{
+			Continue:     true,
+			RequeueAfter: 15 * time.Second,
+			Message: fmt.Sprintf("Waiting for the kubelet on %s to report %s (now %q)",
+				node.NodeName, state.TargetVersion, status.KubeletVersion),
+		}
+	}
+
+	if err := e.stateManager.MarkNodeUpgradeCompleted(ctx, cluster, node.NodeName); err != nil {
+		vlog.Warn(fmt.Sprintf("Failed to mark node upgrade completed: %v", err))
+	}
+	vlog.Info(fmt.Sprintf("Kubelet runs the target version: %s node=%s version=%s",
+		clusterlog.Tag(cluster), node.NodeName, status.KubeletVersion))
+	return &RollingUpgradeResult{
+		Continue:     true,
+		RequeueAfter: 5 * time.Second,
+		Message:      fmt.Sprintf("Kubelet on %s runs %s, waiting for node ready", node.NodeName, status.KubeletVersion),
 	}
 }
 
