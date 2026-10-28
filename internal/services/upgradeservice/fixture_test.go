@@ -160,3 +160,12 @@ func condition(kc *vitistackv1alpha1.KubernetesCluster, condType string) *vitist
 	}
 	return nil
 }
+
+func (f *fixture) secretVersion(t *testing.T) string {
+	t.Helper()
+	s := &corev1.Secret{}
+	if err := f.client.Get(context.Background(), types.NamespacedName{Name: fixtureClusterID, Namespace: fixtureNamespace}, s); err != nil {
+		t.Fatal(err)
+	}
+	return s.ResourceVersion
+}

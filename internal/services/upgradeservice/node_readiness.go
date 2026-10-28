@@ -36,9 +36,10 @@ func NewNodeReadinessChecker(supervisorClient client.Client, secretGetter Secret
 
 // NodeReadinessStatus contains the readiness status of a node
 type NodeReadinessStatus struct {
-	Ready       bool
-	Schedulable bool // Not cordoned
-	Message     string
+	Ready          bool
+	Schedulable    bool   // Not cordoned
+	KubeletVersion string // As the node reports it, e.g. "v1.36.5"; empty if the node was not found
+	Message        string
 }
 
 // IsNodeReady checks if a node is ready in the target Kubernetes cluster.
@@ -64,8 +65,9 @@ func (c *NodeReadinessChecker) IsNodeReady(ctx context.Context, cluster *vitista
 	schedulable := !node.Spec.Unschedulable
 
 	status := &NodeReadinessStatus{
-		Ready:       ready,
-		Schedulable: schedulable,
+		Ready:          ready,
+		Schedulable:    schedulable,
+		KubeletVersion: node.Status.NodeInfo.KubeletVersion,
 	}
 
 	switch {

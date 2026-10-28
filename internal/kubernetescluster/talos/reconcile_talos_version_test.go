@@ -178,10 +178,10 @@ func TestVersionEnforcementSkip(t *testing.T) {
 		wantSkip   bool
 		wantReason string
 	}{
-		{name: "feature flag off", enabled: false, target: "1.13.10", wantSkip: true, wantReason: "Disabled"},
+		{name: "feature flag off", enabled: false, target: "1.13.12", wantSkip: true, wantReason: "Disabled"},
 		{name: "enabled without a target", enabled: true, target: "", wantSkip: true, wantReason: "NoTarget"},
 		{name: "enabled with a blank target", enabled: true, target: "  ", wantSkip: true, wantReason: "NoTarget"},
-		{name: "enabled with a target", enabled: true, target: "1.13.10", wantSkip: false},
+		{name: "enabled with a target", enabled: true, target: "1.13.12", wantSkip: false},
 	}
 
 	for _, tt := range tests {

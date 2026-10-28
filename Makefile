@@ -120,6 +120,33 @@ gosec: install-security-scanner ## Run gosec security scan (fails on findings)
 govulncheck: install-govulncheck ## Run govulncheck vulnerability scan (fails on findings)
 	$(GOVULNCHECK) ./...
 
+##@ Precheck
+
+.PHONY: fmt-check
+fmt-check: ## Fail if any Go file is not gofmt-formatted (does not modify files).
+	@unformatted=$$(gofmt -l $$(go list -f '{{.Dir}}' ./...)); \
+	if [ -n "$$unformatted" ]; then \
+		echo "The following files are not gofmt-formatted (run 'make fmt'):"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+
+.PHONY: tidy-check
+tidy-check: ## Fail if go.mod/go.sum are not tidy (does not modify files).
+	@go mod tidy -diff || { echo "go.mod/go.sum are not tidy (run 'go mod tidy')"; exit 1; }
+
+.PHONY: helm-lint
+helm-lint: ## Lint the Helm chart (skipped if helm is not installed).
+	@if command -v helm >/dev/null 2>&1; then \
+		helm lint charts/talos-operator; \
+	else \
+		echo "helm not installed, skipping helm-lint"; \
+	fi
+
+.PHONY: precheck
+precheck: fmt-check tidy-check vet lint-config lint helm-lint build test gosec govulncheck ## Run all checks before committing.
+	@echo "All prechecks passed!"
+
 .PHONY: go-security-scan-docker
 go-security-scan-docker: ## Run gosec scan using official container (alternative if local install fails)
 	@echo "Running gosec via Docker container..."; \

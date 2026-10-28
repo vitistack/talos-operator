@@ -73,6 +73,23 @@ var (
 	// (likely the previous upgrade failed). Default: 5. Min: 1.
 	TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES = "TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
 
+	// UPGRADE_NODE_TIMEOUT_MINUTES bounds how long one node of an orchestrated
+	// Talos or Kubernetes upgrade may take, from the operator starting on it
+	// until it is Ready again. A node that runs over fails the upgrade, which
+	// then waits for resume or reset. A healthy node takes 4-8 minutes.
+	// Default: 15. Min: 1.
+	UPGRADE_NODE_TIMEOUT_MINUTES = "UPGRADE_NODE_TIMEOUT_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
+
+	// UPGRADE_ETCD_HEALTHY_TIMEOUT_MINUTES is how long an orchestrated upgrade
+	// waits for etcd to be healthy on every control plane before it takes the
+	// next control plane down. Runs out: the upgrade fails. Default: 5. Min: 1.
+	UPGRADE_ETCD_HEALTHY_TIMEOUT_MINUTES = "UPGRADE_ETCD_HEALTHY_TIMEOUT_MINUTES" //nolint:revive,stylecheck // consistent with other env var constants
+
+	// UPGRADE_NODE_SETTLE_SECONDS is the pause between one node of an
+	// orchestrated upgrade becoming Ready and the next node starting.
+	// Default: 60. Min: 0.
+	UPGRADE_NODE_SETTLE_SECONDS = "UPGRADE_NODE_SETTLE_SECONDS" //nolint:revive,stylecheck // consistent with other env var constants
+
 	VITISTACK_NAME           = "VITISTACK_NAME"
 	NAME_KUBERNETES_PROVIDER = "NAME_KUBERNETES_PROVIDER"
 

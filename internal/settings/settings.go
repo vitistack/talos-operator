@@ -23,10 +23,10 @@ func Init() {
 	viper.SetDefault(consts.TENANT_CONFIGMAP_NAME, "talos-tenant-config")
 	viper.SetDefault(consts.TENANT_CONFIGMAP_NAMESPACE, "default")
 	viper.SetDefault(consts.TENANT_CONFIGMAP_DATA_KEY, "config.yaml")
-	viper.SetDefault(consts.TALOS_VERSION, "v1.13.10")
-	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.36.3")
-	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.10")
-	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.10")
+	viper.SetDefault(consts.TALOS_VERSION, "v1.13.12")
+	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.36.6")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.12")
+	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.12")
 	// TALOS_REQUIRED_EXTENSIONS lists Talos system extensions every node must
 	// have installed. Must stay in sync with the schematic baked into the
 	// TALOS_VM_INSTALL_IMAGE_* default above (factory schematic
@@ -57,6 +57,15 @@ func Init() {
 	// already mid-upgrade. Drain is the long pole; 5 minutes is comfortable.
 	viper.SetDefault(consts.TALOS_VERSION_ENFORCE_COOLDOWN_MINUTES, 5)
 
+	// Orchestrated upgrade pacing (talos-target / kubernetes-target). A node
+	// that is not Ready again within UPGRADE_NODE_TIMEOUT_MINUTES fails the
+	// upgrade; a control plane is only taken down once etcd is healthy on
+	// every control plane, waiting at most UPGRADE_ETCD_HEALTHY_TIMEOUT_MINUTES;
+	// and UPGRADE_NODE_SETTLE_SECONDS separates one node from the next.
+	viper.SetDefault(consts.UPGRADE_NODE_TIMEOUT_MINUTES, 15)
+	viper.SetDefault(consts.UPGRADE_ETCD_HEALTHY_TIMEOUT_MINUTES, 5)
+	viper.SetDefault(consts.UPGRADE_NODE_SETTLE_SECONDS, 60)
+
 	// Endpoint mode configuration
 	// Valid values: "none", "networkconfiguration", "talosvip", "custom"
 	// Default: "networkconfiguration" (uses ControlPlaneVirtualSharedIP from NetworkNamespace)
@@ -72,7 +81,7 @@ func Init() {
 	// Default: "bootimage" (uses the BOOT_IMAGE URL below as the Talos ISO).
 	// Set to "pxe" to provision via netboot instead.
 	viper.SetDefault(consts.BOOT_IMAGE_SOURCE, string(consts.DefaultBootImageSource))
-	viper.SetDefault(consts.BOOT_IMAGE, "https://factory.talos.dev/image/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e/v1.13.10/nocloud-amd64.iso")
+	viper.SetDefault(consts.BOOT_IMAGE, "https://factory.talos.dev/image/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e/v1.13.12/nocloud-amd64.iso")
 
 	dotenv.LoadDotEnv()
 	viper.AutomaticEnv()

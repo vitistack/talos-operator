@@ -12,7 +12,7 @@ import (
 // networkNamespaceName existed, a full Update is rejected and the finished
 // upgrade could never clear its talos-target (d-amk-003, 2026-09-17).
 func TestRemoveAnnotation_LegacyClusterWithoutNetworkNamespaceName(t *testing.T) {
-	f := newFixture(t, legacyCluster(map[string]string{consts.TalosTargetAnnotation: "v1.13.10"}))
+	f := newFixture(t, legacyCluster(map[string]string{consts.TalosTargetAnnotation: "v1.13.12"}))
 	kc := f.cluster(t)
 
 	if err := f.service.RemoveAnnotation(context.Background(), kc, consts.TalosTargetAnnotation); err != nil {
@@ -40,7 +40,7 @@ func TestSetAnnotation_LegacyClusterWithoutNetworkNamespaceName(t *testing.T) {
 // A failed write must leave the held object as it was; otherwise later code in
 // the same pass believes the annotation is gone when it is still stored.
 func TestRemoveAnnotation_FailedWriteKeepsHeldAnnotation(t *testing.T) {
-	f := newFixture(t, legacyCluster(map[string]string{consts.TalosTargetAnnotation: "v1.13.10"}))
+	f := newFixture(t, legacyCluster(map[string]string{consts.TalosTargetAnnotation: "v1.13.12"}))
 	kc := f.cluster(t)
 	f.failPatch = errors.New("apiserver unavailable")
 
@@ -48,8 +48,8 @@ func TestRemoveAnnotation_FailedWriteKeepsHeldAnnotation(t *testing.T) {
 		t.Fatal("RemoveAnnotation succeeded, want error")
 	}
 
-	if got := kc.Annotations[consts.TalosTargetAnnotation]; got != "v1.13.10" {
-		t.Fatalf("held talos-target = %q after failed write, want %q", got, "v1.13.10")
+	if got := kc.Annotations[consts.TalosTargetAnnotation]; got != "v1.13.12" {
+		t.Fatalf("held talos-target = %q after failed write, want %q", got, "v1.13.12")
 	}
 }
 

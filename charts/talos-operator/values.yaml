@@ -49,7 +49,7 @@ customEndpoint: ""
 bootImageSource: "bootimage"
 
 # Boot image URL (only used when bootImageSource is "bootimage")
-bootImage: "https://factory.talos.dev/image/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e/v1.13.10/nocloud-amd64.iso"
+bootImage: "https://factory.talos.dev/image/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e/v1.13.12/nocloud-amd64.iso"
 
 # Log configuration
 logLevel: "info"
@@ -72,12 +72,12 @@ tenant:
 
 # Talos configuration
 talos:
-  version: "v1.13.10"
-  defaultKubernetesVersion: "1.36.3"
+  version: "v1.13.12"
+  defaultKubernetesVersion: "1.36.6"
   predictableNetworkNames: true
   vmInstallImage:
-    kubevirt: "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.10"
-    default: "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.10"
+    kubevirt: "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.12"
+    default: "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.12"
   # Talos system extensions every node must have. The operator queries each
   # reachable node and triggers a Talos upgrade with vmInstallImage.<provider>
   # (or vmInstallImage.default as fallback) when one of these is missing — the
@@ -117,6 +117,19 @@ talos:
   # recovery; once it elapses with the node still on the wrong version the
   # operator re-triggers (likely the previous upgrade failed). Min: 1.
   versionEnforceCooldownMinutes: 5
+
+# Orchestrated Talos/Kubernetes upgrades (talos-target / kubernetes-target
+# annotations). Nodes are upgraded one at a time, control planes first.
+upgrade:
+  # Minutes one node may take, from the operator starting on it until it is
+  # Ready again. A node that runs over fails the upgrade; it then waits for
+  # the resume or reset annotation. A healthy node takes 4-8 minutes. Min: 1.
+  nodeTimeoutMinutes: 15
+  # Minutes to wait for etcd to be healthy on every control plane before the
+  # next control plane is taken down. Runs out: the upgrade fails. Min: 1.
+  etcdHealthyTimeoutMinutes: 5
+  # Seconds to pause after a node is Ready before starting the next one.
+  nodeSettleSeconds: 60
 
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
