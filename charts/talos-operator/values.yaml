@@ -73,7 +73,7 @@ tenant:
 # Talos configuration
 talos:
   version: "v1.13.12"
-  defaultKubernetesVersion: "1.36.5"
+  defaultKubernetesVersion: "1.36.6"
   predictableNetworkNames: true
   vmInstallImage:
     kubevirt: "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.12"

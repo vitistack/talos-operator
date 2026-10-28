@@ -24,7 +24,7 @@ func Init() {
 	viper.SetDefault(consts.TENANT_CONFIGMAP_NAMESPACE, "default")
 	viper.SetDefault(consts.TENANT_CONFIGMAP_DATA_KEY, "config.yaml")
 	viper.SetDefault(consts.TALOS_VERSION, "v1.13.12")
-	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.36.5")
+	viper.SetDefault(consts.DEFAULT_KUBERNETES_VERSION, "1.36.6")
 	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_KUBEVIRT, "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.12")
 	viper.SetDefault(consts.TALOS_VM_INSTALL_IMAGE_DEFAULT, "factory.talos.dev/nocloud-installer/060a945412986c731a206fa0dd0b736e1363e94a38c1f3eb62dc38e63933ba8e:v1.13.12")
 	// TALOS_REQUIRED_EXTENSIONS lists Talos system extensions every node must
