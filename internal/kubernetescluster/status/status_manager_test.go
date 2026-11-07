@@ -205,8 +205,8 @@ func TestUpdateKubernetesClusterStatus_FirstPassRecordsEverything(t *testing.T) 
 	if got.Status.Phase != "Ready" {
 		t.Errorf("phase = %q, want Ready", got.Status.Phase)
 	}
-	if len(got.Status.Conditions) != 5 {
-		t.Errorf("got %d conditions, want 5: %+v", len(got.Status.Conditions), got.Status.Conditions)
+	if len(got.Status.Conditions) != 6 {
+		t.Errorf("got %d conditions, want 6: %+v", len(got.Status.Conditions), got.Status.Conditions)
 	}
 	if !got.Status.State.Created.Time.Equal(kubeSystemCreated) {
 		t.Errorf("state.created = %v, want %v", got.Status.State.Created.Time, kubeSystemCreated)
@@ -467,5 +467,61 @@ func TestUpdateKubernetesClusterStatus_CreatedTimeConflictIsRetried(t *testing.T
 	}
 	if got.Annotations[kubeSystemUIDK] != kubeSystemUID {
 		t.Errorf("kube-system-uid annotation = %q, want %q", got.Annotations[kubeSystemUIDK], kubeSystemUID)
+	}
+}
+
+// nodesReadyCondition returns the NodesReady condition's status, or "" when it is absent.
+func nodesReadyCondition(kc *vitistackv1alpha1.KubernetesCluster) string {
+	for _, c := range kc.Status.Conditions {
+		if c.Type == CondNodesReady {
+			return c.Status
+		}
+	}
+	return ""
+}
+
+func TestUpdateKubernetesClusterStatus_NodesReadyFollowsHealthFlag(t *testing.T) {
+	t.Parallel()
+	m, c, _ := newTestManager(t, fiveNodeCluster()...)
+	ctx := context.Background()
+
+	setFlag := func(v string) {
+		t.Helper()
+		s := &corev1.Secret{}
+		if err := c.Get(ctx, types.NamespacedName{Name: testClusterID, Namespace: testNamespace}, s); err != nil {
+			t.Fatal(err)
+		}
+		s.Data["nodes_health_ready"] = []byte(v)
+		if err := c.Update(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	steps := []struct {
+		flag, wantPhase, wantCond string
+	}{
+		{"false", phaseWaitingForNodes, condStatusFalse}, // init flow short-circuited before every node was Ready
+		{"true", phaseReady, condStatusTrue},             // the refresh path flips the flag
+		{"false", phaseWaitingForNodes, condStatusFalse}, // a node goes NotReady later
+	}
+	for _, st := range steps {
+		setFlag(st.flag)
+		if err := m.UpdateKubernetesClusterStatus(ctx, getCluster(t, c)); err != nil {
+			t.Fatal(err)
+		}
+		got := getCluster(t, c)
+		if got.Status.Phase != st.wantPhase || nodesReadyCondition(got) != st.wantCond {
+			t.Errorf("nodes_health_ready=%s: phase/NodesReady = %q/%q, want %q/%q",
+				st.flag, got.Status.Phase, nodesReadyCondition(got), st.wantPhase, st.wantCond)
+		}
+	}
+}
+
+func TestCondsFromFlags_NoNodesReadyBeforeClusterAccess(t *testing.T) {
+	t.Parallel()
+	for _, c := range condsFromFlags(true, true, true, false, false) {
+		if c.Type == CondNodesReady {
+			t.Errorf("NodesReady set before the cluster is reachable: %+v", c)
+		}
 	}
 }

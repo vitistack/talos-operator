@@ -9,6 +9,7 @@ import (
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/services/secretservice"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 )
@@ -690,7 +691,7 @@ func (t *TalosManager) stageFinalizeCluster(
 	}
 
 	_ = t.statusManager.SetPhase(ctx, cluster, "Ready")
-	_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "True", "Ready", fmt.Sprintf("All %d nodes are configured and Ready", len(allMachines)))
+	_ = t.statusManager.SetCondition(ctx, cluster, status.CondNodesReady, "True", status.NodesReadyReason, status.NodesReadyMessage)
 	vlog.Info("Stage 5 complete: Cluster is ready: " + clusterLogTag(cluster))
 
 	return nil

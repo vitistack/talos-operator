@@ -43,7 +43,15 @@ const (
 	PhaseReady = phaseReady
 
 	// Condition status string used by metav1-style status conditions.
-	condStatusTrue = "True"
+	condStatusTrue  = "True"
+	condStatusFalse = "False"
+
+	// NodesReady condition, written here from nodes_health_ready and by the init flow's node-health stages.
+	CondNodesReady      = "NodesReady"
+	NodesReadyReason    = "Ready"
+	NodesReadyMessage   = "All expected nodes are Ready"
+	NodesWaitingReason  = "Waiting"
+	NodesWaitingMessage = "Waiting for all expected nodes to join and become Ready"
 
 	// Field names of the unstructured cluster-state map under
 	// .status.state.cluster.* — used as map keys when scaffolding the
@@ -127,7 +135,7 @@ func deriveStatusFromSecret(secret *corev1.Secret) (string, []condSpec, []byte) 
 	nodesHealthReady := getSecretFlag(secret, "nodes_health_ready")
 
 	phase := phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess, nodesHealthReady)
-	conds := condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess)
+	conds := condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess, nodesHealthReady)
 	return phase, conds, secret.Data["kube.config"]
 }
 
@@ -165,7 +173,7 @@ func phaseFromFlags(cfgPresent, applied, bootstrapped, clusterAccess, nodesHealt
 	return PhasePending
 }
 
-func condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) []condSpec {
+func condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess, nodesHealthReady bool) []condSpec {
 	conds := []condSpec{
 		// Created condition is always true once the cluster resource exists
 		{"Created", condStatusTrue, "ClusterCreated", "Kubernetes cluster resource has been created"},
@@ -181,6 +189,14 @@ func condsFromFlags(cfgPresent, applied, bootstrapped, clusterAccess bool) []con
 	}
 	if clusterAccess {
 		conds = append(conds, condSpec{"KubeconfigAvailable", condStatusTrue, "Persisted", "Kubeconfig stored in Secret"})
+	}
+	// Follows the same flag as the Ready phase, so the two cannot disagree once the init flow is short-circuited.
+	if cfgPresent && applied && bootstrapped && clusterAccess {
+		if nodesHealthReady {
+			conds = append(conds, condSpec{CondNodesReady, condStatusTrue, NodesReadyReason, NodesReadyMessage})
+		} else {
+			conds = append(conds, condSpec{CondNodesReady, condStatusFalse, NodesWaitingReason, NodesWaitingMessage})
+		}
 	}
 	return conds
 }
