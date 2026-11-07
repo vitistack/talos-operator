@@ -7,6 +7,7 @@ import (
 
 	"github.com/vitistack/common/pkg/loggers/vlog"
 	vitistackv1alpha1 "github.com/vitistack/common/pkg/v1alpha1"
+	"github.com/vitistack/talos-operator/internal/kubernetescluster/status"
 	"github.com/vitistack/talos-operator/internal/services/talosclientservice"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -81,7 +82,7 @@ func (t *TalosManager) stageWaitNodesHealthy(
 	}
 
 	_ = t.statusManager.SetMessage(ctx, cluster, "Waiting for all nodes to become Ready")
-	_ = t.statusManager.SetCondition(ctx, cluster, "NodesReady", "False", "Waiting", "Waiting for all expected nodes to join and become Ready")
+	_ = t.statusManager.SetCondition(ctx, cluster, status.CondNodesReady, "False", status.NodesWaitingReason, status.NodesWaitingMessage)
 
 	ready, reason, err := t.checkAllExpectedNodesReady(ctx, cluster, expected)
 	if err != nil {
